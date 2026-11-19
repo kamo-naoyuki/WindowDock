@@ -66,6 +66,6 @@ final class WindowGeometryTests: XCTestCase {
         let ignored = WindowGeometry.trackMinimums([9: CGSize(width: 500, height: 500)], columns: 2, rows: 1)
         XCTAssertEqual(ignored?.columns, [0, 0])
         XCTAssertNil(WindowGeometry.trackMinimums([0: CGSize(width: -1, height: 10)], columns: 1, rows: 1))
-        XCTAssertNil(WindowGeometry.trackMinimums([0: CGSize(width: .infinity, height: 10)], columns: 1, rows: 1))
+        XCTAssertNil(WindowGeometry.trackMinimums([0: CGSize(width: CGFloat.infinity, height: 10)], columns: 1, rows: 1))
     }
 }
