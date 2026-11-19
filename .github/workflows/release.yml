@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal app
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          app=dist/WindowDock.app
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/WindowDock" "$app/Contents/MacOS/"
+          cp Support/Info.plist "$app/Contents/Info.plist"
+          cp Support/AppIcon.icns "$app/Contents/Resources/"
+          codesign --force --sign - "$app"
+          lipo -info "$app/Contents/MacOS/WindowDock"
+      - name: Package
+        run: |
+          bash build-dmg.sh "${GITHUB_REF_NAME}"
+          ditto -c -k --keepParent dist/WindowDock.app "dist/WindowDock-${GITHUB_REF_NAME}.zip"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.zip
+          generate_release_notes: true

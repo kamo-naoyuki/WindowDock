@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="120" y1="96" x2="900" y2="932" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#356bca"/>
+      <stop offset=".52" stop-color="#183d86"/>
+      <stop offset="1" stop-color="#101c47"/>
+    </linearGradient>
+    <linearGradient id="window" x1="235" y1="275" x2="775" y2="735" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f8fcff"/>
+      <stop offset="1" stop-color="#c5ddf6"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="270" y1="390" x2="754" y2="694" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#73b9f4"/>
+      <stop offset="1" stop-color="#4382cf"/>
+    </linearGradient>
+    <filter id="shadow" x="-35%" y="-35%" width="170%" height="180%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="25"/>
+      <feOffset dy="18"/>
+      <feComponentTransfer><feFuncA type="linear" slope=".28"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="206" fill="url(#background)"/>
+  <rect x="68" y="68" width="888" height="888" rx="202" fill="none" stroke="#fff" stroke-opacity=".16" stroke-width="8"/>
+  <g filter="url(#shadow)">
+    <rect x="250" y="206" width="544" height="435" rx="49" fill="#80b8ef" opacity=".66" transform="rotate(8 522 423)"/>
+    <rect x="176" y="268" width="604" height="460" rx="52" fill="#b6d8fa" opacity=".8" transform="rotate(-7 478 498)"/>
+    <rect x="188" y="294" width="648" height="450" rx="52" fill="url(#window)"/>
+    <path d="M240 294h544a52 52 0 0 1 52 52v51H188v-51a52 52 0 0 1 52-52z" fill="#edf6ff"/>
+    <circle cx="238" cy="346" r="11" fill="#f47e80"/>
+    <circle cx="272" cy="346" r="11" fill="#f4c769"/>
+    <circle cx="306" cy="346" r="11" fill="#70cba6"/>
+    <path d="M371 397v-43a24 24 0 0 1 24-24h105a24 24 0 0 1 24 24v43z" fill="#b8d5f3"/>
+    <path d="M530 397v-43a24 24 0 0 1 24-24h105a24 24 0 0 1 24 24v43z" fill="#d4e7f9"/>
+    <rect x="219" y="421" width="284" height="292" rx="22" fill="url(#panel)"/>
+    <rect x="521" y="421" width="284" height="292" rx="22" fill="#8fc8f4"/>
+    <rect x="250" y="456" width="155" height="13" rx="6.5" fill="#fff" opacity=".72"/>
+    <rect x="250" y="487" width="208" height="10" rx="5" fill="#fff" opacity=".38"/>
+    <rect x="250" y="513" width="180" height="10" rx="5" fill="#fff" opacity=".38"/>
+    <rect x="552" y="456" width="131" height="13" rx="6.5" fill="#fff" opacity=".72"/>
+    <rect x="552" y="487" width="200" height="10" rx="5" fill="#fff" opacity=".38"/>
+    <rect x="552" y="513" width="167" height="10" rx="5" fill="#fff" opacity=".38"/>
+  </g>
+</svg>
