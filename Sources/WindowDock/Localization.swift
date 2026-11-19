@@ -53,6 +53,7 @@ private let translations: [String: [String]] = [
     "タイトルの取得": ["getting the title", "获取标题", "제목 가져오기", "obtener el título"],
     "ウィンドウ一覧の変換": ["converting the window list", "转换窗口列表", "창 목록 변환", "convertir la lista de ventanas"],
 
+    "アップデートを確認…": ["Check for Updates…", "检查更新…", "업데이트 확인…", "Buscar actualizaciones…"],
     "WindowDock を終了": ["Quit WindowDock", "退出 WindowDock", "WindowDock 종료", "Salir de WindowDock"],
     "ウィンドウ": ["Window", "窗口", "윈도우", "Ventana"],
     "ウィンドウを追加…": ["Add Window…", "添加窗口…", "창 추가…", "Añadir ventana…"],

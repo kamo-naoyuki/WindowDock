@@ -1,6 +1,6 @@
 # WindowDock
 
-WindowDock is a native macOS app that gathers windows from multiple apps into a single workspace with tabs. It requires macOS 13 or later. It uses no external libraries, no network access, and no screen recording.
+WindowDock is a native macOS app that gathers windows from multiple apps into a single workspace with tabs. It requires macOS 13 or later. It does not use screen recording. The only network access is the update check by [Sparkle](https://sparkle-project.org), which fetches `appcast.xml` from GitHub Releases.
 
 The UI language follows the macOS preferred-language list (System Settings → General → Language & Region), chosen at launch: Japanese, English, Simplified Chinese, Korean, and Spanish. Other languages fall back to English. Strings live in `Sources/WindowDock/Localization.swift`.
 
@@ -18,7 +18,13 @@ open dist/WindowDock.app
 
 ### Distribution
 
-Download the DMG from [Releases](https://github.com/kamo-naoyuki/WindowDock/releases). Release builds are produced by [release.yml](.github/workflows/release.yml). The app is not notarized, so on first launch right-click it and choose "Open".
+Download the DMG from [Releases](https://github.com/kamo-naoyuki/WindowDock/releases). Release builds are produced by [release.yml](.github/workflows/release.yml). The app is not notarized, so on first launch right-click it and choose "Open" (or run `xattr -cr /Applications/WindowDock.app`).
+
+### Updates
+
+WindowDock checks for updates automatically and via **WindowDock → Check for Updates…**. Updates are verified with an EdDSA signature. Releases need the repository secret `SPARKLE_PRIVATE_KEY` (the exported private key; create it with Sparkle's `generate_keys` and put the matching public key in `SUPublicEDKey` in [Info.plist](Support/Info.plist)). Pushing a `v*` tag builds the release, stamps the version from the tag, and uploads `appcast.xml`.
+
+The code signature requirement is fixed to the bundle identifier, so the Accessibility permission should survive updates.
 
 ### If the permission stops working after a rebuild
 

@@ -1,4 +1,5 @@
 import AppKit
+import Sparkle
 import WindowDockCore
 
 @main
@@ -15,6 +16,7 @@ enum WindowDockApp {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
     private let session = WindowSession()
     private var window: WorkspaceWindow!
     private let workspace = WorkspaceChromeView(frame: .zero)
@@ -101,6 +103,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let menu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        let updateItem = NSMenuItem(title: L("アップデートを確認…"), action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        updateItem.target = updater
+        appMenu.addItem(updateItem)
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: L("WindowDock を終了"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         menu.addItem(appItem)

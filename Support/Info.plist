@@ -20,6 +20,12 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/kamo-naoyuki/WindowDock/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>AaIjRSDW1THbUeGsx4GUoEKoEzmnEFlBCkJFsals1bg=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>
