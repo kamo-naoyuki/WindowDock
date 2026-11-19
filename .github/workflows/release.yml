@@ -21,7 +21,7 @@ jobs:
           cp "$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/WindowDock" "$app/Contents/MacOS/"
           cp Support/Info.plist "$app/Contents/Info.plist"
           cp Support/AppIcon.icns "$app/Contents/Resources/"
-          codesign --force --sign - "$app"
+          codesign --force --sign - -r='designated => identifier "local.WindowDock"' "$app"
           lipo -info "$app/Contents/MacOS/WindowDock"
       - name: Package
         run: |
