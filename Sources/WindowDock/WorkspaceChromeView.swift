@@ -1,107 +1,6 @@
 import AppKit
 import QuartzCore
 
-private let workspaceTabDragType = NSPasteboard.PasteboardType("local.windowdock.tab-move")
-
-private final class WorkspaceTabButton: NSButton, NSDraggingSource {
-    var onDragBegin: ((WorkspaceTabButton, String) -> Void)?
-    var onDragEnd: (() -> Void)?
-    var makeContextMenu: (() -> NSMenu)?
-
-    override func menu(for event: NSEvent) -> NSMenu? { makeContextMenu?() }
-
-    override func mouseDown(with event: NSEvent) {
-        guard isEnabled else { return }
-        let start = convert(event.locationInWindow, from: nil)
-        highlight(true)
-        while let next = NSApp.nextEvent(
-            matching: [.leftMouseDragged, .leftMouseUp],
-            until: .distantFuture, inMode: .eventTracking, dequeue: true
-        ) {
-            let point = convert(next.locationInWindow, from: nil)
-            if next.type == .leftMouseDragged && hypot(point.x - start.x, point.y - start.y) >= 4 {
-                highlight(false)
-                let token = UUID().uuidString
-                let item = NSPasteboardItem()
-                item.setString(token, forType: workspaceTabDragType)
-                let draggingItem = NSDraggingItem(pasteboardWriter: item)
-                let image = NSImage(size: bounds.size)
-                image.lockFocus()
-                NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
-                NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
-                (title as NSString).draw(in: bounds.insetBy(dx: 5, dy: 5), withAttributes: [
-                    .font: NSFont.systemFont(ofSize: 12),
-                    .foregroundColor: NSColor.white
-                ])
-                image.unlockFocus()
-                draggingItem.setDraggingFrame(bounds, contents: image)
-                onDragBegin?(self, token)
-                beginDraggingSession(with: [draggingItem], event: next, source: self)
-                return
-            }
-            if next.type == .leftMouseUp {
-                highlight(false)
-                if bounds.contains(point) { performClick(nil) }
-                return
-            }
-            highlight(bounds.contains(point))
-        }
-        highlight(false)
-    }
-
-    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-        context == .withinApplication ? .move : []
-    }
-
-    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
-        onDragEnd?()
-    }
-}
-
-private final class WorkspaceTabMoveItem {
-    weak var button: NSButton?
-    init(_ button: NSButton) { self.button = button }
-}
-
-private final class WorkspaceTabDropOverlay: NSView {
-    weak var chrome: WorkspaceChromeView?
-    let cellIndex: Int
-
-    init(chrome: WorkspaceChromeView, cellIndex: Int, frame: NSRect) {
-        self.chrome = chrome
-        self.cellIndex = cellIndex
-        super.init(frame: frame)
-        translatesAutoresizingMaskIntoConstraints = false
-        registerForDraggedTypes([workspaceTabDragType])
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.controlBackgroundColor.blended(withFraction: 0.3, of: .controlAccentColor)?.setFill()
-        bounds.fill()
-        let title = L("ここに移動 / 入れ替え") as NSString
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-            .foregroundColor: NSColor.labelColor
-        ]
-        let size = title.size(withAttributes: attributes)
-        title.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
-    }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton) == true ? .move : []
-    }
-
-    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton) == true
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        chrome?.performTabDrop(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton, cell: cellIndex) == true
-    }
-}
-
 enum WorkspaceNotice {
     case information(String)
     case attention(String)
@@ -139,13 +38,13 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     var onActivateCell: ((Int) -> Void)?
     var onPaneLayoutChange: (() -> Void)?
     var onMoveTab: ((Int, Int) -> Void)?
-    let closeButton = makeButton(symbol: "xmark.circle.fill", title: L("閉じる"), width: 18)
-    let minimizeButton = makeButton(symbol: "minus.circle.fill", title: L("最小化"), width: 18)
-    let maximizeButton = makeButton(symbol: "arrow.up.left.and.arrow.down.right.circle.fill", title: L("最大化 / 復元"), width: 18)
+    var onCloseTabs: ((Range<Int>) -> Void)?
     let addButton = makeButton(symbol: "plus", title: L("ウィンドウを追加"), width: 26)
     let permissionButton = makeButton(symbol: "gearshape", title: L("権限設定"), width: 26)
     let columnSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let rowSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let projectButton = NSButton(title: "", target: nil, action: nil)
+    var projectMenu: (() -> NSMenu)?
     private var toolbar: NSView!
     private var hasManagedWindows = false
     private var settingGrid = false
@@ -159,6 +58,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     private let notice = NSTextField(labelWithString: "")
     private let empty = WorkspaceEmptyLabel(wrappingLabelWithString: L("別のウィンドウをここへ移動して離す\nまたは、上の ＋ から追加\n\n異なるアプリをタブで切り替えられます。"))
     private var noticeHeight: NSLayoutConstraint!
+    private var noticeCollapse: DispatchWorkItem?
     private var maximumTabWidth: NSLayoutConstraint!
 
     override init(frame: NSRect) {
@@ -191,14 +91,14 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         return button
     }
 
+    @objc private func showProjectMenu() {
+        projectMenu?().popUp(positioning: nil, at: NSPoint(x: 0, y: projectButton.bounds.height), in: projectButton)
+    }
+
     private func build() {
-        closeButton.contentTintColor = .systemRed
-        minimizeButton.contentTintColor = .systemYellow
-        maximizeButton.contentTintColor = .systemGreen
-        maximizeButton.toolTip = L("最大化 / 復元（空き領域のダブルクリックでも切替）")
-        let controls = NSStackView(views: [closeButton, minimizeButton, maximizeButton])
-        controls.spacing = 4
-        controls.setHuggingPriority(.required, for: .horizontal)
+        // Space for the native traffic-light buttons.
+        let controls = NSView()
+        controls.widthAnchor.constraint(equalToConstant: 64).isActive = true
         tabs.orientation = .horizontal
         tabs.spacing = 2
         tabs.alignment = .centerY
@@ -228,7 +128,17 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         dragSpace.toolTip = L("ドラッグして移動 / ダブルクリックで最大化")
         configureSelector(columnSelector, prefix: L("横"))
         configureSelector(rowSelector, prefix: L("縦"))
-        let bar = NSStackView(views: [controls, tabScroll, addButton, dragSpace, columnSelector, rowSelector, permissionButton])
+        projectButton.isBordered = false
+        projectButton.font = .boldSystemFont(ofSize: 12)
+        projectButton.contentTintColor = .secondaryLabelColor
+        projectButton.lineBreakMode = .byTruncatingTail
+        projectButton.alignment = .left
+        projectButton.toolTip = L("プロジェクトの操作")
+        projectButton.target = self
+        projectButton.action = #selector(showProjectMenu)
+        projectButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        projectButton.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
+        let bar = NSStackView(views: [controls, projectButton, tabScroll, addButton, dragSpace, columnSelector, rowSelector, permissionButton])
         toolbar = bar
         bar.spacing = 4
         bar.alignment = .centerY
@@ -436,7 +346,31 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         }
         move.submenu = destinations
         menu.addItem(move)
+        menu.addItem(.separator())
+        let count = tabs.arrangedSubviews.count
+        let closers: [(String, Range<Int>)] = [
+            ("閉じる", button.tag..<button.tag + 1),
+            ("すべて閉じる", 0..<count),
+            ("右側のタブを閉じる", min(button.tag + 1, count)..<count),
+            ("左側のタブを閉じる", 0..<min(button.tag, count))
+        ]
+        for (title, range) in closers {
+            let item = NSMenuItem(title: L(title), action: range.isEmpty ? nil : #selector(closeTabsFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = RangeBox(range)
+            menu.addItem(item)
+        }
         return menu
+    }
+
+    private final class RangeBox: NSObject {
+        let range: Range<Int>
+        init(_ range: Range<Int>) { self.range = range }
+    }
+
+    @objc private func closeTabsFromMenu(_ item: NSMenuItem) {
+        guard let range = (item.representedObject as? RangeBox)?.range else { return }
+        onCloseTabs?(range)
     }
 
     @objc private func moveTabFromMenu(_ item: NSMenuItem) {
@@ -457,13 +391,20 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     }
 
     @discardableResult
-    func appendTab(title: String, selected: Bool, displayed: Bool = false) -> (view: NSView, select: NSButton, close: NSButton) {
+    func appendTab(title: String, icon: NSImage? = nil, selected: Bool, displayed: Bool = false) -> (view: NSView, select: NSButton, close: NSButton) {
         let select = WorkspaceTabButton(title: title, target: nil, action: nil)
         select.onDragBegin = { [weak self] button, token in self?.beginTabDrag(source: button, token: token) }
         select.onDragEnd = { [weak self] in self?.endTabDrag() }
         select.makeContextMenu = { [weak self, weak select] in
             guard let self, let select else { return NSMenu() }
             return self.tabContextMenu(for: select)
+        }
+        if let icon {
+            let small = icon.copy() as! NSImage
+            small.size = NSSize(width: 16, height: 16)
+            select.image = small
+            select.imagePosition = .imageLeading
+            select.imageHugsTitle = true
         }
         select.isBordered = false
         select.font = .systemFont(ofSize: 12, weight: selected ? .semibold : .regular)
@@ -506,7 +447,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
 
     @discardableResult
     func showNotice(_ message: WorkspaceNotice) -> Bool {
-        let height: CGFloat = message.needsAttention ? 22 : 0
+        // Collapse only after a delay: resizing the stage re-triggers a sync that can toggle the notice again (flicker loop).
+        noticeCollapse?.cancel()
+        noticeCollapse = nil
+        let height: CGFloat = message.needsAttention ? 22 : noticeHeight.constant
         let changed = noticeHeight.constant != height
         notice.stringValue = message.text
         notice.toolTip = message.text
@@ -514,6 +458,15 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         if changed {
             noticeHeight.constant = height
             needsLayout = true
+        }
+        if !message.needsAttention, noticeHeight.constant != 0 {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.notice.isHidden, self.noticeHeight.constant != 0 else { return }
+                self.noticeHeight.constant = 0
+                self.needsLayout = true
+            }
+            noticeCollapse = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
         }
         permissionButton.toolTip = L("権限設定\n%@", message.text)
         permissionButton.contentTintColor = message.needsAttention ? .systemOrange : .secondaryLabelColor

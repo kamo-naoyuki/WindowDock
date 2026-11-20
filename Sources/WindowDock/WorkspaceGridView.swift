@@ -19,7 +19,7 @@ final class WorkspaceGridView: NSView {
     private(set) var areas: [NSView] = []
     var onActivate: ((Int) -> Void)?
     var onGeometryChange: (() -> Void)?
-    let dividerThickness: CGFloat = 32
+    let dividerThickness: CGFloat = 8
     private var columnWeights: [CGFloat] = [1]
     private var rowWeights: [CGFloat] = [1]
     private var columnMinimums: [CGFloat] = [0]

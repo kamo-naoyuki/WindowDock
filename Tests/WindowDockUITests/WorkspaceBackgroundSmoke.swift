@@ -858,8 +858,12 @@ enum WorkspaceBackgroundSmoke {
             }
             chrome.showNotice(.information("Keyboard shortcut help"))
             chrome.layoutSubtreeIfNeeded()
-            if chrome.stage.frame != stage {
-                failures.append("compact \(size): normal hints consume content space")
+            let attentionFrame = chrome.stage.frame
+            chrome.showNotice(.attention("Test error: again"))
+            chrome.showNotice(.information("Keyboard shortcut help"))
+            chrome.layoutSubtreeIfNeeded()
+            if chrome.stage.frame != attentionFrame {
+                failures.append("compact \(size): notice toggling resizes the stage (sync feedback loop)")
             }
             print("Compact \(Int(size.width))×\(Int(size.height)): viewport \(Int(stage.width))×\(Int(stage.height)), tabs \(tabTop)pt from top")
         }

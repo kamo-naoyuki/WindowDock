@@ -10,10 +10,11 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     )
     private let table = NSTableView()
     private let addButton = NSButton(title: L("追加"), target: nil, action: nil)
+    private let selectAppButton = NSButton(title: L("選択したアプリの全ウィンドウを選択"), target: nil, action: nil)
     private let candidates: [WindowCandidate]
     private let onSelect: ([WindowCandidate]) -> Void
 
-    init(candidates: [WindowCandidate], failedApplications: [String], onSelect: @escaping ([WindowCandidate]) -> Void) {
+    init(candidates: [WindowCandidate], failedApplications: [String], suggested: [Int] = [], onSelect: @escaping ([WindowCandidate]) -> Void) {
         self.candidates = candidates
         self.onSelect = onSelect
         super.init()
@@ -36,7 +37,9 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         addButton.keyEquivalent = "\r"
         let cancelButton = NSButton(title: L("キャンセル"), target: self, action: #selector(cancel))
         cancelButton.keyEquivalent = "\u{1b}"
-        let buttons = NSStackView(views: [cancelButton, addButton])
+        selectAppButton.target = self
+        selectAppButton.action = #selector(selectAllOfApps)
+        let buttons = NSStackView(views: [selectAppButton, cancelButton, addButton])
         buttons.spacing = 12
         var note: String
         if !failedApplications.isEmpty {
@@ -66,7 +69,12 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             scroll.widthAnchor.constraint(equalTo: content.widthAnchor),
             label.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])
-        if !candidates.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
+        if !suggested.isEmpty {
+            table.selectRowIndexes(IndexSet(suggested), byExtendingSelection: false)
+            table.scrollRowToVisible(suggested[0])
+        } else if !candidates.isEmpty {
+            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
         updateAddButton()
     }
 
@@ -84,6 +92,7 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private func updateAddButton() {
         let count = table.selectedRowIndexes.count
         addButton.isEnabled = count > 0
+        selectAppButton.isEnabled = count > 0
         addButton.title = count > 1 ? L("%d件を追加", count) : L("追加")
     }
 
@@ -94,11 +103,17 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         return label
     }
 
+    @objc private func selectAllOfApps() {
+        let pids = Set(table.selectedRowIndexes.map { candidates[$0].application.processIdentifier })
+        let rows = candidates.indices.filter { pids.contains(candidates[$0].application.processIdentifier) }
+        table.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
+    }
+
     @objc private func add() {
         let selected = table.selectedRowIndexes.map { candidates[$0] }
         guard !selected.isEmpty else { return }
-        panel.sheetParent?.endSheet(panel)
         onSelect(selected)
+        panel.sheetParent?.endSheet(panel)
     }
 
     @objc private func cancel() {

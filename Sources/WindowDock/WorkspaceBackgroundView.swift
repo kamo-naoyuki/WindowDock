@@ -10,22 +10,13 @@ struct WorkspaceResizeEdges: OptionSet {
 }
 
 final class WorkspaceWindow: NSWindow {
-    private var frameBeforeMaximizing: NSRect?
     private(set) var isApplyingWorkspaceFrame = false
     var onWorkspaceFrameChange: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
-    func toggleMaximize() {
-        if let frameBeforeMaximizing {
-            self.frameBeforeMaximizing = nil
-            setWorkspaceFrame(frameBeforeMaximizing)
-        } else if let screen {
-            frameBeforeMaximizing = frame
-            setWorkspaceFrame(screen.visibleFrame)
-        }
-    }
+    func toggleMaximize() { zoom(nil) }
 
     func setWorkspaceFrame(_ frame: NSRect) {
         guard frame != self.frame else { return }

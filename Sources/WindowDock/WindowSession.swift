@@ -152,8 +152,17 @@ final class WindowSession {
         report(errors)
     }
 
-    func select(_ id: UUID) {
-        guard windows.contains(where: { $0.id == id }) else { return }
+    func select(_ id: UUID, activate: Bool = false) {
+        guard let managed = windows.first(where: { $0.id == id }) else { return }
+        defer {
+            if activate {
+                do {
+                    try access.focus(managed.candidate.element, managed.candidate.application)
+                } catch {
+                    WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
         if let index = cellIndex(for: id) {
             activeCell = index
         } else {
@@ -200,7 +209,7 @@ final class WindowSession {
         guard !windows.isEmpty else { return }
         let index = windows.firstIndex { $0.id == selectedID } ?? (offset > 0 ? -1 : 0)
         let next = ((index + offset) % windows.count + windows.count) % windows.count
-        select(windows[next].id)
+        select(windows[next].id, activate: true)
     }
 
     func sync() {
@@ -274,9 +283,16 @@ final class WindowSession {
                 guard let requested = targets[assignments[window.id] ?? 0] else { continue }
                 do {
                     try align(window, to: requested)
-                    let actual = try access.frame(window.candidate.element)
+                    var actual = try access.frame(window.candidate.element)
+                    // Apps animate resizes (e.g. un-maximizing); wait for them to settle before treating the size as a minimum.
+                    var attempts = 0
+                    while !WindowGeometry.fits(actual, requested: requested, tolerance: 1), attempts < 6 {
+                        attempts += 1
+                        Thread.sleep(forTimeInterval: 0.05)
+                        actual = try access.frame(window.candidate.element)
+                    }
                     actualFrames[window.id] = actual
-                    if !WindowGeometry.fits(actual, requested: requested, tolerance: 1) {
+                    if !requested.insetBy(dx: -1, dy: -1).contains(actual) {
                         mismatches.insert(window.id)
                         var minimum = minimumSizes[window.id] ?? .zero
                         if actual.width > requested.width + 1 { minimum.width = max(minimum.width, actual.width) }

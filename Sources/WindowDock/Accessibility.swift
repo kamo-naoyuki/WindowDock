@@ -101,6 +101,14 @@ enum WindowAccess {
             throw WindowAccessError(operation: L("ウィンドウの前面表示"), code: error)
         }
     }
+
+    /// Makes the window the focused one of its application and brings that application to the front.
+    static func focus(_ element: AXUIElement, application: NSRunningApplication) throws {
+        try? set(element, kAXMainAttribute, kCFBooleanTrue)
+        try? set(element, kAXFocusedAttribute, kCFBooleanTrue)
+        try raise(element)
+        application.activate(options: [.activateIgnoringOtherApps])
+    }
 }
 
 struct WindowAccessClient {
@@ -111,6 +119,7 @@ struct WindowAccessClient {
     var isMinimized: (AXUIElement) throws -> Bool = WindowAccess.isMinimized
     var minimize: (AXUIElement, Bool) throws -> Bool = WindowAccess.minimize
     var raise: (AXUIElement) throws -> Void = WindowAccess.raise
+    var focus: (AXUIElement, NSRunningApplication) throws -> Void = WindowAccess.focus
 }
 
 struct WindowCandidate {
