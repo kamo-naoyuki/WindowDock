@@ -6,15 +6,28 @@ macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a
 
 - `swift build` – debug build. `bash build-app.sh` → `dist/WindowDock.app` (signs, embeds Sparkle). `build-dmg.sh` → DMG.
 - `swift test` – runs only `Tests/WindowDockCoreTests` (needs full Xcode for XCTest).
-- `Tests/WindowDockUITests/*Smoke.swift` are manual smoke harnesses against real windows; they are **not** SwiftPM targets.
+- `Tests/WindowDockUITests/*Smoke.swift` are manual smoke harnesses against real windows; they are **not** SwiftPM targets. Run them with `Tests/WindowDockUITests/run-smoke.sh` (compiles them with every app source except `App.swift`; `--tab-move-only` / `--window-drop-only` run subsets). They open real windows, so other apps' windows moving in front can cause hit-test failures.
 - `dist/` is build output; don't edit it.
+
+## Fixing bugs
+
+When you find or are asked to fix a bug, follow this order:
+
+1. Write a test that reproduces the bug: a unit test in `Tests/WindowDockCoreTests` (move the logic into `WindowDockCore` if needed), or a smoke check in `Tests/WindowDockUITests` for AppKit/Accessibility behavior.
+2. Run it against the **unfixed** code and confirm it fails because of the bug.
+3. Fix the code.
+4. Rerun the test (`swift test` or `run-smoke.sh`) and confirm it passes, along with the existing tests.
 
 ## Targets
 
 - `WindowDockCore` (`Sources/WindowDockCore`): pure, AppKit-free logic that is unit-testable. Put new pure logic here and test it.
   - `GridReflow.swift` – how window cells are reflowed when the grid size changes.
   - `WindowGeometry.swift` – frame/geometry math.
+  - `WorkspaceResize.swift` – workspace resize edge/grip hit areas and resized-frame math.
   - `LanguageResolver.swift` – picks the UI language from preferred languages.
+  - `WindowDragTracking.swift` – `WindowServerWindow` and `WorkspaceWindowDragTracker`, which detects foreign-window drags from sampled WindowServer frames.
+  - `WorkspaceTabDragRoute.swift` – decides whether a dragged tab stays in its workspace, transfers to another, or does nothing.
+  - `WindowHitTesting.swift` – finds the visible workspace under a dragged window.
 - `WindowDock` (`Sources/WindowDock`): the app (depends on Core and Sparkle).
 
 ## Where things are (`Sources/WindowDock`)
@@ -29,7 +42,7 @@ macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a
 | Tab bar, grid selectors, notices, drop-target UI, tab context menu (`WorkspaceChromeView`), `WorkspaceNotice`, `WorkspaceSplitLayout` | `WorkspaceChromeView.swift` |
 | Tab button, tab-move drag session, per-pane tab drop overlay | `WorkspaceTabDrag.swift` |
 | Pane grid layout (`WorkspaceGridSize` up to 4×4, `WorkspaceGridView`) | `WorkspaceGridView.swift` |
-| Ctrl+Tab shortcut context, window-drag tracker (`WorkspaceWindowDragTracker`, `WindowServerWindow`) | `WorkspaceInput.swift` |
+| Ctrl+Tab shortcut context, registered-window check for window drags (`WorkspaceWindowDragRegistration`) | `WorkspaceInput.swift` |
 | "Add windows" sheet | `WindowPicker.swift` |
 | Persisted last session (`SavedWorkspace`, `SavedLayout`, stored in UserDefaults key `lastWindows`) | `SavedLayout.swift` |
 | `L()` string lookup, en/zh/ko/es tables (Japanese text is the key) | `Localization.swift` |

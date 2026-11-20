@@ -23,6 +23,52 @@ public enum WindowGeometry {
         abs(actual.height - requested.height) <= tolerance
     }
 
+    public static func confirmedCoverage(for frame: CGRect, renderedFrames: [CGRect]) -> CGRect? {
+        renderedFrames.map { frame.intersection($0) }
+            .filter { !$0.isNull && !$0.isEmpty }
+            .max { $0.width * $0.height < $1.width * $1.height }
+    }
+
+    /// Frames are ordered front-to-back among eligible workspaces, not all application windows.
+    public static func workspaceTabDropTarget(at point: CGPoint, orderedFrames: [CGRect]) -> Int? {
+        orderedFrames.firstIndex { $0.contains(point) } ??
+            orderedFrames.firstIndex {
+                let nearby = $0.insetBy(dx: -24, dy: -24)
+                return point.x >= nearby.minX && point.x <= nearby.maxX &&
+                    point.y >= nearby.minY && point.y <= nearby.maxY
+            }
+    }
+
+    /// Insertion index for a tab dropped at `x`; points scrolled out of view count as the visible strip's edge.
+    public static func tabInsertionIndex(
+        at x: CGFloat, tabFrames: [CGRect], visibleMinX: CGFloat, visibleMaxX: CGFloat
+    ) -> Int {
+        let x = min(max(x, visibleMinX), visibleMaxX)
+        return tabFrames.firstIndex { x < $0.midX } ?? tabFrames.count
+    }
+
+    /// Leading x of the insertion line before tab `index` (or after the last tab), kept inside the visible strip.
+    public static func tabInsertionLineX(
+        index: Int, tabFrames: [CGRect], emptyX: CGFloat,
+        visibleMinX: CGFloat, visibleMaxX: CGFloat, lineWidth: CGFloat
+    ) -> CGFloat {
+        let x = tabFrames.indices.contains(index) ? tabFrames[index].minX : tabFrames.last?.maxX ?? emptyX
+        return min(max(visibleMinX, x), visibleMaxX - lineWidth)
+    }
+
+    public static func tabWidths(preferredWidths: [CGFloat], available: CGFloat) -> [CGFloat] {
+        let preferred = preferredWidths.map { min(200, max(48, ceil($0))) }
+        var remaining = max(available, CGFloat(preferred.count) * 48)
+        for (index, width) in preferred.sorted().enumerated() {
+            let limit = remaining / CGFloat(preferred.count - index)
+            if width >= limit {
+                return preferred.map { min($0, limit) }
+            }
+            remaining -= width
+        }
+        return preferred
+    }
+
     // Water-fill proportional lengths around hard minimums without changing the saved ratios.
     public static func lengths(_ weights: [CGFloat], minimums: [CGFloat], available: CGFloat) -> [CGFloat] {
         guard available > 0 else { return Array(repeating: 0, count: weights.count) }

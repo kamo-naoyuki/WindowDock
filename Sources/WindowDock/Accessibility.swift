@@ -102,12 +102,50 @@ enum WindowAccess {
         }
     }
 
-    /// Makes the window the focused one of its application and brings that application to the front.
+    /// Makes the window the focused one of its application and brings that application to the front
+    /// without bringing its other windows forward.
     static func focus(_ element: AXUIElement, application: NSRunningApplication) throws {
-        try? set(element, kAXMainAttribute, kCFBooleanTrue)
-        try? set(element, kAXFocusedAttribute, kCFBooleanTrue)
-        try raise(element)
-        application.activate(options: [.activateIgnoringOtherApps])
+        try focus(element, applicationElement: AXUIElementCreateApplication(application.processIdentifier),
+                  setAttribute: set, raiseWindow: raise,
+                  activateFrontWindowOnly: { activateFrontWindowOnly(application.processIdentifier) })
+    }
+
+    static func focus(
+        _ element: AXUIElement, applicationElement: AXUIElement,
+        setAttribute: (AXUIElement, String, CFTypeRef) throws -> Void,
+        raiseWindow: (AXUIElement) throws -> Void,
+        activateFrontWindowOnly: () -> Bool
+    ) throws {
+        try? setAttribute(element, kAXMainAttribute, kCFBooleanTrue)
+        try? setAttribute(element, kAXFocusedAttribute, kCFBooleanTrue)
+        // Front-window-only activation brings forward the app's frontmost window, so that must be the target.
+        try raiseWindow(element)
+        if !activateFrontWindowOnly() {
+            // AXFrontmost also activates across apps, but brings every window of the app forward.
+            try setAttribute(applicationElement, kAXFrontmostAttribute, kCFBooleanTrue)
+        }
+        try raiseWindow(element)
+    }
+
+    private typealias GetProcessForPIDFunction = @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+    private typealias SetFrontProcessWithOptionsFunction = @convention(c) (UnsafePointer<ProcessSerialNumber>, OptionBits) -> OSStatus
+
+    // These Process Manager functions still ship in ApplicationServices but are unavailable to Swift.
+    private static let processManager: (GetProcessForPIDFunction, SetFrontProcessWithOptionsFunction)? = {
+        guard let handle = dlopen(nil, RTLD_LAZY),
+              let getProcess = dlsym(handle, "GetProcessForPID"),
+              let setFront = dlsym(handle, "SetFrontProcessWithOptions") else { return nil }
+        return (unsafeBitCast(getProcess, to: GetProcessForPIDFunction.self),
+                unsafeBitCast(setFront, to: SetFrontProcessWithOptionsFunction.self))
+    }()
+
+    /// Activates an application like clicking one of its windows: only its frontmost window comes forward.
+    static func activateFrontWindowOnly(_ processIdentifier: pid_t) -> Bool {
+        guard let (getProcess, setFront) = processManager else { return false }
+        var process = ProcessSerialNumber()
+        guard getProcess(processIdentifier, &process) == noErr else { return false }
+        let frontWindowOnly: OptionBits = 1 // kSetFrontProcessFrontWindowOnly
+        return setFront(&process, frontWindowOnly) == noErr
     }
 }
 

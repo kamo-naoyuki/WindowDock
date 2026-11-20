@@ -1,16 +1,19 @@
 import AppKit
 import QuartzCore
+import WindowDockCore
 
 private final class TabDragInfo: NSObject, NSDraggingInfo {
     let draggingPasteboard: NSPasteboard
     let draggingSource: Any?
-    init(pasteboard: NSPasteboard, source: Any?) {
+    let draggingLocation: NSPoint
+    let draggingDestinationWindow: NSWindow?
+    init(pasteboard: NSPasteboard, source: Any?, window: NSWindow? = nil, location: NSPoint = .zero) {
         draggingPasteboard = pasteboard
         draggingSource = source
+        draggingDestinationWindow = window
+        draggingLocation = location
     }
-    var draggingDestinationWindow: NSWindow? { nil }
     var draggingSourceOperationMask: NSDragOperation { .move }
-    var draggingLocation: NSPoint { .zero }
     var draggedImageLocation: NSPoint { .zero }
     var draggedImage: NSImage? { nil }
     var draggingSequenceNumber: Int { 1 }
@@ -35,16 +38,24 @@ enum WorkspaceBackgroundSmoke {
     @MainActor
     static func main() {
         let application = NSApplication.shared
+        if CommandLine.arguments.contains("--activation-helper") {
+            WindowSessionSmoke.runActivationHelper(application)
+            application.run()
+            return
+        }
         let previous = NSWorkspace.shared.frontmostApplication
         application.setActivationPolicy(.accessory)
         DispatchQueue.main.async {
             let focused = CommandLine.arguments.contains("--tab-move-only")
             let dropOnly = CommandLine.arguments.contains("--window-drop-only")
+            let activationOnly = CommandLine.arguments.contains("--activation-only")
             let failures: [String]
             if dropOnly {
-                failures = WindowSessionSmoke.runWindowDropChecks() + checkNativeWindowDrops()
+                failures = checkNativeWindowDrops()
             } else if focused {
                 failures = checkTabMoveRouting()
+            } else if activationOnly {
+                failures = WindowSessionSmoke.runFrontWindowOnlyActivationChecks()
             } else {
                 failures = WindowSessionSmoke.runChecks() + checkWindowPicker() + runChecks() + checkCompactLayout() +
                     checkGridLayout() + checkTabMoveRouting() + checkNativeWindowDrops()
@@ -56,7 +67,8 @@ enum WorkspaceBackgroundSmoke {
             if failures.isEmpty {
                 print(dropOnly ? "PASS: native WindowServer move/release sampling and nonactivating drop feedback" :
                     focused ? "PASS: tab move routing, context menu and drag overlay cleanup" :
-                    "PASS: window drop sampling/feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking and resize")
+                    activationOnly ? "PASS: front-window-only app activation" :
+                    "PASS: window drop feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking and resize")
                 exit(0)
             }
             for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
@@ -76,6 +88,8 @@ enum WorkspaceBackgroundSmoke {
         let target = NSWindow(contentRect: NSRect(x: 50, y: 80, width: 400, height: 300),
                               styleMask: .titled, backing: .buffered, defer: false)
         target.isReleasedWhenClosed = false
+        // The open animation scales the window, so early WindowServer samples would look like a resize.
+        target.animationBehavior = .none
         defer {
             chrome.hideWindowDropTarget()
             chrome.windowDropPanel?.close()
@@ -114,13 +128,16 @@ enum WorkspaceBackgroundSmoke {
                     failures.append("native sampling lost the original geometry or owning process")
                 }
             } else {
-                failures.append("actual WindowServer geometry changes were not detected without NSEvent delivery")
+                failures.append("actual WindowServer geometry changes were not detected without NSEvent delivery (\(initial.frame) -> \(moved.frame))")
             }
             if case .released = tracker.update(buttonDown: false, point: end, windows: after, ownPID: -1) {} else {
                 failures.append("native sampling did not finish on the first released-button sample")
             }
             let previousKey = NSApp.keyWindow
-            chrome.showWindowDropTarget(hovered: false, requiresPermission: false)
+            let dropPoint = host.convertPoint(toScreen: chrome.addButton.convert(
+                NSPoint(x: chrome.addButton.bounds.midX, y: chrome.addButton.bounds.midY), to: nil
+            ))
+            chrome.showWindowDropTarget(at: dropPoint, requiresPermission: false)
             guard let panel = chrome.windowDropPanel else { return failures + ["drop target panel was not created"] }
             flush()
             if !panel.isVisible || panel.level <= .normal || !panel.ignoresMouseEvents ||
@@ -132,9 +149,9 @@ enum WorkspaceBackgroundSmoke {
             if NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == panel.windowNumber {
                 failures.append("drop indicator intercepted the window move")
             }
-            chrome.showWindowDropTarget(hovered: true, requiresPermission: true)
+            chrome.showWindowDropTarget(at: dropPoint, requiresPermission: true)
             let messages = panel.contentView?.subviews.compactMap { ($0 as? NSTextField)?.stringValue } ?? []
-            if !messages.contains(where: { $0.contains("許可") }) {
+            if !messages.contains(L("追加にはアクセシビリティの許可が必要です")) {
                 failures.append("unauthorized drops showed no permission explanation")
             }
             chrome.hideWindowDropTarget()
@@ -400,16 +417,7 @@ enum WorkspaceBackgroundSmoke {
         checkHit(contentCenter(), expected: target, label: "content after maximize and restore")
 
         let minimum = NSSize(width: 240, height: 180)
-        let clamped = WorkspaceWindow.resizedFrame(
-            from: movedFrame,
-            delta: NSSize(width: 1000, height: 1000),
-            edges: [.left, .bottom],
-            minimumSize: minimum
-        )
-        if clamped.size != minimum || clamped.maxX != movedFrame.maxX || clamped.maxY != movedFrame.maxY {
-            failures.append("left/bottom resize did not clamp while preserving opposite edges")
-        }
-        let expanded = WorkspaceWindow.resizedFrame(
+        let expanded = WorkspaceResize.resizedFrame(
             from: movedFrame,
             delta: NSSize(width: 80, height: -40),
             edges: [.right, .bottom],
@@ -693,6 +701,8 @@ enum WorkspaceBackgroundSmoke {
         moves.removeAll()
         let keyBefore = NSApp.keyWindow
         let activeBefore = NSApp.isActive
+        let paneSourceGroup = tab.select.superview!
+        let paneSourceFrame = paneSourceGroup.frame
         chrome.beginTabDrag(source: tab.select, token: "internal-token")
         flush()
         if NSApp.keyWindow !== keyBefore || NSApp.isActive != activeBefore {
@@ -707,7 +717,9 @@ enum WorkspaceBackgroundSmoke {
         let type = NSPasteboard.PasteboardType("local.windowdock.tab-move")
         board.clearContents()
         board.setString("internal-token", forType: type)
-        let valid = TabDragInfo(pasteboard: board, source: tab.select)
+        let paneArea = chrome.gridAreas[1]
+        let panePoint = paneArea.convert(NSPoint(x: paneArea.bounds.midX, y: paneArea.bounds.midY), to: nil)
+        let valid = TabDragInfo(pasteboard: board, source: tab.select, window: host, location: panePoint)
         let external = TabDragInfo(pasteboard: board, source: nil)
         let wrongSource = TabDragInfo(pasteboard: board, source: NSButton())
         guard let overlay = chrome.gridAreas[1].subviews.last else {
@@ -724,25 +736,49 @@ enum WorkspaceBackgroundSmoke {
         if chrome.performTabDrop(pasteboard: board, source: tab.select, cell: 2) {
             failures.append("drag accepted an invalid destination")
         }
-        if overlay.draggingEntered(valid) != .move || !overlay.prepareForDragOperation(valid) ||
-            !overlay.performDragOperation(valid) {
+        if overlay.draggingEntered(valid) != .move {
             failures.append("drag overlay did not route an internal move")
+        }
+        if paneSourceGroup.alphaValue != 0.4 || chrome.tabDragPreviewPanel?.isVisible != true ||
+            !chrome.tabs.arrangedSubviews.contains(paneSourceGroup) ||
+            paneSourceGroup.frame != paneSourceFrame {
+            failures.append("dragging below the tab row did not pin the source and show the floating preview (alpha=\(paneSourceGroup.alphaValue), preview=\(String(describing: chrome.tabDragPreviewPanel?.isVisible)), inTabs=\(chrome.tabs.arrangedSubviews.contains(paneSourceGroup)), frame=\(paneSourceGroup.frame) vs \(paneSourceFrame))")
+        }
+        if !overlay.prepareForDragOperation(valid) || !overlay.performDragOperation(valid) {
+            failures.append("drag overlay did not route an internal move")
+        }
+        if chrome.tabDragPreviewPanel?.isVisible == true {
+            failures.append("pane drag left the floating preview visible after drop")
         }
         if moves.count != 1 || moves[0].0 != 77 || moves[0].1 != 1 {
             failures.append("drag did not report source tag and destination cell")
         }
-        var swaps: [(Int, Int)] = []
-        chrome.onSwapTabs = { swaps.append(($0, $1)) }
+        var reordered: [[Int]] = []
+        chrome.onReorderTabs = { reordered.append($0) }
+        let floatingGroup = tab.select.superview!
+        let initialX = floatingGroup.frame.minX
+        let targetGroup = targetTab.select.superview!
+        let targetInitialX = targetGroup.frame.minX
         chrome.beginTabDrag(source: tab.select, token: "swap-token")
         board.setString("swap-token", forType: type)
-        let swap = TabDragInfo(pasteboard: board, source: tab.select)
+        let targetPoint = targetTab.select.convert(
+            NSPoint(x: targetTab.select.bounds.maxX - 1, y: targetTab.select.bounds.midY), to: nil
+        )
+        let swap = TabDragInfo(pasteboard: board, source: tab.select, window: host, location: targetPoint)
         if targetTab.select.draggingEntered(swap) != .move ||
-            !targetTab.select.prepareForDragOperation(swap) ||
-            !targetTab.select.performDragOperation(swap) {
-            failures.append("tab drop did not route an internal tab swap")
+            targetTab.select.draggingUpdated(swap) != .move ||
+            floatingGroup.frame.minX == initialX || reordered.count != 0 ||
+            chrome.tabDragPreviewPanel?.isVisible == true ||
+            targetGroup.frame.minX >= targetInitialX ||
+            chrome.tabs.arrangedSubviews.count != 2 {
+            failures.append("the dragged tab and neighboring tab did not move before the drop")
         }
-        if swaps.count != 1 || swaps[0].0 != 77 || swaps[0].1 != 78 {
-            failures.append("tab drop did not report source and target tab tags")
+        if !targetTab.select.prepareForDragOperation(swap) ||
+            !targetTab.select.performDragOperation(swap) {
+            failures.append("tab drop did not finish an internal tab reorder")
+        }
+        if reordered != [[78, 77]] {
+            failures.append("tab drop did not persist the reordered tab position")
         }
         flush()
         for index in 0..<2 {
@@ -778,17 +814,18 @@ enum WorkspaceBackgroundSmoke {
         host.isOpaque = false
         host.backgroundColor = .clear
         let chrome = WorkspaceChromeView(frame: .zero)
+        chrome.workspaceButton.title = "Workspace 1"
         host.contentView = chrome
         defer { host.close() }
         chrome.layoutSubtreeIfNeeded()
         let initialAddFrame = chrome.convert(chrome.addButton.bounds, from: chrome.addButton)
-        let controlsFrame = chrome.convert(chrome.maximizeButton.bounds, from: chrome.maximizeButton)
+        let controlsFrame = chrome.convert(chrome.workspaceButton.bounds, from: chrome.workspaceButton)
         let initialGap = initialAddFrame.minX - controlsFrame.maxX
-        if initialGap < 0 || initialGap > 8 {
-            failures.append("empty tabs: add button is not beside the left window controls, gap=\(initialGap)")
+        if controlsFrame.minX < 64 || initialGap < 0 || initialGap > 8 {
+            failures.append("empty tabs: add button is not beside the workspace name after the traffic lights, gap=\(initialGap)")
         }
         for index in 1...3 {
-            let tab = chrome.appendTab(title: "App \(index)", selected: index == 1).view
+            let tab = chrome.appendTab(title: "Application \(index) — A longer window title", selected: index == 1).view
             chrome.layoutSubtreeIfNeeded()
             let lastFrame = chrome.convert(tab.bounds, from: tab)
             let addFrame = chrome.convert(chrome.addButton.bounds, from: chrome.addButton)
@@ -797,6 +834,7 @@ enum WorkspaceBackgroundSmoke {
                 failures.append("\(index) tabs: add button is not immediately after the last tab, gap=\(gap)")
             }
         }
+        let threeTabWidth = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?.arrangedSubviews.first?.frame.width ?? 0
         chrome.layoutSubtreeIfNeeded()
         let settingsFrame = chrome.convert(chrome.permissionButton.bounds, from: chrome.permissionButton)
         let trailingGap = chrome.bounds.maxX - settingsFrame.maxX
@@ -814,6 +852,11 @@ enum WorkspaceBackgroundSmoke {
         var lastTab: NSView?
         for index in 1...12 {
             lastTab = chrome.appendTab(title: "Application \(index) — A longer window title", selected: index == 12).view
+        }
+        chrome.layoutSubtreeIfNeeded()
+        let twelveTabWidth = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?.arrangedSubviews.first?.frame.width ?? 0
+        if twelveTabWidth >= threeTabWidth {
+            failures.append("tabs did not shrink as the tab count increased")
         }
         for size in [NSSize(width: 1120, height: 760), NSSize(width: 720, height: 480)] {
             host.setFrame(NSRect(origin: host.frame.origin, size: size), display: false)
@@ -844,7 +887,7 @@ enum WorkspaceBackgroundSmoke {
             if tabTop < 0 || tabTop > 2 {
                 failures.append("compact \(size): tabs are not within 2 points of the top, gap=\(tabTop)")
             }
-            for button in [chrome.closeButton, chrome.minimizeButton, chrome.maximizeButton, chrome.addButton, chrome.columnSelector, chrome.rowSelector, chrome.permissionButton] {
+            for button in [chrome.workspaceButton, chrome.addButton, chrome.columnSelector, chrome.rowSelector, chrome.permissionButton] {
                 let rect = chrome.convert(button.bounds, from: button)
                 if rect.isEmpty || !chrome.bounds.contains(rect) || rect.intersects(stage) {
                     failures.append("compact \(size): a window control is clipped or overlaps the viewport")
@@ -884,8 +927,10 @@ enum WorkspaceBackgroundSmoke {
         }
         chrome.clearTabs()
         chrome.layoutSubtreeIfNeeded()
-        if abs(chrome.convert(chrome.addButton.bounds, from: chrome.addButton).minX - initialAddFrame.minX) > 0.1 {
-            failures.append("add button did not return to the left after all tabs were removed")
+        let clearedGap = chrome.convert(chrome.addButton.bounds, from: chrome.addButton).minX -
+            chrome.convert(chrome.workspaceButton.bounds, from: chrome.workspaceButton).maxX
+        if clearedGap < 0 || clearedGap > 8 {
+            failures.append("add button did not return beside the workspace name after all tabs were removed, gap=\(clearedGap)")
         }
         return failures
     }

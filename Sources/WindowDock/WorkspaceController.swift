@@ -11,6 +11,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     private var tabIDs: [UUID] = []
     private var windowRaisePending = false
     private var windowRaiseScheduled = false
+    private var coverageGeneration = 0
     private(set) var suspended = false
     var quitting = false
 
@@ -21,6 +22,11 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     var onRename: ((WorkspaceController) -> Void)?
     var onSessionChange: ((WorkspaceController) -> Void)?
     var onDelete: ((WorkspaceController) -> Void)?
+    var onTabDragBegin: ((UUID, String, NSButton) -> Void)?
+    var onTabDragMove: ((String, NSPasteboard, NSButton, NSPoint) -> Void)?
+    var onTabDragEnd: ((String, NSPasteboard, NSPoint, Bool) -> Void)?
+    var acceptsExternalTab: ((String, NSButton?) -> Bool)?
+    var onExternalTabDrop: ((String, NSButton?, Int?, Int?) -> Bool)?
     /// Whether another workspace already manages the candidate window.
     var isRegisteredElsewhere: ((WindowCandidate) -> Bool)?
 
@@ -50,6 +56,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         window.collectionBehavior = [.fullScreenNone]
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        // Server-side titlebar dragging bypasses the pre-move transparency mask.
+        window.isMovable = false
         window.tabbingMode = .disallowed
         window.delegate = self
         window.center()
@@ -93,9 +101,28 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
             guard let self, self.tabIDs.indices.contains(tab) else { return }
             self.session.moveWindow(self.tabIDs[tab], toCell: cell)
         }
-        workspace.onSwapTabs = { [weak self] source, target in
-            guard let self, self.tabIDs.indices.contains(source), self.tabIDs.indices.contains(target) else { return }
-            self.session.swapWindows(self.tabIDs[source], self.tabIDs[target])
+        workspace.onReorderTabs = { [weak self] order in
+            guard let self, order.count == self.tabIDs.count,
+                  Set(order) == Set(self.tabIDs.indices) else { return }
+            self.session.reorderWindows(order.map { self.tabIDs[$0] })
+        }
+        workspace.onTabDragBegin = { [weak self] index, token, button in
+            guard let self, self.tabIDs.indices.contains(index) else { return }
+            self.onTabDragBegin?(self.tabIDs[index], token, button)
+        }
+        workspace.onTabDragMove = { [weak self] token, board, button, point in
+            self?.onTabDragMove?(token, board, button, point)
+        }
+        workspace.onTabDragEnd = { [weak self] token, board, point, cancelled in
+            self?.onTabDragEnd?(token, board, point, cancelled)
+        }
+        workspace.acceptsExternalTab = { [weak self] token, button in
+            guard let self, self.acceptsWindowDrag else { return false }
+            return self.acceptsExternalTab?(token, button) == true
+        }
+        workspace.onExternalTabDrop = { [weak self] token, button, index, cell in
+            guard let self, self.acceptsWindowDrag else { return false }
+            return self.onExternalTabDrop?(token, button, index, cell) == true
         }
         workspace.onPaneLayoutChange = { [weak self] in
             DispatchQueue.main.async { self?.syncIfVisible() }
@@ -107,16 +134,47 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         }
         session.onMessage = { [weak self] message in self?.showNotice(message) }
         session.onPresentedFrames = { [weak self] frames in
-            guard let self, let screen = NSScreen.screens.first else { return }
+            guard let self else { return }
+            self.coverageGeneration += 1
+            self.presentConfirmedFrames(frames, generation: self.coverageGeneration)
+        }
+    }
+
+    private func presentConfirmedFrames(_ frames: [UUID: CGRect], generation: Int, attempt: Int = 0) {
+        guard generation == coverageGeneration, let screen = NSScreen.screens.first else { return }
+        if frames.isEmpty {
+            workspace.presentFrames([:])
+            return
+        }
+        guard !suspended, !quitting else { return }
+        do {
+            let rendered = try WindowAccess.windowServerWindows().filter { $0.layer == 0 }
             var covered: [Int: CGRect] = [:]
-            for (index, id) in self.session.cells.enumerated() {
-                if let id, let frame = frames[id] {
-                    covered[index] = WindowGeometry.screenRect(from: frame, primaryScreenTop: screen.frame.maxY)
+            var pending = false
+            for (index, id) in session.cells.enumerated() {
+                guard let id, let frame = frames[id],
+                      let managed = session.windows.first(where: { $0.id == id }) else { continue }
+                let candidates = rendered.filter {
+                    $0.processID == managed.candidate.application.processIdentifier
+                }.map(\.frame)
+                if let confirmed = WindowGeometry.confirmedCoverage(for: frame, renderedFrames: candidates) {
+                    covered[index] = WindowGeometry.screenRect(from: confirmed, primaryScreenTop: screen.frame.maxY)
+                    pending = pending || confirmed != frame
+                } else {
+                    pending = true
                 }
             }
-            self.workspace.presentFrames(covered)
-            if !frames.isEmpty { self.window.orderFront(nil) }
-            self.workspace.refreshCoverage()
+            workspace.presentFrames(covered)
+            if attempt == 0 { window.orderFront(nil) }
+            if pending, attempt < 6 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.presentConfirmedFrames(frames, generation: generation, attempt: attempt + 1)
+                }
+            }
+        } catch {
+            workspace.presentFrames([:])
+            WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
+            showNotice(.attention(error.localizedDescription))
         }
     }
 
@@ -288,10 +346,25 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
 
     var windowDropPanelNumber: Int? { workspace.windowDropPanel?.windowNumber }
 
+    func showTabTransferTargets() { workspace.showExternalTabTargets() }
+    func hideTabTransferTargets() {
+        workspace.hideExternalTabTargets()
+        workspace.hideWindowDropTarget()
+    }
+    func endTabTransferDrag() { workspace.endTabDrag() }
+    func tabRowContains(_ point: NSPoint) -> Bool { workspace.tabRowContains(point) }
+    func previewTabTransfer(pasteboard: NSPasteboard, source: NSButton, at point: NSPoint) {
+        workspace.showExternalTabTargets()
+        _ = workspace.updateFloatingTab(pasteboard: pasteboard, source: source, screenPoint: point)
+    }
+    func completeTabDrop(pasteboard: NSPasteboard, source: NSButton, at point: NSPoint) -> Bool {
+        workspace.completeTabDrop(pasteboard: pasteboard, source: source, screenPoint: point)
+    }
+
     func showWindowDropTarget(at point: NSPoint) {
         guard acceptsWindowDrag else { return hideWindowDropTarget() }
         workspace.showWindowDropTarget(
-            hovered: workspace.acceptsWindowDrop(at: point), requiresPermission: !WindowAccess.isTrusted
+            at: point, requiresPermission: !WindowAccess.isTrusted
         )
     }
 
@@ -301,7 +374,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         acceptsWindowDrag && workspace.acceptsWindowDrop(at: point)
     }
 
-    func finishWindowDrag(_ drag: WorkspaceWindowDrag, accessibilityPoint: CGPoint) {
+    func finishWindowDrag(_ drag: WorkspaceWindowDrag, accessibilityPoint: CGPoint, screenPoint: NSPoint) {
         guard WindowAccess.isTrusted else {
             WindowAccess.requestPermission()
             showNotice(.attention(L("追加にはアクセシビリティ権限が必要です。システム設定で現在の WindowDock を許可してください。")))
@@ -320,7 +393,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
             } else if isRegisteredElsewhere?(candidate) == true {
                 showNotice(.information(L("このウィンドウは別のワークスペースに登録されています。")))
             } else {
-                session.add(candidate, originalFrame: drag.originalFrame)
+                session.add(candidate, originalFrame: drag.originalFrame, at: workspace.tabInsertionIndex(at: screenPoint))
             }
         } catch {
             WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")

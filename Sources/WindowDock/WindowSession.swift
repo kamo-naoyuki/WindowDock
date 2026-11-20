@@ -39,6 +39,7 @@ final class WindowSession {
     private var suspendedWindowIDs: Set<UUID> = []
     private var assignments: [UUID: Int] = [:]
     private var minimumSizes: [UUID: CGSize] = [:]
+    private var constraintWarningIDs: Set<UUID> = []
     private var isSynchronizing = false
     private var resyncRequested = false
 
@@ -105,15 +106,19 @@ final class WindowSession {
         windows.contains { $0.candidate.isSameWindow(as: candidate) }
     }
 
-    func add(_ candidate: WindowCandidate, originalFrame: CGRect? = nil) {
-        add([candidate], originalFrame: originalFrame)
+    func add(_ candidate: WindowCandidate, originalFrame: CGRect? = nil, at insertionIndex: Int? = nil) {
+        if let insertionIndex, !(0...windows.count).contains(insertionIndex) {
+            onMessage?(.attention(L("タブを移動できませんでした。移動先と対象ウィンドウを確認してください。")))
+            return
+        }
+        add([candidate], originalFrame: originalFrame, at: insertionIndex)
     }
 
     func add(_ candidates: [WindowCandidate]) {
         add(candidates, originalFrame: nil)
     }
 
-    private func add(_ candidates: [WindowCandidate], originalFrame: CGRect?) {
+    private func add(_ candidates: [WindowCandidate], originalFrame: CGRect?, at insertionIndex: Int? = nil) {
         var added: [ManagedWindow] = []
         var errors: [Error] = []
         for candidate in candidates where !contains(candidate) {
@@ -132,6 +137,10 @@ final class WindowSession {
             } catch {
                 errors.append(error)
             }
+        }
+        if let insertionIndex, let window = added.first {
+            windows.removeAll { $0.id == window.id }
+            windows.insert(window, at: insertionIndex)
         }
         for window in added.dropLast() {
             do {
@@ -174,15 +183,19 @@ final class WindowSession {
         guard let index = windows.firstIndex(where: { $0.id == id }) else { return }
         do {
             try access.focus(windows[index].candidate.element, windows[index].candidate.application)
-        } catch {
-            WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
-            guard let fresh = WindowAccess.reresolve(windows[index].candidate, excluding: windows.map(\.candidate)) else { return }
+        } catch let error as WindowAccessError where error.code == .invalidUIElement {
+            guard let fresh = WindowAccess.reresolve(windows[index].candidate, excluding: windows.map(\.candidate)) else {
+                report(error)
+                return
+            }
             windows[index].candidate = fresh
             do {
                 try access.focus(fresh.element, fresh.application)
             } catch {
-                WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
+                report(error)
             }
+        } catch {
+            report(error)
         }
     }
 
@@ -204,12 +217,51 @@ final class WindowSession {
         presentVisibleWindows()
     }
 
-    func swapWindows(_ firstID: UUID, _ secondID: UUID) {
-        guard let first = windows.firstIndex(where: { $0.id == firstID }),
-              let second = windows.firstIndex(where: { $0.id == secondID }),
-              first != second else { return }
-        windows.swapAt(first, second)
+    func reorderWindows(_ orderedIDs: [UUID]) {
+        let currentIDs = Set(windows.map(\.id))
+        guard orderedIDs.count == windows.count,
+              Set(orderedIDs).count == windows.count,
+              Set(orderedIDs) == currentIDs else { return }
+        let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+        let reordered = orderedIDs.compactMap { windowsByID[$0] }
+        guard reordered.map(\.id) != windows.map(\.id) else { return }
+        windows = reordered
         onChange?()
+    }
+
+    @discardableResult
+    func transferWindow(_ id: UUID, to destination: WindowSession, at insertionIndex: Int? = nil, cell: Int? = nil) -> Bool {
+        let insertion = insertionIndex ?? destination.windows.count
+        let targetCell = cell ?? destination.activeCell
+        guard self !== destination, let index = windows.firstIndex(where: { $0.id == id }),
+              !destination.contains(windows[index].candidate),
+              (0...destination.windows.count).contains(insertion),
+              destination.cells.indices.contains(targetCell) else {
+            onMessage?(.attention(L("タブを移動できませんでした。移動先と対象ウィンドウを確認してください。")))
+            return false
+        }
+        let window = windows.remove(at: index)
+        destination.windows.insert(window, at: insertion)
+        destination.minimumSizes[id] = minimumSizes.removeValue(forKey: id)
+        if constraintWarningIDs.remove(id) != nil { destination.constraintWarningIDs.insert(id) }
+        requestedFrames.removeValue(forKey: id)
+        suspendedWindowIDs.remove(id)
+        assignments.removeValue(forKey: id)
+        pendingClosedIDs.remove(id)
+        if !isSplit, cells[0] == id {
+            cells[0] = windows.isEmpty ? nil : windows[min(index, windows.count - 1)].id
+        }
+        reconcilePanes()
+        destination.cells[targetCell] = id
+        destination.assignments[id] = targetCell
+        destination.activeCell = targetCell
+        destination.clearPresentation()
+        // Both ownership lists are updated before observers run; never restore the transferred window here.
+        onChange?()
+        destination.onChange?()
+        presentVisibleWindows()
+        destination.presentVisibleWindows()
+        return true
     }
 
     private func presentVisibleWindows() {
@@ -322,8 +374,15 @@ final class WindowSession {
                     try align(window, to: requested)
                     var actual = try access.frame(window.candidate.element)
                     // Apps animate resizes (e.g. un-maximizing); wait for them to settle before treating the size as a minimum.
+                    // Expect a known minimum size so constrained windows don't stall every step of a workspace drag.
+                    let expected = minimumSizes[window.id].map {
+                        CGRect(origin: requested.origin, size: CGSize(
+                            width: max(requested.width, $0.width), height: max(requested.height, $0.height)
+                        ))
+                    } ?? requested
                     var attempts = 0
-                    while !WindowGeometry.fits(actual, requested: requested, tolerance: 1), attempts < 6 {
+                    while !WindowGeometry.fits(actual, requested: requested, tolerance: 1),
+                          !WindowGeometry.fits(actual, requested: expected, tolerance: 1), attempts < 6 {
                         attempts += 1
                         Thread.sleep(forTimeInterval: 0.05)
                         actual = try access.frame(window.candidate.element)
@@ -365,10 +424,11 @@ final class WindowSession {
             }
             onPresentedFrame?(selectedID.flatMap { frames[$0] })
             onPresentedFrames?(frames)
+            constraintWarningIDs.formUnion(mismatches)
             if rejectedGrid {
-                onMessage?(.attention(L("対象アプリの最小サイズ・位置制約により分割が収まらないため、1×1表示に戻しました。枠を広げるか分割数を減らしてください。")))
-            } else if !mismatches.isEmpty {
-                onMessage?(.attention(L("対象アプリのサイズ・位置の制約により、枠内に完全には収まりません。枠を広げてください。")))
+                onMessage?(.attention(L("対象アプリの最小サイズ・位置制約により分割が収まらないため、1×1表示に戻しました。")))
+            } else if selectedID.map({ constraintWarningIDs.contains($0) }) == true {
+                onMessage?(.attention(L("対象アプリのサイズ・位置の制約により、枠内に完全には収まりません。")))
             } else if !frames.isEmpty {
                 onMessage?(.information(L("⌃ Tab / ⌃ ⇧ Tab で切替 · タブの × で元に戻す")))
             }
@@ -444,6 +504,7 @@ final class WindowSession {
         suspendedWindowIDs.remove(id)
         assignments.removeValue(forKey: id)
         minimumSizes.removeValue(forKey: id)
+        constraintWarningIDs.remove(id)
         reconcilePanes()
         onChange?()
         presentVisibleWindows()
@@ -484,6 +545,7 @@ final class WindowSession {
         suspendedWindowIDs.subtract(ids)
         assignments = assignments.filter { !ids.contains($0.key) }
         minimumSizes = minimumSizes.filter { !ids.contains($0.key) }
+        constraintWarningIDs.subtract(ids)
         reconcilePanes()
         onChange?()
         presentVisibleWindows()

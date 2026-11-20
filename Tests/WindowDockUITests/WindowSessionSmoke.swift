@@ -1,4 +1,5 @@
 import AppKit
+import WindowDockCore
 
 @MainActor
 enum WindowSessionSmoke {
@@ -35,9 +36,12 @@ enum WindowSessionSmoke {
         let windows: [WindowState]
         var target = CGRect(x: 200, y: 160, width: 900, height: 600)
         var operations: [Operation] = []
+        var onMove: (() -> Void)?
         var failedMoves: Set<Int> = []
         var failedMinimizations: Set<Int> = []
         var failedRegistrations: Set<Int> = []
+        var failedFocuses: Set<Int> = []
+        var focusedWindows: [Int] = []
         var changeCount = 0
         var notices: [WorkspaceNotice] = []
         var presentedFrames: [CGRect?] = []
@@ -57,8 +61,9 @@ enum WindowSessionSmoke {
         }
     }
 
-    private static func fixture(registering indexes: [Int] = [0, 1, 2], windowCount: Int = 4) -> (WindowSession, Model) {
-        let model = Model(windowCount: windowCount)
+    private static func fixture(registering indexes: [Int] = [0, 1, 2], windowCount: Int = 4,
+                                sharedModel: Model? = nil) -> (WindowSession, Model) {
+        let model = sharedModel ?? Model(windowCount: windowCount)
         var access = WindowAccessClient()
         access.requireWritable = { element, _ in
             let index = try model.index(of: element)
@@ -75,6 +80,7 @@ enum WindowSessionSmoke {
         }
         access.setPosition = { element, position in
             let index = try model.index(of: element)
+            model.onMove?()
             if model.failedMoves.contains(index) { throw InjectedFailure() }
             model.operations.append(.move(index))
             model.windows[index].frame.origin = position
@@ -88,6 +94,11 @@ enum WindowSessionSmoke {
             return true
         }
         access.raise = { element in model.operations.append(.raise(try model.index(of: element))) }
+        access.focus = { element, _ in
+            let index = try model.index(of: element)
+            if model.failedFocuses.contains(index) { throw InjectedFailure() }
+            model.focusedWindows.append(index)
+        }
         let session = WindowSession(access: access)
         session.targetFrame = { model.target }
         session.secondaryTargetFrame = { model.rightTarget }
@@ -108,16 +119,383 @@ enum WindowSessionSmoke {
         return (session, model)
     }
 
+    static func runTransferChecks() -> [String] {
+        var failures: [String] = []
+        let (source, model) = fixture()
+        let (destination, _) = fixture(registering: [3], sharedModel: model)
+        let transferred = source.windows[2]
+        let target = CGRect(x: 1200, y: 120, width: 800, height: 600)
+        destination.targetFrames = { [0: target] }
+        var observedDuplicate = false
+        source.onChange = {
+            if source.contains(transferred.candidate) && destination.contains(transferred.candidate) {
+                observedDuplicate = true
+            }
+        }
+        if !source.transferWindow(transferred.id, to: destination, at: 0) ||
+            source.contains(transferred.candidate) || destination.windows.first?.id != transferred.id ||
+            destination.selectedID != transferred.id || observedDuplicate {
+            failures.append("cross-workspace transfer lost identity, insertion position, selection, or unique ownership")
+        }
+        if model.windows[2].frame != target || model.windows[2].minimized ||
+            destination.windows.first?.originalFrame != transferred.originalFrame ||
+            destination.windows.first?.originallyMinimized != transferred.originallyMinimized {
+            failures.append("transfer did not align the window or preserve its original restoration state")
+        }
+        let originalSourceIDs = source.windows.map(\.id)
+        let originalDestinationIDs = destination.windows.map(\.id)
+        if source.transferWindow(source.windows[0].id, to: destination, at: -1) ||
+            source.windows.map(\.id) != originalSourceIDs || destination.windows.map(\.id) != originalDestinationIDs {
+            failures.append("invalid transfer modified window ownership")
+        }
+        if !destination.remove(transferred.id) || model.windows[2].frame != transferred.originalFrame ||
+            model.windows[2].minimized != transferred.originallyMinimized {
+            failures.append("releasing a transferred tab did not restore its pre-registration state")
+        }
+        source.setSplit(true)
+        destination.setSplit(true)
+        destination.targetFrames = { [0: target, 1: target.offsetBy(dx: 800, dy: 0)] }
+        let splitID = source.windows[0].id
+        if !source.transferWindow(splitID, to: destination, cell: 1) ||
+            source.cells.contains(splitID) || destination.cells[1] != splitID ||
+            destination.activeCell != 1 || source.windows.count != 1 {
+            failures.append("pane transfer failed to reconcile the source or select the destination pane")
+        }
+        let (empty, _) = fixture(registering: [], sharedModel: model)
+        let lastID = source.windows[0].id
+        if !source.transferWindow(lastID, to: empty) || !source.windows.isEmpty ||
+            source.cells != [nil] || empty.selectedID != lastID {
+            failures.append("detaching the last tab did not leave an empty source and a selected destination")
+        }
+        return failures
+    }
+
+    static func runRegisteredWindowDragChecks() -> [String] {
+        var failures: [String] = []
+        let (source, model) = fixture(registering: [0])
+        let (other, _) = fixture(registering: [1], sharedModel: model)
+        let registered = source.windows.map(\.candidate) + other.windows.map(\.candidate)
+        let candidate = source.windows[0].candidate
+        let pid = candidate.application.processIdentifier
+        var registration = WorkspaceWindowDragRegistration()
+        var resolutions = 0
+        let resolve: (WindowServerWindow) throws -> WindowCandidate = { _ in
+            resolutions += 1
+            return candidate
+        }
+        do {
+            for offset in [CGFloat(0), 100, 200] {
+                let moved = WindowServerWindow(id: 80, processID: pid, frame: model.target.offsetBy(dx: offset, dy: 0))
+                if try !registration.isRegistered(moved, among: registered, resolve: resolve) {
+                    failures.append("a registered window was offered for ordinary dragging into a workspace")
+                }
+            }
+            if resolutions != 1 {
+                failures.append("registered-window drag identification repeated AX resolution while moving")
+            }
+            let sibling = WindowCandidate(element: model.windows[2].element, application: .current, title: "Unregistered sibling")
+            let siblingWindow = WindowServerWindow(id: 81, processID: pid, frame: model.target)
+            let resolveSibling: (WindowServerWindow) throws -> WindowCandidate = { _ in sibling }
+            if try registration.isRegistered(siblingWindow, among: registered, resolve: resolveSibling) {
+                failures.append("registration filtering suppressed an unregistered window from the same app")
+            }
+            if try !registration.isRegistered(siblingWindow, among: registered + [sibling], resolve: resolveSibling) {
+                failures.append("cached drag identity did not notice newly registered ownership")
+            }
+            let unrelated = WindowServerWindow(id: 82, processID: pid + 1, frame: model.target)
+            if try registration.isRegistered(unrelated, among: registered, resolve: { _ in throw InjectedFailure() }) {
+                failures.append("an app with no registered windows was suppressed")
+            }
+            registration.reset()
+            if try !registration.isRegistered(
+                WindowServerWindow(id: 80, processID: pid, frame: model.target), among: registered, resolve: resolve
+            ) || resolutions != 2 {
+                failures.append("resetting the drag did not discard its cached window identity")
+            }
+            if try !registration.isRegistered(
+                WindowServerWindow(id: 84, processID: pid, frame: model.target), among: registered,
+                resolve: { _ in other.windows[0].candidate }
+            ) {
+                failures.append("a window registered in another workspace was not suppressed")
+            }
+            do {
+                _ = try registration.isRegistered(
+                    WindowServerWindow(id: 83, processID: pid, frame: model.target), among: registered,
+                    resolve: { _ in throw InjectedFailure() }
+                )
+                failures.append("window identification failure silently allowed a drop")
+            } catch is InjectedFailure {
+            }
+        } catch {
+            failures.append("registered-window drag identification failed: \(error.localizedDescription)")
+        }
+        return failures
+    }
+
+    static func runKeyboardFocusChecks() -> [String] {
+        var failures: [String] = []
+        let (session, model) = fixture()
+        let applications = [AXUIElementCreateApplication(800_001), AXUIElementCreateApplication(800_002)]
+        var steps: [String] = []
+        let setAttribute: (AXUIElement, String, CFTypeRef) throws -> Void = { element, attribute, _ in
+            if attribute == kAXFrontmostAttribute {
+                steps.append("all-windows \(applications.firstIndex { CFEqual($0, element) } ?? -1)")
+            }
+        }
+        do {
+            for index in [0, 1, 2, 0] {
+                steps = []
+                try WindowAccess.focus(
+                    model.windows[index].element, applicationElement: applications[index == 2 ? 1 : 0],
+                    setAttribute: setAttribute,
+                    raiseWindow: { steps.append("raise \(try model.index(of: $0))") },
+                    activateFrontWindowOnly: { steps.append("front-only"); return true }
+                )
+                // Activating the whole app would bring its unregistered windows above other apps too.
+                if steps != ["raise \(index)", "front-only", "raise \(index)"] {
+                    failures.append("tab focus did not bring only window \(index) forward: \(steps)")
+                }
+            }
+            steps = []
+            try WindowAccess.focus(
+                model.windows[2].element, applicationElement: applications[1], setAttribute: setAttribute,
+                raiseWindow: { steps.append("raise \(try model.index(of: $0))") },
+                activateFrontWindowOnly: { steps.append("front-only"); return false }
+            )
+            if steps != ["raise 2", "front-only", "all-windows 1", "raise 2"] {
+                failures.append("unavailable front-window-only activation did not fall back to AXFrontmost: \(steps)")
+            }
+            steps = []
+            do {
+                try WindowAccess.focus(
+                    model.windows[2].element, applicationElement: applications[1],
+                    setAttribute: { _, attribute, _ in
+                        if attribute == kAXFrontmostAttribute { throw InjectedFailure() }
+                    },
+                    raiseWindow: { steps.append("raise \(try model.index(of: $0))") },
+                    activateFrontWindowOnly: { false }
+                )
+                failures.append("application activation failure did not propagate")
+            } catch is InjectedFailure {
+            }
+            if steps != ["raise 2"] { failures.append("failed application activation still raised after activation") }
+        } catch {
+            failures.append("keyboard focus operation failed: \(error.localizedDescription)")
+        }
+        session.cycle(1)
+        session.cycle(1)
+        session.cycle(-1)
+        if model.focusedWindows != [0, 1, 0] {
+            failures.append("forward and reverse keyboard cycling did not focus the selected tab")
+        }
+        model.failedFocuses.insert(1)
+        session.cycle(1)
+        if model.notices.last?.needsAttention != true {
+            failures.append("keyboard focus failure was not reported to the user")
+        }
+        return failures
+    }
+
+    static func runWindowInsertionChecks() -> [String] {
+        var failures: [String] = []
+        for insertion in [0, 1, 3] {
+            let (session, model) = fixture()
+            let originals = session.windows.map(\.id)
+            let candidate = WindowCandidate(element: model.windows[3].element, application: .current, title: "Inserted")
+            session.add(candidate, originalFrame: model.windows[3].originalFrame, at: insertion)
+            guard let inserted = session.windows.first(where: { $0.candidate.isSameWindow(as: candidate) }) else {
+                failures.append("window addition at an insertion line failed")
+                continue
+            }
+            var expected = originals
+            expected.insert(inserted.id, at: insertion)
+            if session.windows.map(\.id) != expected || session.selectedID != inserted.id {
+                failures.append("a new window was not inserted and selected at the indicated position")
+            }
+            if !session.remove(inserted.id) || model.windows[3].frame != model.windows[3].originalFrame {
+                failures.append("inserting a window changed its original restoration geometry")
+            }
+        }
+        let (session, model) = fixture()
+        let originals = session.windows.map(\.id)
+        session.add(WindowCandidate(element: model.windows[3].element, application: .current, title: "Invalid"), at: -1)
+        if session.windows.map(\.id) != originals || model.notices.last?.needsAttention != true {
+            failures.append("an invalid insertion position changed the session or failed silently")
+        }
+        return failures
+    }
+
+    static func runConstraintNoticeChecks() -> [String] {
+        var failures: [String] = []
+        let (session, model) = fixture()
+        let ids = session.windows.map(\.id)
+        model.windows[0].minimumSize.width = model.target.width + 100
+        model.target.size.width -= 10
+        session.sync()
+        if model.notices.last?.needsAttention == true {
+            failures.append("hidden constrained window showed a size warning")
+        }
+        session.select(ids[0])
+        if model.notices.last?.needsAttention != true {
+            failures.append("selected constrained window did not show a size warning")
+        }
+        let constrainedStart = Date()
+        for _ in 0..<3 {
+            model.target.origin.x += 1
+            session.sync()
+        }
+        if Date().timeIntervalSince(constrainedStart) > 0.2 {
+            failures.append("a window at its known minimum size stalled every workspace sync")
+        }
+        model.windows[0].minimumSize = .zero
+        for _ in 0..<3 {
+            model.target.origin.x += 1
+            session.sync()
+            if model.notices.last?.needsAttention != true {
+                failures.append("repeated synchronization cleared the selected tab's warning")
+                break
+            }
+        }
+        session.select(ids[2])
+        if model.notices.last?.needsAttention == true {
+            failures.append("switching to an unconstrained tab did not clear the warning")
+        }
+        session.select(ids[0])
+        if model.notices.last?.needsAttention != true {
+            failures.append("returning to the constrained tab did not restore its warning")
+        }
+        return failures
+    }
+
+    static func runManyTabMoveChecks() -> [String] {
+        var failures: [String] = []
+        let (session, model) = fixture(registering: Array(0..<20), windowCount: 20)
+        var clearedDuringMove = false
+        session.onPresentedFrames = { model.paneFrames = $0 }
+        let selectedID = session.selectedID!
+        model.paneFrames = [selectedID: model.target]
+        model.target.origin.x += 80
+        session.targetFrames = { [0: model.target] }
+        model.onMove = {
+            if model.paneFrames.isEmpty { clearedDuringMove = true }
+        }
+        session.sync()
+        if clearedDuringMove || model.paneFrames[selectedID] != model.target {
+            failures.append("many-tab move blanked the entire pane or did not restore the selected window")
+        }
+        return failures
+    }
+
+    /// Child process for `runFrontWindowOnlyActivationChecks`: an inactive app with three windows.
+    static func runActivationHelper(_ application: NSApplication) {
+        // Regular apps activate themselves at launch; becoming regular afterwards keeps this one in the background.
+        application.setActivationPolicy(.accessory)
+        DispatchQueue.main.async { application.setActivationPolicy(.regular) }
+        let windows = (0..<3).map { index in
+            let window = NSWindow(contentRect: NSRect(x: 300 + index * 40, y: 300 + index * 40, width: 300, height: 200),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.orderFrontRegardless()
+            return window
+        }
+        print(([ProcessInfo.processInfo.processIdentifier] + windows.map { Int32($0.windowNumber) })
+            .map(String.init).joined(separator: " "))
+        fflush(stdout)
+        DispatchQueue.global().async {
+            while let line = readLine() {
+                if line.hasPrefix("raise "), let index = Int(line.dropFirst(6)) {
+                    DispatchQueue.main.async { windows[index].orderFrontRegardless() }
+                }
+            }
+            exit(0)
+        }
+    }
+
+    /// Uses real windows of another process and changes the active application, so it runs in its own
+    /// harness process (`--activation-only`) that is not the active app when it launches the helper.
+    static func runFrontWindowOnlyActivationChecks() -> [String] {
+        guard let executable = Bundle.main.executableURL else { return ["activation check could not find its executable"] }
+        let helper = Process()
+        let output = Pipe()
+        let input = Pipe()
+        helper.executableURL = executable
+        helper.arguments = ["--activation-helper"]
+        helper.standardOutput = output
+        helper.standardInput = input
+        do { try helper.run() } catch { return ["activation helper failed to launch: \(error.localizedDescription)"] }
+        defer {
+            helper.terminate()
+            helper.waitUntilExit()
+        }
+        let fields = (String(data: output.fileHandleForReading.availableData, encoding: .utf8) ?? "")
+            .split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
+        guard fields.count == 4 else { return ["activation helper did not report its windows"] }
+        let helperPID = pid_t(fields[0])
+        let helperWindows = Array(fields[1...])
+        func wait(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        }
+        func stackIndex(_ number: Int) -> Int {
+            let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+            return list.firstIndex { $0[kCGWindowNumber as String] as? Int == number } ?? Int.max
+        }
+        wait(0.5)
+        let otherApplication = NSWindow(contentRect: NSRect(x: 250, y: 250, width: 500, height: 400),
+                                        styleMask: [.titled], backing: .buffered, defer: false)
+        otherApplication.isReleasedWhenClosed = false
+        otherApplication.orderFrontRegardless()
+        defer { otherApplication.close() }
+        let other = otherApplication.windowNumber
+        wait(0.3)
+        // The registered window is raised within its inactive app before the app is activated.
+        input.fileHandleForWriting.write(Data("raise 2\n".utf8))
+        wait(2) { stackIndex(helperWindows[2]) < stackIndex(other) }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID ||
+            helperWindows[..<2].contains(where: { stackIndex($0) < stackIndex(other) }) {
+            return ["activation fixture did not start with unregistered windows behind another app " +
+                "(helper frontmost: \(NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID), " +
+                "stack: \(helperWindows.map(stackIndex)) vs \(stackIndex(other)))"]
+        }
+        guard WindowAccess.activateFrontWindowOnly(helperPID) else {
+            return ["front-window-only app activation is unavailable, so tab focus would raise every app window"]
+        }
+        wait(2) { NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID }
+        wait(0.4)
+        var failures: [String] = []
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != helperPID {
+            failures.append("front-window-only activation did not make the window's app frontmost")
+        }
+        if stackIndex(helperWindows[2]) > stackIndex(other) {
+            failures.append("front-window-only activation did not keep the registered window in front")
+        }
+        if helperWindows[..<2].contains(where: { stackIndex($0) < stackIndex(other) }) {
+            failures.append("activating a tab's app brought its unregistered windows above other apps")
+        }
+        return failures
+    }
+
     static func runChecks() -> [String] {
         var failures: [String] = []
+        failures += runManyTabMoveChecks()
+        failures += runConstraintNoticeChecks()
+        failures += runTransferChecks()
+        failures += runRegisteredWindowDragChecks()
+        failures += runKeyboardFocusChecks()
+        failures += runWindowInsertionChecks()
         let (orderingSession, orderingModel) = fixture()
         let originalOrder = orderingSession.windows.map(\.id)
         let originalCells = orderingSession.cells
-        orderingSession.swapWindows(originalOrder[0], originalOrder[2])
+        orderingSession.reorderWindows([originalOrder[2], originalOrder[1], originalOrder[0]])
         if orderingSession.windows.map(\.id) != [originalOrder[2], originalOrder[1], originalOrder[0]] ||
             orderingSession.cells != originalCells || orderingModel.changeCount != 1 ||
             !orderingModel.operations.isEmpty {
-            failures.append("swapping tab order changed pane assignments or window state")
+            failures.append("reordering tabs changed pane assignments or window state")
+        }
+        orderingSession.reorderWindows([originalOrder[0], originalOrder[0], originalOrder[2]])
+        if orderingSession.windows.map(\.id) != [originalOrder[2], originalOrder[1], originalOrder[0]] ||
+            orderingModel.changeCount != 1 {
+            failures.append("invalid tab order changed the session")
         }
 
         let (session, model) = fixture()
@@ -127,6 +505,7 @@ enum WindowSessionSmoke {
         for _ in 0..<10 {
             for id in ids { session.select(id) }
         }
+
         let expectedRaises = (0..<10).flatMap { _ in (0..<3).map(Operation.raise) }
         if model.operations != expectedRaises {
             failures.append("stacked switching minimized/restored, moved or resized an already aligned window")
@@ -188,7 +567,7 @@ enum WindowSessionSmoke {
         }
         return failures + checkPartialFailures() + checkBatchAddition() +
             checkSplitSelection(layout: .sideBySide) + checkSplitSelection(layout: .stacked) +
-            checkGrid() + checkGridConstraints() + checkInput() + runWindowDropChecks()
+            checkGrid() + checkGridConstraints() + checkInput()
     }
 
     private static func gridTargets(_ size: WorkspaceGridSize) -> [Int: CGRect] {
@@ -385,83 +764,11 @@ enum WindowSessionSmoke {
         let (session, model) = fixture(registering: [])
         let candidate = WindowCandidate(element: model.windows[0].element, application: .current, title: "Dragged")
         let original = model.windows[0].originalFrame
-        let drag = WorkspaceWindowDrag(
-            window: WindowServerWindow(id: 1, processID: 2, frame: original),
-            originalFrame: original, startPoint: CGPoint(x: 100, y: 100)
-        )
-        var moved = original.offsetBy(dx: 120, dy: 80)
-        if !drag.canDrop(at: CGPoint(x: 220, y: 180), actualFrame: moved, acceptsPoint: true) ||
-            drag.canDrop(at: CGPoint(x: 220, y: 180), actualFrame: original, acceptsPoint: true) ||
-            drag.canDrop(at: CGPoint(x: 220, y: 180), actualFrame: moved, acceptsPoint: false) {
-            failures.append("drag registration accepted a stationary/internal drag or rejected an actual window move")
-        }
-        moved.size.width += 20
-        if drag.canDrop(at: CGPoint(x: 220, y: 180), actualFrame: moved, acceptsPoint: true) {
-            failures.append("a resize gesture was mistaken for a moved-window drop")
-        }
         model.windows[0].frame.origin.x += 120
         session.add(candidate, originalFrame: original)
         session.add(candidate, originalFrame: original)
         if session.windows.count != 1 || !session.remove(session.windows[0].id) || model.windows[0].frame != original {
             failures.append("drag registration duplicated a tab or restored the post-drag rather than pre-drag frame")
-        }
-        return failures
-    }
-
-    static func runWindowDropChecks() -> [String] {
-        var failures: [String] = []
-        let original = WindowServerWindow(id: 10, processID: 20, frame: CGRect(x: 40, y: 80, width: 500, height: 400))
-        let own = WindowServerWindow(id: 11, processID: 1, frame: original.frame)
-        let start = CGPoint(x: 100, y: 100)
-        let end = CGPoint(x: 300, y: 200)
-        let moved = WindowServerWindow(id: original.id, processID: original.processID,
-                                       frame: original.frame.offsetBy(dx: 200, dy: 100))
-        var tracker = WorkspaceWindowDragTracker()
-        _ = tracker.update(buttonDown: false, point: start, windows: [own, original], ownPID: 1)
-        // The first sample can arrive after a native titlebar drag has already started.
-        let first = WindowServerWindow(id: original.id, processID: original.processID,
-                                       frame: original.frame.offsetBy(dx: 10, dy: 0))
-        _ = tracker.update(buttonDown: true, point: CGPoint(x: 110, y: 100), windows: [own, first], ownPID: 1)
-        if case .moving(let drag) = tracker.update(buttonDown: true, point: end, windows: [own, moved], ownPID: 1) {
-            if drag.window.id != original.id || drag.originalFrame != original.frame {
-                failures.append("sampled drag lost the window identity or pre-drag frame")
-            }
-        } else {
-            failures.append("window movement was not detected without a mouseDown/dragged event")
-        }
-        if case .released(let drag) = tracker.update(buttonDown: false, point: end, windows: [moved], ownPID: 1) {
-            if !drag.canDrop(at: end, actualFrame: moved.frame, acceptsPoint: true) {
-                failures.append("sampled release did not qualify as a moved-window drop")
-            }
-        } else {
-            failures.append("sampled release did not finish the window drag")
-        }
-        if case .idle = tracker.update(buttonDown: false, point: end, windows: [moved], ownPID: 1) {} else {
-            failures.append("one release produced more than one drop")
-        }
-        for scenario in 0..<4 {
-            var ignored = WorkspaceWindowDragTracker()
-            _ = ignored.update(buttonDown: false, point: start, windows: [own, original], ownPID: 1)
-            _ = ignored.update(buttonDown: true, point: start, windows: [own, original], ownPID: 1)
-            var final: [WindowServerWindow]
-            switch scenario {
-            case 0:
-                final = [original] // Text/selection drag: the pointer moves, but the window does not.
-            case 1:
-                let resized = WindowServerWindow(id: original.id, processID: original.processID,
-                                                frame: CGRect(x: 240, y: 180, width: 530, height: 400))
-                _ = ignored.update(buttonDown: true, point: end, windows: [resized], ownPID: 1)
-                final = [moved]
-            case 2:
-                ignored.cancel()
-                final = [moved]
-            default:
-                final = [WindowServerWindow(id: own.id, processID: own.processID, frame: moved.frame),
-                         WindowServerWindow(id: 99, processID: 20, frame: moved.frame)]
-            }
-            if case .idle = ignored.update(buttonDown: false, point: end, windows: final, ownPID: 1) {} else {
-                failures.append("sampling accepted a stationary, resized, cancelled, own or newly created window (case \(scenario))")
-            }
         }
         return failures
     }

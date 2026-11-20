@@ -28,6 +28,11 @@ func L(_ key: String, _ args: CVarArg...) -> String {
 
 // Order: en, zh-Hans, ko, es
 private let translations: [String: [String]] = [
+    "タブを移動できませんでした。移動先と対象ウィンドウを確認してください。": [
+        "Could not move the tab. Check the destination and target window.",
+        "无法移动标签页。请检查目标工作区和窗口。",
+        "탭을 이동하지 못했습니다. 이동 대상과 창을 확인하세요.",
+        "No se pudo mover la pestaña. Compruebe el destino y la ventana."],
     "%@に失敗しました（Accessibility: %d）。権限や対象アプリの状態を確認してください。": [
         "%@ failed (Accessibility: %d). Check the permission and the state of the target app.",
         "%@失败（Accessibility：%d）。请检查权限和目标应用的状态。",
@@ -151,16 +156,16 @@ private let translations: [String: [String]] = [
         "Use 1–4 for both columns and rows.", "行数和列数都请设为 1–4。", "가로·세로 분할 수는 각각 1~4로 지정하세요.", "Use de 1 a 4 columnas y filas."],
     "分割表示の領域を取得できませんでした。": [
         "Could not get the split view area.", "无法获取分屏区域。", "분할 표시 영역을 가져올 수 없습니다.", "No se pudo obtener el área de la vista dividida."],
-    "対象アプリの最小サイズ・位置制約により分割が収まらないため、1×1表示に戻しました。枠を広げるか分割数を減らしてください。": [
-        "The split doesn't fit because of app minimum size or position constraints, so the view returned to 1×1. Enlarge the frame or reduce the split.",
-        "由于应用的最小尺寸或位置限制，分屏无法容纳，已恢复为 1×1。请扩大窗口或减少分屏数。",
-        "대상 앱의 최소 크기·위치 제약으로 분할이 맞지 않아 1×1 표시로 되돌렸습니다. 프레임을 넓히거나 분할 수를 줄이세요.",
-        "La división no cabe por las restricciones de tamaño mínimo o posición de las apps; se volvió a 1×1. Amplíe el marco o reduzca la división."],
-    "対象アプリのサイズ・位置の制約により、枠内に完全には収まりません。枠を広げてください。": [
-        "App size or position constraints prevent the windows from fitting completely. Enlarge the frame.",
-        "由于应用的大小或位置限制，窗口无法完全放入框内。请扩大窗口。",
-        "대상 앱의 크기·위치 제약으로 프레임 안에 완전히 들어가지 않습니다. 프레임을 넓히세요.",
-        "Por las restricciones de tamaño o posición de las apps, no caben por completo. Amplíe el marco."],
+    "対象アプリの最小サイズ・位置制約により分割が収まらないため、1×1表示に戻しました。": [
+        "The split doesn't fit because of app minimum size or position constraints, so the view returned to 1×1.",
+        "由于应用的最小尺寸或位置限制，分屏无法容纳，已恢复为 1×1。",
+        "대상 앱의 최소 크기·위치 제약으로 분할이 맞지 않아 1×1 표시로 되돌렸습니다.",
+        "La división no cabe por las restricciones de tamaño mínimo o posición de las apps; se volvió a 1×1."],
+    "対象アプリのサイズ・位置の制約により、枠内に完全には収まりません。": [
+        "App size or position constraints prevent the windows from fitting completely.",
+        "由于应用的大小或位置限制，窗口无法完全放入框内。",
+        "대상 앱의 크기·위치 제약으로 프레임 안에 완전히 들어가지 않습니다.",
+        "Por las restricciones de tamaño o posición de las apps, no caben por completo."],
     "⌃ Tab / ⌃ ⇧ Tab で切替 · タブの × で元に戻す": [
         "⌃ Tab / ⌃ ⇧ Tab to switch · × on a tab to restore",
         "⌃ Tab / ⌃ ⇧ Tab 切换 · 点按标签页的 × 还原",

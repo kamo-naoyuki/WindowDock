@@ -1,4 +1,5 @@
 import AppKit
+import WindowDockCore
 
 struct WorkspaceShortcutContext {
     private var originPID: pid_t?
@@ -22,81 +23,23 @@ struct WorkspaceShortcutContext {
     }
 }
 
-struct WorkspaceWindowDrag {
-    let window: WindowServerWindow
-    let originalFrame: CGRect
-    let startPoint: CGPoint
+struct WorkspaceWindowDragRegistration {
+    private var resolved: (id: CGWindowID, processID: pid_t, candidate: WindowCandidate)?
 
-    func canDrop(at point: CGPoint, actualFrame: CGRect, acceptsPoint: Bool) -> Bool {
-        acceptsPoint &&
-        hypot(point.x - startPoint.x, point.y - startPoint.y) >= 8 &&
-        hypot(actualFrame.minX - originalFrame.minX, actualFrame.minY - originalFrame.minY) >= 8 &&
-        abs(actualFrame.width - originalFrame.width) <= 2 &&
-        abs(actualFrame.height - originalFrame.height) <= 2
-    }
-}
+    mutating func reset() { resolved = nil }
 
-struct WindowServerWindow: Equatable {
-    let id: CGWindowID
-    let processID: pid_t
-    let frame: CGRect
-    var layer: Int = 0
-}
-
-struct WorkspaceWindowDragTracker {
-    enum Update {
-        case idle
-        case moving(WorkspaceWindowDrag)
-        case released(WorkspaceWindowDrag)
-    }
-
-    private(set) var isTrackingPress = false
-    private var idleWindows: [CGWindowID: WindowServerWindow] = [:]
-    private var startWindows: [CGWindowID: WindowServerWindow] = [:]
-    private var resizedWindows: Set<CGWindowID> = []
-    private var startPoint = CGPoint.zero
-    private var suppressed = false
-
-    mutating func cancel() {
-        suppressed = true
-        isTrackingPress = true
-        idleWindows.removeAll()
-        startWindows.removeAll()
-    }
-
-    mutating func update(buttonDown: Bool, point: CGPoint, windows: [WindowServerWindow], ownPID: pid_t) -> Update {
-        if !buttonDown {
-            let completed = isTrackingPress && !suppressed ? movedWindow(at: point, windows: windows) : nil
-            idleWindows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
-            startWindows.removeAll()
-            resizedWindows.removeAll()
-            isTrackingPress = false
-            suppressed = false
-            return completed.map(Update.released) ?? .idle
+    mutating func isRegistered(
+        _ window: WindowServerWindow,
+        among registered: [WindowCandidate],
+        resolve: (WindowServerWindow) throws -> WindowCandidate = WindowAccess.candidate(matching:)
+    ) throws -> Bool {
+        let candidates = registered.filter { $0.application.processIdentifier == window.processID }
+        guard !candidates.isEmpty else { return false }
+        if let resolved, resolved.id == window.id, resolved.processID == window.processID {
+            return candidates.contains { $0.isSameWindow(as: resolved.candidate) }
         }
-        guard !suppressed else { return .idle }
-        if !isTrackingPress {
-            isTrackingPress = true
-            startPoint = point
-            for window in windows where window.processID != ownPID && window.frame.contains(point) {
-                let previous = idleWindows[window.id]
-                startWindows[window.id] = previous?.processID == window.processID ? previous : window
-            }
-        }
-        return movedWindow(at: point, windows: windows).map(Update.moving) ?? .idle
-    }
-
-    private mutating func movedWindow(at point: CGPoint, windows: [WindowServerWindow]) -> WorkspaceWindowDrag? {
-        for window in windows {
-            guard let original = startWindows[window.id], original.processID == window.processID else { continue }
-            if abs(window.frame.width - original.frame.width) > 2 ||
-                abs(window.frame.height - original.frame.height) > 2 {
-                resizedWindows.insert(window.id)
-            }
-            guard !resizedWindows.contains(window.id) else { continue }
-            let drag = WorkspaceWindowDrag(window: window, originalFrame: original.frame, startPoint: startPoint)
-            if drag.canDrop(at: point, actualFrame: window.frame, acceptsPoint: true) { return drag }
-        }
-        return nil
+        let candidate = try resolve(window)
+        resolved = (window.id, window.processID, candidate)
+        return candidates.contains { $0.isSameWindow(as: candidate) }
     }
 }

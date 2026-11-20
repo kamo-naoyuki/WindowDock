@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import WindowDockCore
 
 enum WorkspaceNotice {
     case information(String)
@@ -34,33 +35,51 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     let stage = WorkspaceGridView(frame: .zero)
     var gridSize: WorkspaceGridSize { stage.gridSize }
     var gridAreas: [NSView] { stage.areas }
+    /// With a single pane, dropping a tab onto it cannot change the layout, so the whole workspace acts as the tab bar.
+    private var hasSinglePane: Bool { gridAreas.count <= 1 }
     var onGridChange: ((WorkspaceGridSize) -> Void)?
     var onActivateCell: ((Int) -> Void)?
     var onPaneLayoutChange: (() -> Void)?
     var onMoveTab: ((Int, Int) -> Void)?
-    var onSwapTabs: ((Int, Int) -> Void)?
+    var onReorderTabs: (([Int]) -> Void)?
     var onCloseTabs: ((Range<Int>) -> Void)?
+    var onTabDragBegin: ((Int, String, NSButton) -> Void)?
+    var onTabDragMove: ((String, NSPasteboard, NSButton, NSPoint) -> Void)?
+    var onTabDragEnd: ((String, NSPasteboard, NSPoint, Bool) -> Void)?
+    var acceptsExternalTab: ((String, NSButton?) -> Bool)?
+    var onExternalTabDrop: ((String, NSButton?, Int?, Int?) -> Bool)?
     let addButton = makeButton(symbol: "plus", title: L("ウィンドウを追加"), width: 26)
     let permissionButton = makeButton(symbol: "gearshape", title: L("権限設定"), width: 26)
     let columnSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let rowSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let workspaceButton = NSButton(title: "", target: nil, action: nil)
     var workspaceMenu: (() -> NSMenu)?
-    private var toolbar: NSView!
+    private var toolbar: NSStackView!
     private var hasManagedWindows = false
     private var settingGrid = false
     private weak var dragSource: NSButton?
+    private var dragGroup: WorkspaceTabGroup?
+    private var dragPlaceholder: NSView?
     private var dragToken: String?
+    private var dragInitialOrder: [Int]?
+    private var dragAnchorX: CGFloat = 0
+    private var dragAnchorInGroup = NSPoint.zero
+    private var dragPreviewImage: NSImage?
+    private var isPaneTabDrag = false
     private var dragOverlays: [NSView] = []
     private(set) var windowDropPanel: NSPanel?
-    private var windowDropLabel: NSTextField?
+    private weak var windowDropLabel: NSTextField?
+    private(set) var tabDragPreviewPanel: NSPanel?
+    private weak var tabDragPreviewImageView: NSImageView?
 
     private let tabScroll = NSScrollView()
     private let notice = NSTextField(labelWithString: "")
     private let empty = WorkspaceEmptyLabel(wrappingLabelWithString: L("別のウィンドウをここへ移動して離す\nまたは、上の ＋ から追加\n\n異なるアプリをタブで切り替えられます。"))
     private var noticeHeight: NSLayoutConstraint!
-    private var noticeCollapse: DispatchWorkItem?
     private var maximumTabWidth: NSLayoutConstraint!
+    private var preferredTabWidth: NSLayoutConstraint!
+    private var tabSizing: [(button: NSButton, constraint: NSLayoutConstraint)] = []
+    private var updatingTabWidths = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -72,7 +91,44 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         build()
     }
 
-    deinit { windowDropPanel?.close() }
+    deinit {
+        windowDropPanel?.close()
+        tabDragPreviewPanel?.close()
+    }
+
+    override func layout() {
+        super.layout()
+        updateTabWidths()
+    }
+
+    private func updateTabWidths() {
+        guard !updatingTabWidths, dragSource == nil, !tabSizing.isEmpty else { return }
+        updatingTabWidths = true
+        defer { updatingTabWidths = false }
+
+        let count = CGFloat(tabSizing.count)
+        let spacing = CGFloat(max(0, tabSizing.count - 1)) * tabs.spacing
+        let fixedGroupWidth: CGFloat = 34
+        let fixedControlsWidth = toolbar.arrangedSubviews
+            .filter { $0 !== tabScroll }
+            .reduce(CGFloat.zero) { $0 + $1.fittingSize.width }
+        let toolbarGaps = CGFloat(toolbar.arrangedSubviews.count - 1) * toolbar.spacing
+        let availableWidth = max(0, bounds.width - fixedControlsWidth - toolbarGaps
+            - toolbar.edgeInsets.left - toolbar.edgeInsets.right)
+        let fixedWidth = count * fixedGroupWidth + spacing
+        let widths = WindowGeometry.tabWidths(
+            preferredWidths: tabSizing.map { $0.button.intrinsicContentSize.width },
+            available: max(0, availableWidth - fixedWidth)
+        )
+        let targetWidth = min(widths.reduce(0, +) + fixedWidth, availableWidth)
+        if abs(maximumTabWidth.constant - targetWidth) > 0.5 {
+            maximumTabWidth.constant = targetWidth
+            preferredTabWidth.constant = targetWidth
+        }
+        for (sizing, width) in zip(tabSizing, widths) where abs(sizing.constraint.constant - width) > 0.5 {
+            sizing.constraint.constant = width
+        }
+    }
 
     private static func makeButton(symbol: String, title: String, width: CGFloat) -> NSButton {
         let button = NSButton(title: title, target: nil, action: nil)
@@ -97,6 +153,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     }
 
     private func build() {
+        registerForDraggedTypes([workspaceTabDragType])
         // Space for the native traffic-light buttons.
         let controls = NSView()
         controls.widthAnchor.constraint(equalToConstant: 64).isActive = true
@@ -112,13 +169,16 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         tabScroll.isHidden = true
         tabs.translatesAutoresizingMaskIntoConstraints = false
         maximumTabWidth = tabScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 0)
+        preferredTabWidth = tabScroll.widthAnchor.constraint(equalToConstant: 0)
+        preferredTabWidth.priority = NSLayoutConstraint.Priority(749)
         NSLayoutConstraint.activate([
             tabs.leadingAnchor.constraint(equalTo: tabScroll.contentView.leadingAnchor),
             tabs.topAnchor.constraint(equalTo: tabScroll.contentView.topAnchor),
             tabs.heightAnchor.constraint(equalToConstant: 32),
             tabScroll.heightAnchor.constraint(equalToConstant: 32),
             tabScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
-            maximumTabWidth
+            maximumTabWidth,
+            preferredTabWidth
         ])
         let dragSpace = NSView()
         dragSpace.widthAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
@@ -144,6 +204,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         bar.spacing = 4
         bar.alignment = .centerY
         bar.distribution = .fill
+        for view in bar.arrangedSubviews {
+            bar.setVisibilityPriority(.mustHold, for: view)
+        }
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
         notice.font = .systemFont(ofSize: 11)
         notice.textColor = .labelColor
@@ -246,9 +309,94 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
             (!hasManagedWindows && convert(stage.bounds, from: stage).contains(point))
     }
 
-    func showWindowDropTarget(hovered: Bool, requiresPermission: Bool) {
-        guard let window else { return }
+    func showWindowDropTarget(at screenPoint: NSPoint, requiresPermission: Bool) {
+        guard acceptsWindowDrop(at: screenPoint), let window else { return hideWindowDropTarget() }
         let frame = window.convertToScreen(toolbar.convert(toolbar.bounds, to: nil))
+        let message = requiresPermission
+            ? L("追加にはアクセシビリティの許可が必要です")
+            : L("ここで離すとタブに追加")
+        showDropFeedback(frame: frame,
+                         color: (requiresPermission ? NSColor.systemOrange : .controlAccentColor).withAlphaComponent(0.96),
+                         message: message)
+        addButton.contentTintColor = .controlAccentColor
+    }
+
+    func hideWindowDropTarget() {
+        windowDropPanel?.orderOut(nil)
+        addButton.contentTintColor = nil
+    }
+
+    func showExternalTabTargets() {
+        guard dragSource == nil, dragOverlays.isEmpty, !hasSinglePane else { return }
+        dragOverlays = gridAreas.enumerated().map { index, area in
+            let overlay = WorkspaceTabDropOverlay(chrome: self, cellIndex: index, frame: area.bounds)
+            area.addSubview(overlay)
+            return overlay
+        }
+    }
+
+    func hideExternalTabTargets() {
+        hideIncomingTabMarker()
+        guard dragSource == nil else { return }
+        dragOverlays.forEach { $0.removeFromSuperview() }
+        dragOverlays.removeAll()
+    }
+
+    func tabInsertionIndex(at screenPoint: NSPoint) -> Int {
+        layoutSubtreeIfNeeded()
+        guard let window else { return tabs.arrangedSubviews.count }
+        let point = tabs.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        return WindowGeometry.tabInsertionIndex(
+            at: point.x, tabFrames: tabs.arrangedSubviews.map(\.frame),
+            visibleMinX: tabs.visibleRect.minX, visibleMaxX: tabs.visibleRect.maxX
+        )
+    }
+
+    func tabRowContains(_ screenPoint: NSPoint) -> Bool {
+        guard let window, window.frame.contains(screenPoint) else { return false }
+        let point = tabScroll.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        return point.y >= tabScroll.bounds.minY && point.y <= tabScroll.bounds.maxY
+    }
+
+    @discardableResult
+    func completeTabDrop(pasteboard: NSPasteboard, source: NSButton?, screenPoint: NSPoint) -> Bool {
+        guard let window else { return false }
+        if !hasSinglePane, !tabRowContains(screenPoint), let cell = gridAreas.firstIndex(where: {
+            window.convertToScreen($0.convert($0.bounds, to: nil)).contains(screenPoint)
+        }) {
+            return performTabDrop(pasteboard: pasteboard, source: source, cell: cell)
+        }
+        return performTabReorder(pasteboard: pasteboard, source: source, screenPoint: screenPoint)
+    }
+
+    private func showIncomingTabMarker(at screenPoint: NSPoint) {
+        guard let window else { return }
+        let point = convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        guard hasSinglePane || convert(toolbar.bounds, from: toolbar).contains(point) ||
+                !window.frame.contains(screenPoint) else {
+            hideIncomingTabMarker()
+            return
+        }
+        showInsertionMarker(at: screenPoint, color: .controlAccentColor)
+    }
+
+    private func showInsertionMarker(at screenPoint: NSPoint, color: NSColor) {
+        guard let window else { return }
+        let barRect = convert(toolbar.bounds, from: toolbar)
+        let stripRect = tabs.arrangedSubviews.isEmpty ? bounds : convert(tabScroll.contentView.bounds, from: tabScroll.contentView)
+        let x = WindowGeometry.tabInsertionLineX(
+            index: tabInsertionIndex(at: screenPoint),
+            tabFrames: tabs.arrangedSubviews.map { convert($0.frame, from: tabs) },
+            emptyX: convert(workspaceButton.bounds, from: workspaceButton).maxX + 6,
+            visibleMinX: stripRect.minX, visibleMaxX: stripRect.maxX, lineWidth: 3
+        )
+        let markerRect = NSRect(x: x, y: barRect.midY - 14, width: 3, height: 28)
+        let frame = window.convertToScreen(convert(markerRect, to: nil))
+        showDropFeedback(frame: frame, color: color)
+        addButton.contentTintColor = nil
+    }
+
+    private func showDropFeedback(frame: NSRect, color: NSColor, message: String? = nil) {
         if windowDropPanel == nil {
             let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
                                 backing: .buffered, defer: false)
@@ -261,37 +409,94 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
             panel.collectionBehavior = [.transient, .ignoresCycle]
             panel.isOpaque = false
             panel.hasShadow = false
-            let label = NSTextField(labelWithString: "")
-            label.font = .systemFont(ofSize: 13, weight: .semibold)
-            label.textColor = .white
-            label.alignment = .center
-            label.lineBreakMode = .byTruncatingTail
-            label.frame = NSRect(origin: .zero, size: frame.size).insetBy(dx: 8, dy: 6)
-            label.autoresizingMask = [.width, .height]
-            panel.contentView?.addSubview(label)
             windowDropPanel = panel
-            windowDropLabel = label
         }
-        windowDropLabel?.stringValue = requiresPermission
-            ? L("追加にはアクセシビリティの許可が必要です")
-            : hovered ? L("ここで離すとタブに追加") : L("この帯へ移動して離すとタブに追加")
-        let color: NSColor = requiresPermission ? .systemOrange : hovered ? .controlAccentColor : .systemGray
-        windowDropPanel?.backgroundColor = color.withAlphaComponent(0.96)
-        windowDropPanel?.setFrame(frame, display: true)
+        windowDropPanel?.backgroundColor = color
+        windowDropPanel?.setFrame(frame, display: false)
+        if let message {
+            if windowDropLabel == nil {
+                let label = NSTextField(labelWithString: "")
+                label.font = .systemFont(ofSize: 13, weight: .semibold)
+                label.textColor = .white
+                label.alignment = .center
+                label.lineBreakMode = .byTruncatingTail
+                windowDropPanel?.contentView?.addSubview(label)
+                windowDropLabel = label
+            }
+            windowDropLabel?.frame = NSRect(origin: .zero, size: frame.size).insetBy(dx: 8, dy: 6)
+            windowDropLabel?.stringValue = message
+            windowDropLabel?.isHidden = false
+        } else {
+            windowDropLabel?.isHidden = true
+        }
+        windowDropPanel?.contentView?.displayIfNeeded()
+        windowDropPanel?.displayIfNeeded()
         windowDropPanel?.orderFront(nil)
-        addButton.contentTintColor = hovered ? .controlAccentColor : nil
     }
 
-    func hideWindowDropTarget() {
-        windowDropPanel?.orderOut(nil)
-        addButton.contentTintColor = nil
+    private func hideIncomingTabMarker() {
+        hideWindowDropTarget()
     }
 
-    func beginTabDrag(source: NSButton, token: String) {
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { draggingUpdated(sender) }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton),
+              let destination = sender.draggingDestinationWindow else { return [] }
+        let point = destination.convertPoint(toScreen: sender.draggingLocation)
+        _ = updateFloatingTab(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton,
+                              screenPoint: point)
+        return .move
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) { hideIncomingTabMarker() }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let destination = sender.draggingDestinationWindow else { return false }
+        let point = destination.convertPoint(toScreen: sender.draggingLocation)
+        if !hasSinglePane, let cell = gridAreas.firstIndex(where: {
+            destination.convertToScreen($0.convert($0.bounds, to: nil)).contains(point)
+        }) {
+            return performTabDrop(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton, cell: cell)
+        }
+        return performTabReorder(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton,
+                                 screenPoint: point)
+    }
+
+    func beginTabDrag(source: NSButton, token: String, anchor: NSPoint? = nil, previewImage: NSImage? = nil) {
         endTabDrag()
+        guard let group = source.superview as? WorkspaceTabGroup,
+              let index = tabs.arrangedSubviews.firstIndex(of: group) else { return }
+        let frame = group.frame
         dragSource = source
         dragToken = token
-        dragOverlays = gridAreas.enumerated().map { index, area in
+        dragInitialOrder = orderedTabTags()
+        let sourceAnchor = anchor ?? NSPoint(x: source.bounds.midX, y: source.bounds.midY)
+        dragAnchorX = tabs.convert(sourceAnchor, from: source).x - frame.minX
+        dragAnchorInGroup = source.convert(sourceAnchor, to: group)
+        dragPreviewImage = previewImage ?? makeTabDragPreview(for: group)
+        let placeholder = NSView(frame: frame)
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            placeholder.widthAnchor.constraint(equalToConstant: frame.width),
+            placeholder.heightAnchor.constraint(equalToConstant: frame.height)
+        ])
+        tabs.removeArrangedSubview(group)
+        tabs.insertArrangedSubview(placeholder, at: index)
+        tabs.addSubview(group, positioned: .above, relativeTo: nil)
+        group.translatesAutoresizingMaskIntoConstraints = true
+        group.isFloating = true
+        group.frame = frame
+        group.layer?.shadowOpacity = 0.25
+        group.layer?.shadowRadius = 8
+        isPaneTabDrag = false
+        dragGroup = group
+        dragPlaceholder = placeholder
+        dragOverlays = hasSinglePane ? [] : gridAreas.enumerated().map { index, area in
             let overlay = WorkspaceTabDropOverlay(chrome: self, cellIndex: index, frame: area.bounds)
             area.addSubview(overlay)
             return overlay
@@ -301,19 +506,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         window?.orderFront(nil)
         window?.displayIfNeeded()
         CATransaction.flush()
-        watchTabDrag(token: token)
-    }
-
-    /// The drag session's end callback can be lost (e.g. the source tab is re-rendered); never leave the overlays covering the panes.
-    private func watchTabDrag(token: String) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self, self.dragToken == token else { return }
-            if NSEvent.pressedMouseButtons & 1 == 0 {
-                self.endTabDrag()
-            } else {
-                self.watchTabDrag(token: token)
-            }
-        }
+        onTabDragBegin?(source.tag, token, source)
     }
 
     private func updateTabDragOverlays() {
@@ -322,37 +515,231 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         }
     }
 
-    func endTabDrag() {
+    func endTabDrag(at destination: Int? = nil) {
+        if let group = dragGroup, let placeholder = dragPlaceholder {
+            let originalIndex = dragInitialOrder?.firstIndex(of: dragSource?.tag ?? -1)
+                ?? tabs.arrangedSubviews.firstIndex(of: placeholder)
+                ?? tabs.arrangedSubviews.count - 1
+            let index = max(0, min(destination ?? originalIndex, tabs.arrangedSubviews.count - 1))
+            tabs.removeArrangedSubview(placeholder)
+            placeholder.removeFromSuperview()
+            group.translatesAutoresizingMaskIntoConstraints = false
+            group.isFloating = false
+            group.layer?.shadowOpacity = 0
+            group.layer?.shadowRadius = 0
+            group.alphaValue = 1
+            tabs.insertArrangedSubview(group, at: index)
+        } else if let group = dragGroup {
+            group.isFloating = false
+            group.layer?.shadowOpacity = 0
+            group.layer?.shadowRadius = 0
+            group.alphaValue = 1
+        }
         dragSource = nil
+        dragGroup = nil
+        dragPlaceholder = nil
         dragToken = nil
+        dragInitialOrder = nil
+        dragAnchorX = 0
+        dragAnchorInGroup = .zero
+        dragPreviewImage = nil
+        isPaneTabDrag = false
+        tabDragPreviewPanel?.orderOut(nil)
         dragOverlays.forEach { $0.removeFromSuperview() }
         dragOverlays.removeAll()
+        needsLayout = true
         refreshCoverage()
     }
 
+    private func orderedTabTags() -> [Int] {
+        tabs.arrangedSubviews.compactMap { group in
+            if group === dragPlaceholder { return dragSource?.tag }
+            return (group as? NSStackView)?.arrangedSubviews.compactMap { $0 as? WorkspaceTabButton }.first?.tag
+        }
+    }
+
+    private func finishTabDrag(commit: Bool = false) {
+        guard dragSource != nil else { return }
+        let order = orderedTabTags()
+        let changed = commit && order != dragInitialOrder
+        let destination = changed ? order.firstIndex(of: dragSource?.tag ?? -1) : nil
+        endTabDrag(at: destination)
+        if changed { onReorderTabs?(order) }
+    }
+
     func acceptsTabDrag(pasteboard: NSPasteboard, source: NSButton?) -> Bool {
-        guard let dragSource, let dragToken, let source, source === dragSource else { return false }
-        return pasteboard.string(forType: workspaceTabDragType) == dragToken
+        guard let token = pasteboard.string(forType: workspaceTabDragType) else { return false }
+        if let dragSource, let source, source === dragSource { return token == dragToken }
+        return acceptsExternalTab?(token, source) == true
     }
 
     @discardableResult
-    func performTabDrop(pasteboard: NSPasteboard, source: NSButton?, cell: Int) -> Bool {
+    func updateFloatingTab(pasteboard: NSPasteboard, source: NSButton?, screenPoint: NSPoint) -> Bool {
+        if let token = pasteboard.string(forType: workspaceTabDragType),
+           acceptsExternalTab?(token, source) == true {
+            (source as? WorkspaceTabButton)?.chrome?.showDetachedTab(at: screenPoint)
+            showIncomingTabMarker(at: screenPoint)
+            return true
+        }
         guard acceptsTabDrag(pasteboard: pasteboard, source: source),
-              gridAreas.indices.contains(cell), let dragSource else { return false }
-        let tag = dragSource.tag
-        endTabDrag()
-        onMoveTab?(tag, cell)
+              let window, let dragGroup else { return false }
+        let pointInWindow = window.convertPoint(fromScreen: screenPoint)
+        if tabRowContains(screenPoint) || (hasSinglePane && window.frame.contains(screenPoint)) {
+            enterTabReorderMode()
+        } else {
+            enterPaneTabDragMode()
+            showTabDragPreview(at: screenPoint)
+            return true
+        }
+        tabDragPreviewPanel?.orderOut(nil)
+        let pointInTabs = tabs.convert(pointInWindow, from: nil)
+        var frame = dragGroup.frame
+        frame.origin.x = pointInTabs.x - dragAnchorX
+        dragGroup.frame = frame
+        guard let placeholder = dragPlaceholder,
+              var index = tabs.arrangedSubviews.firstIndex(of: placeholder) else { return true }
+        let center = frame.midX
+        while index + 1 < tabs.arrangedSubviews.count,
+              center > tabs.arrangedSubviews[index + 1].frame.midX {
+            index += 1
+            moveDragPlaceholder(placeholder, to: index)
+        }
+        while index > 0,
+              center < tabs.arrangedSubviews[index - 1].frame.midX {
+            index -= 1
+            moveDragPlaceholder(placeholder, to: index)
+        }
+        return true
+    }
+
+    private func makeTabDragPreview(for group: NSView) -> NSImage {
+        let image = NSImage(size: group.bounds.size)
+        if let bitmap = group.bitmapImageRepForCachingDisplay(in: group.bounds) {
+            group.cacheDisplay(in: group.bounds, to: bitmap)
+            image.addRepresentation(bitmap)
+        }
+        return image
+    }
+
+    private func showDetachedTab(at screenPoint: NSPoint) {
+        enterPaneTabDragMode()
+        showTabDragPreview(at: screenPoint)
+    }
+
+    private func showTabDragPreview(at screenPoint: NSPoint) {
+        guard let image = dragPreviewImage else { return }
+        if tabDragPreviewPanel == nil {
+            let frame = NSRect(origin: .zero, size: image.size)
+            let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+                                backing: .buffered, defer: false)
+            panel.level = .floating
+            panel.ignoresMouseEvents = true
+            panel.hidesOnDeactivate = false
+            panel.isReleasedWhenClosed = false
+            panel.isExcludedFromWindowsMenu = true
+            panel.collectionBehavior = [.transient, .ignoresCycle]
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = true
+            let imageView = NSImageView(frame: frame)
+            imageView.image = image
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.autoresizingMask = [.width, .height]
+            panel.contentView?.addSubview(imageView)
+            tabDragPreviewPanel = panel
+            tabDragPreviewImageView = imageView
+        }
+        tabDragPreviewImageView?.image = image
+        tabDragPreviewImageView?.frame = NSRect(origin: .zero, size: image.size)
+        tabDragPreviewPanel?.setContentSize(image.size)
+        tabDragPreviewPanel?.setFrameOrigin(NSPoint(
+            x: screenPoint.x - dragAnchorInGroup.x,
+            y: screenPoint.y - dragAnchorInGroup.y
+        ))
+        tabDragPreviewPanel?.orderFront(nil)
+    }
+
+    private func enterPaneTabDragMode() {
+        guard !isPaneTabDrag, let group = dragGroup, let placeholder = dragPlaceholder else { return }
+        let index = dragInitialOrder?.firstIndex(of: dragSource?.tag ?? -1)
+            ?? tabs.arrangedSubviews.firstIndex(of: placeholder)
+            ?? tabs.arrangedSubviews.count - 1
+        tabs.removeArrangedSubview(placeholder)
+        placeholder.removeFromSuperview()
+        group.translatesAutoresizingMaskIntoConstraints = false
+        group.isFloating = false
+        group.layer?.shadowOpacity = 0
+        group.layer?.shadowRadius = 0
+        group.alphaValue = 0.4
+        tabs.insertArrangedSubview(group, at: max(0, min(index, tabs.arrangedSubviews.count)))
+        dragPlaceholder = nil
+        isPaneTabDrag = true
+    }
+
+    private func enterTabReorderMode() {
+        guard isPaneTabDrag, let group = dragGroup,
+              let index = tabs.arrangedSubviews.firstIndex(of: group) else { return }
+        let frame = group.frame
+        let placeholder = NSView(frame: frame)
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            placeholder.widthAnchor.constraint(equalToConstant: frame.width),
+            placeholder.heightAnchor.constraint(equalToConstant: frame.height)
+        ])
+        tabs.removeArrangedSubview(group)
+        tabs.insertArrangedSubview(placeholder, at: index)
+        tabs.addSubview(group, positioned: .above, relativeTo: nil)
+        group.translatesAutoresizingMaskIntoConstraints = true
+        group.isFloating = true
+        group.alphaValue = 1
+        group.layer?.shadowOpacity = 0.25
+        group.layer?.shadowRadius = 8
+        group.frame = frame
+        dragPlaceholder = placeholder
+        isPaneTabDrag = false
+    }
+
+    private func moveDragPlaceholder(_ placeholder: NSView, to index: Int) {
+        tabs.removeArrangedSubview(placeholder)
+        tabs.insertArrangedSubview(placeholder, at: index)
+        tabs.layoutSubtreeIfNeeded()
+    }
+
+    @discardableResult
+    func performTabReorder(pasteboard: NSPasteboard, source: NSButton?, screenPoint: NSPoint) -> Bool {
+        if let token = pasteboard.string(forType: workspaceTabDragType),
+           acceptsExternalTab?(token, source) == true {
+            let index = tabInsertionIndex(at: screenPoint)
+            hideIncomingTabMarker()
+            return onExternalTabDrop?(token, source, index, nil) == true
+        }
+        guard acceptsTabDrag(pasteboard: pasteboard, source: source),
+              let dragSource else { return false }
+        _ = updateFloatingTab(pasteboard: pasteboard, source: source, screenPoint: screenPoint)
+        let order = orderedTabTags()
+        let changed = order != dragInitialOrder
+        let insertionIndex = order.firstIndex(of: dragSource.tag)
+        endTabDrag(at: insertionIndex)
+        if changed { onReorderTabs?(order) }
         return true
     }
 
     @discardableResult
-    func performTabSwap(pasteboard: NSPasteboard, source: NSButton?, target: NSButton) -> Bool {
+    func performTabDrop(pasteboard: NSPasteboard, source: NSButton?, cell: Int) -> Bool {
+        if let token = pasteboard.string(forType: workspaceTabDragType),
+           acceptsExternalTab?(token, source) == true, gridAreas.indices.contains(cell) {
+            hideIncomingTabMarker()
+            return onExternalTabDrop?(token, source, nil, cell) == true
+        }
         guard acceptsTabDrag(pasteboard: pasteboard, source: source),
-              let dragSource, dragSource !== target else { return false }
-        let sourceTag = dragSource.tag
-        let targetTag = target.tag
-        endTabDrag()
-        onSwapTabs?(sourceTag, targetTag)
+              gridAreas.indices.contains(cell), let dragSource else { return false }
+        let tag = dragSource.tag
+        let order = orderedTabTags()
+        let changed = order != dragInitialOrder
+        let destination = changed ? order.firstIndex(of: tag) : nil
+        endTabDrag(at: destination)
+        onMoveTab?(tag, cell)
+        if changed { onReorderTabs?(order) }
         return true
     }
 
@@ -406,11 +793,14 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
 
     func clearTabs() {
         endTabDrag()
+        NSLayoutConstraint.deactivate(tabSizing.map(\.constraint))
+        tabSizing.removeAll()
         for view in tabs.arrangedSubviews {
             tabs.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
         maximumTabWidth.constant = 0
+        preferredTabWidth.constant = 0
         tabScroll.isHidden = true
         tabScroll.contentView.scroll(to: .zero)
     }
@@ -418,15 +808,29 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     @discardableResult
     func appendTab(title: String, icon: NSImage? = nil, selected: Bool, displayed: Bool = false) -> (view: NSView, select: NSButton, close: NSButton) {
         let select = WorkspaceTabButton(title: title, target: nil, action: nil)
-        select.onDragBegin = { [weak self] button, token in self?.beginTabDrag(source: button, token: token) }
-        select.onDragEnd = { [weak self] in self?.endTabDrag() }
+        select.chrome = self
+        select.onDragBegin = { [weak self] button, token, anchor, image in
+            self?.beginTabDrag(source: button, token: token, anchor: anchor, previewImage: image)
+            button.onDragEnd = { [weak self] board, point, cancelled in
+                self?.onTabDragEnd?(token, board, point, cancelled)
+                self?.finishTabDrag(commit: false)
+            }
+        }
+        select.onDragMove = { [weak self, weak select] board, point in
+            guard let self, let select, let token = self.dragToken else { return }
+            _ = self.updateFloatingTab(pasteboard: board, source: select, screenPoint: point)
+            self.onTabDragMove?(token, board, select, point)
+        }
         select.registerForDraggedTypes([workspaceTabDragType])
         select.acceptsTabDrop = { [weak self] pasteboard, source in
             self?.acceptsTabDrag(pasteboard: pasteboard, source: source) == true
         }
-        select.performTabDrop = { [weak self, weak select] pasteboard, source in
-            guard let self, let select else { return false }
-            return self.performTabSwap(pasteboard: pasteboard, source: source, target: select)
+        select.updateTabDrop = { [weak self] pasteboard, source, point in
+            self?.updateFloatingTab(pasteboard: pasteboard, source: source, screenPoint: point) == true
+        }
+        select.performTabDrop = { [weak self] pasteboard, source, point in
+            guard let self else { return false }
+            return self.performTabReorder(pasteboard: pasteboard, source: source, screenPoint: point)
         }
         select.makeContextMenu = { [weak self, weak select] in
             guard let self, let select else { return NSMenu() }
@@ -445,7 +849,18 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         select.toolTip = title
         select.setAccessibilityValue(selected ? L("操作対象") : (displayed ? L("分割表示中") : L("未選択")))
         let close = Self.makeButton(symbol: "xmark", title: L("元の位置に戻してタブから解除"), width: 18)
-        let group = NSStackView(views: [select, close])
+        let group = WorkspaceTabGroup(views: [select, close])
+        group.acceptsTabDrop = { [weak self] pasteboard, source in
+            self?.acceptsTabDrag(pasteboard: pasteboard, source: source) == true
+        }
+        group.updateTabDrop = { [weak self] pasteboard, source, point in
+            guard let self else { return false }
+            return self.updateFloatingTab(pasteboard: pasteboard, source: source, screenPoint: point)
+        }
+        group.performTabDrop = { [weak self] pasteboard, source, point in
+            guard let self else { return false }
+            return self.performTabReorder(pasteboard: pasteboard, source: source, screenPoint: point)
+        }
         group.spacing = 4
         group.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 4)
         group.wantsLayer = true
@@ -454,15 +869,23 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         group.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.6).cgColor
         group.layer?.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         group.layer?.backgroundColor = (selected ? NSColor.controlBackgroundColor : NSColor.unemphasizedSelectedContentBackgroundColor.withAlphaComponent(0.35)).cgColor
+        let selectWidth = select.widthAnchor.constraint(equalToConstant: 200)
+        tabSizing.append((select, selectWidth))
         NSLayoutConstraint.activate([
-            select.widthAnchor.constraint(greaterThanOrEqualToConstant: 70),
+            select.widthAnchor.constraint(greaterThanOrEqualToConstant: 48),
             select.widthAnchor.constraint(lessThanOrEqualToConstant: 200),
+            selectWidth,
             select.heightAnchor.constraint(equalToConstant: 28),
             group.heightAnchor.constraint(equalToConstant: 32)
         ])
         tabs.addArrangedSubview(group)
-        maximumTabWidth.constant = tabs.fittingSize.width
+        let count = CGFloat(tabSizing.count)
+        let naturalWidth = count * 234 + CGFloat(max(0, tabSizing.count - 1)) * tabs.spacing
+        maximumTabWidth.constant = naturalWidth
+        preferredTabWidth.constant = naturalWidth
         tabScroll.isHidden = false
+        updateTabWidths()
+        needsLayout = true
         return (group, select, close)
     }
 
@@ -480,10 +903,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
 
     @discardableResult
     func showNotice(_ message: WorkspaceNotice) -> Bool {
-        // Collapse only after a delay: resizing the stage re-triggers a sync that can toggle the notice again (flicker loop).
-        noticeCollapse?.cancel()
-        noticeCollapse = nil
-        let height: CGFloat = message.needsAttention ? 22 : noticeHeight.constant
+        let height: CGFloat = message.needsAttention ? 22 : 0
         let changed = noticeHeight.constant != height
         notice.stringValue = message.text
         notice.toolTip = message.text
@@ -491,15 +911,6 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         if changed {
             noticeHeight.constant = height
             needsLayout = true
-        }
-        if !message.needsAttention, noticeHeight.constant != 0 {
-            let work = DispatchWorkItem { [weak self] in
-                guard let self, self.notice.isHidden, self.noticeHeight.constant != 0 else { return }
-                self.noticeHeight.constant = 0
-                self.needsLayout = true
-            }
-            noticeCollapse = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
         }
         permissionButton.toolTip = L("権限設定\n%@", message.text)
         permissionButton.contentTintColor = message.needsAttention ? .systemOrange : .secondaryLabelColor

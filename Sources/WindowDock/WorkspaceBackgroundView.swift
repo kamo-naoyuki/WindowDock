@@ -1,13 +1,6 @@
 import AppKit
 import QuartzCore
-
-struct WorkspaceResizeEdges: OptionSet {
-    let rawValue: Int
-    static let left = Self(rawValue: 1 << 0)
-    static let right = Self(rawValue: 1 << 1)
-    static let bottom = Self(rawValue: 1 << 2)
-    static let top = Self(rawValue: 1 << 3)
-}
+import WindowDockCore
 
 final class WorkspaceWindow: NSWindow {
     private(set) var isApplyingWorkspaceFrame = false
@@ -15,6 +8,70 @@ final class WorkspaceWindow: NSWindow {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        if !isMovable, event.type == .leftMouseDown,
+           let workspace = contentView as? WorkspaceBackgroundView {
+            let point = workspace.convert(event.locationInWindow, from: nil)
+            let inTitlebar = event.locationInWindow.y >= contentLayoutRect.maxY
+            // Panes and their cells cover most edges; the resize bands and grip must win over them.
+            let onResizeEdge = !workspace.resizeEdges(at: point).isEmpty
+            if inTitlebar || onResizeEdge {
+                let nativeButtons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+                let overNativeButton = nativeButtons.contains { type in
+                    guard let button = standardWindowButton(type), !button.isHidden else { return false }
+                    return button.convert(button.bounds, to: nil).contains(event.locationInWindow)
+                }
+                var hit = workspace.hitTest(point)
+                var overControl = false
+                while let view = hit {
+                    if view is NSControl || view is NSScrollView {
+                        overControl = true
+                        break
+                    }
+                    hit = view.superview
+                }
+                if !overNativeButton, !overControl {
+                    makeKeyAndOrderFront(nil)
+                    workspace.trackFrameChange(with: event)
+                    return
+                }
+            }
+        }
+        super.sendEvent(event)
+    }
+
+    private var preparingFrameChange = false
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        guard !preparingFrameChange, !isApplyingWorkspaceFrame,
+              frameRect != frame, let workspace = contentView as? WorkspaceBackgroundView else {
+            super.setFrame(frameRect, display: flag)
+            return
+        }
+        preparingFrameChange = true
+        workspace.prepareForFrameChange(to: frameRect)
+        defer {
+            workspace.finishFrameChange()
+            preparingFrameChange = false
+        }
+        super.setFrame(frameRect, display: flag)
+    }
+
+    override func setFrameOrigin(_ point: NSPoint) {
+        guard !preparingFrameChange, !isApplyingWorkspaceFrame,
+              point != frame.origin, let workspace = contentView as? WorkspaceBackgroundView else {
+            super.setFrameOrigin(point)
+            return
+        }
+        preparingFrameChange = true
+        workspace.prepareForFrameChange(to: NSRect(origin: point, size: frame.size))
+        defer {
+            workspace.finishFrameChange()
+            preparingFrameChange = false
+        }
+        super.setFrameOrigin(point)
+    }
 
     func toggleMaximize() { zoom(nil) }
 
@@ -29,28 +86,6 @@ final class WorkspaceWindow: NSWindow {
         }
         setFrame(frame, display: true)
         onWorkspaceFrameChange?()
-    }
-
-    static func resizedFrame(
-        from frame: NSRect,
-        delta: NSSize,
-        edges: WorkspaceResizeEdges,
-        minimumSize: NSSize
-    ) -> NSRect {
-        var result = frame
-        if edges.contains(.left) {
-            result.size.width = max(minimumSize.width, frame.width - delta.width)
-            result.origin.x = frame.maxX - result.width
-        } else if edges.contains(.right) {
-            result.size.width = max(minimumSize.width, frame.width + delta.width)
-        }
-        if edges.contains(.bottom) {
-            result.size.height = max(minimumSize.height, frame.height - delta.height)
-            result.origin.y = frame.maxY - result.height
-        } else if edges.contains(.top) {
-            result.size.height = max(minimumSize.height, frame.height + delta.height)
-        }
-        return result
     }
 }
 
@@ -70,9 +105,7 @@ class WorkspaceBackgroundView: NSView {
     }
     private var transitionClips: [NSRect]?
 
-    private var resizeGrip: NSRect {
-        NSRect(x: bounds.maxX - 18, y: bounds.minY, width: 18, height: 18)
-    }
+    private var resizeGrip: NSRect { WorkspaceResize.grip(in: bounds) }
 
     private var visibleContentRects: [NSRect] {
         guard revealsWindow, let window else { return [] }
@@ -114,9 +147,16 @@ class WorkspaceBackgroundView: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
+        trackFrameChange(with: event)
+    }
+
+    /// Resizes from an edge or corner and moves from anywhere else, under application control.
+    func trackFrameChange(with event: NSEvent) {
+        trackFrameChange(with: event, edges: resizeEdges(at: convert(event.locationInWindow, from: nil)))
+    }
+
+    private func trackFrameChange(with event: NSEvent, edges: WorkspaceResizeEdges) {
         guard let window = window as? WorkspaceWindow else { return }
-        let location = convert(event.locationInWindow, from: nil)
-        let edges = resizeEdges(at: location)
         if edges.isEmpty, event.clickCount == 2 {
             window.toggleMaximize()
             return
@@ -130,7 +170,7 @@ class WorkspaceBackgroundView: NSView {
             dequeue: true
         ) {
             var mouse = NSEvent.mouseLocation
-            if next.type == .leftMouseUp, let location = next.cgEvent?.location,
+            if let location = next.cgEvent?.location,
                let primaryScreen = NSScreen.screens.first {
                 mouse = NSPoint(x: location.x, y: primaryScreen.frame.maxY - location.y)
             }
@@ -139,8 +179,9 @@ class WorkspaceBackgroundView: NSView {
             if edges.isEmpty {
                 frame = startFrame.offsetBy(dx: delta.width, dy: delta.height)
             } else {
-                frame = WorkspaceWindow.resizedFrame(
-                    from: startFrame, delta: delta, edges: edges, minimumSize: window.minSize
+                frame = WorkspaceResize.resizedFrame(
+                    from: startFrame, delta: delta, edges: edges, minimumSize: window.minSize,
+                    maximumTop: window.screen?.visibleFrame.maxY ?? .greatestFiniteMagnitude
                 )
             }
             window.setWorkspaceFrame(frame)
@@ -150,21 +191,16 @@ class WorkspaceBackgroundView: NSView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        addCursorRect(NSRect(x: 0, y: 0, width: 8, height: bounds.height), cursor: .resizeLeftRight)
-        addCursorRect(NSRect(x: bounds.maxX - 8, y: 0, width: 8, height: bounds.height), cursor: .resizeLeftRight)
-        addCursorRect(NSRect(x: 0, y: 0, width: bounds.width, height: 8), cursor: .resizeUpDown)
-        addCursorRect(NSRect(x: 0, y: bounds.maxY - 8, width: bounds.width, height: 8), cursor: .resizeUpDown)
+        let edge = WorkspaceResize.edgeThickness
+        addCursorRect(NSRect(x: 0, y: 0, width: edge, height: bounds.height), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: bounds.maxX - edge, y: 0, width: edge, height: bounds.height), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: 0, y: 0, width: bounds.width, height: edge), cursor: .resizeUpDown)
+        addCursorRect(NSRect(x: 0, y: bounds.maxY - edge, width: bounds.width, height: edge), cursor: .resizeUpDown)
         addCursorRect(resizeGrip, cursor: .crosshair)
     }
 
-    private func resizeEdges(at point: NSPoint) -> WorkspaceResizeEdges {
-        if resizeGrip.contains(point) { return [.right, .bottom] }
-        var edges: WorkspaceResizeEdges = []
-        if point.x < bounds.minX + 8 { edges.insert(.left) }
-        if point.x > bounds.maxX - 8 { edges.insert(.right) }
-        if point.y < bounds.minY + 8 { edges.insert(.bottom) }
-        if point.y > bounds.maxY - 8 { edges.insert(.top) }
-        return edges
+    func resizeEdges(at point: NSPoint) -> WorkspaceResizeEdges {
+        WorkspaceResize.edges(at: point, in: bounds)
     }
 
     func refreshCoverage() {
