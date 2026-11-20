@@ -46,7 +46,7 @@ The app is not notarized, so on first launch right-click it and choose "Open".
 
 ## Workspaces
 
-Each WindowDock window is a workspace: one task's worth of windows, shown as tabs. Create more with ⌘N and switch between them with the usual macOS tools (Mission Control, Spaces). The **Workspace** menu lists every workspace and its windows; choose one to bring it to the front, or rename/close the workspace. A window can belong to only one workspace.
+Each WindowDock window is a workspace: one task's worth of windows, shown as tabs. Create more with ⌘N and switch between them with the usual macOS tools (Mission Control, Spaces). The **Workspace** menu lists every workspace and its windows, and the Dock icon's menu lists every workspace; choose one to bring it to the front while the other workspaces move behind your other apps' windows. The Workspace menu can also rename/close the workspace. A window can belong to only one workspace.
 
 Moving a tab between workspaces retains the window's original position and minimized state, so releasing it from its new workspace still restores its pre-registration state.
 

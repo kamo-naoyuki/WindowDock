@@ -4,8 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-swift build --target WindowDockCore
-BIN="$(swift build --show-bin-path)"
+swift build --build-system native --target WindowDockCore
+BIN="$(swift build --build-system native --show-bin-path)"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
@@ -15,12 +15,12 @@ for source in Sources/WindowDock/*.swift; do
 done
 
 build() {
-  swiftc -parse-as-library -module-name WindowDockSmoke -I "$BIN" -I "$BIN/Modules" \
+  swiftc -parse-as-library -module-name WindowDockSmoke -I "$BIN/Modules" -I "$BIN" \
     "${APP_SOURCES[@]}" "$BIN"/WindowDockCore.build/*.o "$@"
 }
 
 build Tests/WindowDockUITests/WorkspaceBackgroundSmoke.swift Tests/WindowDockUITests/WindowSessionSmoke.swift \
-  -o "$OUT/workspace-smoke"
+  Tests/WindowDockUITests/WorkspaceActivationSmoke.swift -o "$OUT/workspace-smoke"
 build Tests/WindowDockUITests/TabLayoutSmoke.swift -o "$OUT/tab-layout-smoke"
 
 "$OUT/workspace-smoke" "$@"

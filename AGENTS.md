@@ -6,7 +6,8 @@ macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a
 
 - `swift build` – debug build. `bash build-app.sh` → `dist/WindowDock.app` (signs, embeds Sparkle). `build-dmg.sh` → DMG.
 - `swift test` – runs only `Tests/WindowDockCoreTests` (needs full Xcode for XCTest).
-- `Tests/WindowDockUITests/*Smoke.swift` are manual smoke harnesses against real windows; they are **not** SwiftPM targets. Run them with `Tests/WindowDockUITests/run-smoke.sh` (compiles them with every app source except `App.swift`; `--tab-move-only` / `--window-drop-only` run subsets). They open real windows, so other apps' windows moving in front can cause hit-test failures.
+- `Tests/WindowDockUITests/*Smoke.swift` are manual smoke harnesses against real windows; they are **not** SwiftPM targets. Run them with `Tests/WindowDockUITests/run-smoke.sh` (compiles them with every app source except `App.swift`, so move logic worth testing out of `App.swift`; `--tab-move-only` / `--window-drop-only` / `--activation-only` run subsets). They open real windows, so other apps' windows moving in front can cause hit-test failures.
+- If `xcode-select -p` points at the Command Line Tools and `swift` fails, prefix commands with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.
 - `dist/` is build output; don't edit it.
 
 ## Fixing bugs
@@ -35,6 +36,7 @@ When you find or are asked to fix a bug, follow this order:
 | Concern | File |
 |---|---|
 | Entry point (`@main`), `AppDelegate`: menus, workspace list, restore on launch, global key/mouse monitors, cross-app window-drag polling, quit/restore | `App.swift` |
+| Which workspace comes forward on app activation, Dock click/menu or Workspace menu, and sending the other workspaces back (`WorkspaceActivation`) | `WorkspaceActivation.swift` |
 | One workspace = one `WorkspaceController` (owns the NSWindow, wires `WindowSession` ↔ views, NSWindowDelegate, picker, drop handling) | `WorkspaceController.swift` |
 | Model/state of a workspace: managed windows, grid cells, selection, sync/align/raise, suspend/resume, restore originals | `WindowSession.swift` |
 | All Accessibility API calls (`WindowAccess`), `WindowAccessClient` (injectable for tests), `WindowCandidate`, window scanning, window-server list | `Accessibility.swift` |

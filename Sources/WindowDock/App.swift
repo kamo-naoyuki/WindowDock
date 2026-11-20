@@ -40,12 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastWindowSnapshot: TimeInterval = 0
     private var dragSamplingFailed = false
     private var activeTabDrag: (controller: WorkspaceController, id: UUID, token: String, button: NSButton)?
+    private lazy var activation = WorkspaceActivation { [weak self] in self?.controllers ?? [] }
 
-    /// The workspace whose window is key, falling back to the main or first one.
-    private var activeController: WorkspaceController? {
-        controllers.first { $0.window.isKeyWindow } ??
-            controllers.first { $0.window.isMainWindow } ?? controllers.first
-    }
+    private var activeController: WorkspaceController? { activation.activeController }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -303,13 +300,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showWorkspace(_ sender: NSMenuItem) {
-        (sender.representedObject as? WorkspaceController)?.bringToFront()
+        guard let controller = sender.representedObject as? WorkspaceController else { return }
+        activation.show(controller)
     }
 
     @objc private func showWorkspaceWindow(_ sender: NSMenuItem) {
         guard let ref = sender.representedObject as? WorkspaceWindowRef else { return }
         ref.controller.session.select(ref.id)
-        ref.controller.bringToFront()
+        activation.show(ref.controller)
     }
 
     // MARK: Workspaces
@@ -654,44 +652,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshGlobalMonitor()
-        // A click raises only the clicked workspace, which is not key yet; guessing the active workspace now
-        // would send the clicked one behind the others until the mouse is released.
-        if let clicked = activatingClickWindow() {
-            controllers.first { CGWindowID($0.window.windowNumber) == clicked }?.scheduleSelectedWindowRaise()
-            return
-        }
-        activeController?.scheduleSelectedWindowRaise()
-        sendInactiveWorkspacesBack()
-    }
-
-    private func activatingClickWindow() -> CGWindowID? {
-        guard let screen = NSScreen.screens.first, let windows = try? WindowAccess.windowServerWindows() else { return nil }
-        let point = NSEvent.mouseLocation
-        let age = [CGEventType.leftMouseDown, .rightMouseDown, .otherMouseDown].map {
-            CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0)
-        }.min() ?? .infinity
-        return WindowHitTesting.activatingClick(
-            at: CGPoint(x: point.x, y: screen.frame.maxY - point.y),
-            windows: windows.map { ($0.id, $0.processID, $0.frame) },
-            ownPID: ProcessInfo.processInfo.processIdentifier,
-            buttonDown: NSEvent.pressedMouseButtons != 0, secondsSinceMouseDown: age
-        )
-    }
-
-    /// Activating the app raises every workspace's backdrop; keep the other workspaces behind so their frames don't cover the active one.
-    private func sendInactiveWorkspacesBack() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let active = self.activeController else { return }
-            for controller in self.controllers where controller !== active && controller.window.isVisible && !controller.window.isMiniaturized {
-                controller.window.orderBack(nil)
-            }
-        }
+        activation.applicationDidBecomeActive()
     }
 
     /// A Dock click brings back only the last used workspace; others are reachable from the Dock menu.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        activeController?.bringToFront()
-        sendInactiveWorkspacesBack()
+        activation.reopen()
         return false
     }
 

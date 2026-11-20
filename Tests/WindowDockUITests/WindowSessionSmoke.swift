@@ -405,6 +405,20 @@ enum WindowSessionSmoke {
             while let line = readLine() {
                 if line.hasPrefix("raise "), let index = Int(line.dropFirst(6)) {
                     DispatchQueue.main.async { windows[index].orderFrontRegardless() }
+                } else if line.hasPrefix("yield "), let pid = pid_t(line.dropFirst(6)) {
+                    // Stands in for the Dock, which lets the app whose Dock menu item was chosen activate itself.
+                    DispatchQueue.main.async {
+                        if #available(macOS 14, *), let target = NSRunningApplication(processIdentifier: pid) {
+                            application.yieldActivation(to: target)
+                        }
+                    }
+                } else if line.hasPrefix("activate "), let pid = pid_t(line.dropFirst(9)) {
+                    // Like the Dock, activates the app with all of its windows.
+                    DispatchQueue.main.async {
+                        if #available(macOS 14, *), let target = NSRunningApplication(processIdentifier: pid) {
+                            _ = target.activate(from: .current, options: [.activateAllWindows])
+                        }
+                    }
                 }
             }
             exit(0)
