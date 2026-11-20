@@ -38,6 +38,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     var onActivateCell: ((Int) -> Void)?
     var onPaneLayoutChange: (() -> Void)?
     var onMoveTab: ((Int, Int) -> Void)?
+    var onSwapTabs: ((Int, Int) -> Void)?
     var onCloseTabs: ((Range<Int>) -> Void)?
     let addButton = makeButton(symbol: "plus", title: L("ウィンドウを追加"), width: 26)
     let permissionButton = makeButton(symbol: "gearshape", title: L("権限設定"), width: 26)
@@ -344,6 +345,17 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         return true
     }
 
+    @discardableResult
+    func performTabSwap(pasteboard: NSPasteboard, source: NSButton?, target: NSButton) -> Bool {
+        guard acceptsTabDrag(pasteboard: pasteboard, source: source),
+              let dragSource, dragSource !== target else { return false }
+        let sourceTag = dragSource.tag
+        let targetTag = target.tag
+        endTabDrag()
+        onSwapTabs?(sourceTag, targetTag)
+        return true
+    }
+
     private func tabContextMenu(for button: NSButton) -> NSMenu {
         let menu = NSMenu()
         let move = NSMenuItem(title: L("配置を入れ替え"), action: nil, keyEquivalent: "")
@@ -408,6 +420,14 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         let select = WorkspaceTabButton(title: title, target: nil, action: nil)
         select.onDragBegin = { [weak self] button, token in self?.beginTabDrag(source: button, token: token) }
         select.onDragEnd = { [weak self] in self?.endTabDrag() }
+        select.registerForDraggedTypes([workspaceTabDragType])
+        select.acceptsTabDrop = { [weak self] pasteboard, source in
+            self?.acceptsTabDrag(pasteboard: pasteboard, source: source) == true
+        }
+        select.performTabDrop = { [weak self, weak select] pasteboard, source in
+            guard let self, let select else { return false }
+            return self.performTabSwap(pasteboard: pasteboard, source: source, target: select)
+        }
         select.makeContextMenu = { [weak self, weak select] in
             guard let self, let select else { return NSMenu() }
             return self.tabContextMenu(for: select)

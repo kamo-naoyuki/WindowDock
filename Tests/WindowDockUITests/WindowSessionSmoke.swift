@@ -110,6 +110,16 @@ enum WindowSessionSmoke {
 
     static func runChecks() -> [String] {
         var failures: [String] = []
+        let (orderingSession, orderingModel) = fixture()
+        let originalOrder = orderingSession.windows.map(\.id)
+        let originalCells = orderingSession.cells
+        orderingSession.swapWindows(originalOrder[0], originalOrder[2])
+        if orderingSession.windows.map(\.id) != [originalOrder[2], originalOrder[1], originalOrder[0]] ||
+            orderingSession.cells != originalCells || orderingModel.changeCount != 1 ||
+            !orderingModel.operations.isEmpty {
+            failures.append("swapping tab order changed pane assignments or window state")
+        }
+
         let (session, model) = fixture()
         guard session.windows.count == 3 else { return ["stacked fixture could not register windows"] }
         let ids = session.windows.map(\.id)

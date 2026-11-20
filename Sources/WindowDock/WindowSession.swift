@@ -204,6 +204,14 @@ final class WindowSession {
         presentVisibleWindows()
     }
 
+    func swapWindows(_ firstID: UUID, _ secondID: UUID) {
+        guard let first = windows.firstIndex(where: { $0.id == firstID }),
+              let second = windows.firstIndex(where: { $0.id == secondID }),
+              first != second else { return }
+        windows.swapAt(first, second)
+        onChange?()
+    }
+
     private func presentVisibleWindows() {
         var errors: [Error] = []
         for window in visibleWindows {

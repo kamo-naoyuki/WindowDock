@@ -93,6 +93,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
             guard let self, self.tabIDs.indices.contains(tab) else { return }
             self.session.moveWindow(self.tabIDs[tab], toCell: cell)
         }
+        workspace.onSwapTabs = { [weak self] source, target in
+            guard let self, self.tabIDs.indices.contains(source), self.tabIDs.indices.contains(target) else { return }
+            self.session.swapWindows(self.tabIDs[source], self.tabIDs[target])
+        }
         workspace.onPaneLayoutChange = { [weak self] in
             DispatchQueue.main.async { self?.syncIfVisible() }
         }

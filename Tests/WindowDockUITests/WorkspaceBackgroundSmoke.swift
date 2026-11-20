@@ -628,7 +628,9 @@ enum WorkspaceBackgroundSmoke {
         chrome.setGrid(WorkspaceGridSize(columns: 2, rows: 1), activeCell: 0)
         chrome.showManagedWindows(true)
         let tab = chrome.appendTab(title: "Move source", selected: true)
+        let targetTab = chrome.appendTab(title: "Swap target", selected: false)
         tab.select.tag = 77
+        targetTab.select.tag = 78
         chrome.layoutSubtreeIfNeeded()
         let targets = chrome.gridAreas.map { area -> WorkspaceWindow in
             let rect = host.convertToScreen(area.convert(area.bounds, to: nil))
@@ -728,6 +730,19 @@ enum WorkspaceBackgroundSmoke {
         }
         if moves.count != 1 || moves[0].0 != 77 || moves[0].1 != 1 {
             failures.append("drag did not report source tag and destination cell")
+        }
+        var swaps: [(Int, Int)] = []
+        chrome.onSwapTabs = { swaps.append(($0, $1)) }
+        chrome.beginTabDrag(source: tab.select, token: "swap-token")
+        board.setString("swap-token", forType: type)
+        let swap = TabDragInfo(pasteboard: board, source: tab.select)
+        if targetTab.select.draggingEntered(swap) != .move ||
+            !targetTab.select.prepareForDragOperation(swap) ||
+            !targetTab.select.performDragOperation(swap) {
+            failures.append("tab drop did not route an internal tab swap")
+        }
+        if swaps.count != 1 || swaps[0].0 != 77 || swaps[0].1 != 78 {
+            failures.append("tab drop did not report source and target tab tags")
         }
         flush()
         for index in 0..<2 {

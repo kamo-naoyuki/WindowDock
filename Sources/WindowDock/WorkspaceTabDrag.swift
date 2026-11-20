@@ -7,6 +7,8 @@ final class WorkspaceTabButton: NSButton, NSDraggingSource {
     var onDragBegin: ((WorkspaceTabButton, String) -> Void)?
     var onDragEnd: (() -> Void)?
     var makeContextMenu: (() -> NSMenu)?
+    var acceptsTabDrop: ((NSPasteboard, NSButton?) -> Bool)?
+    var performTabDrop: ((NSPasteboard, NSButton?) -> Bool)?
 
     override func menu(for event: NSEvent) -> NSMenu? { makeContextMenu?() }
 
@@ -51,6 +53,22 @@ final class WorkspaceTabButton: NSButton, NSDraggingSource {
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
         context == .withinApplication ? .move : []
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        acceptsTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton) == true ? .move : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        acceptsTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton) == true ? .move : []
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        acceptsTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton) == true
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        performTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton) == true
     }
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
