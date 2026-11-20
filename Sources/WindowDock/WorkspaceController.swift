@@ -76,7 +76,14 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
             return menu
         }
         workspace.onGridChange = { [weak self] in self?.session.setGrid($0) }
-        workspace.onActivateCell = { [weak self] in self?.session.activateCell($0) }
+        workspace.onActivateCell = { [weak self] index in
+            guard let self else { return }
+            self.session.activateCell(index)
+            // A click can land on this window's transparent aperture instead of the managed window; hand focus over explicitly.
+            if self.session.cells.indices.contains(index), let id = self.session.cells[index] {
+                self.session.select(id, activate: true)
+            }
+        }
         workspace.onCloseTabs = { [weak self] range in
             guard let self else { return }
             let ids = Array(self.tabIDs[range.clamped(to: self.tabIDs.indices)])
@@ -319,10 +326,27 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) {
         if !window.isApplyingWorkspaceFrame { syncIfVisible() }
+        scheduleSettledSync()
     }
 
     func windowDidResize(_ notification: Notification) {
         if !window.isApplyingWorkspaceFrame { syncIfVisible() }
+        scheduleSettledSync()
+    }
+
+    private var settledSyncGeneration = 0
+
+    /// Zoom animates the frame, and target apps resize asynchronously; realign once everything has settled
+    /// so the managed window fully covers its pane instead of leaving the opaque pane exposed.
+    private func scheduleSettledSync() {
+        settledSyncGeneration += 1
+        let generation = settledSyncGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, generation == self.settledSyncGeneration,
+                  !self.suspended, self.picker == nil, !self.quitting, !self.window.isMiniaturized else { return }
+            self.workspace.refreshCoverage()
+            self.session.realign()
+        }
     }
 
     func syncIfVisible() {

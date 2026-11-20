@@ -3,7 +3,7 @@ import WindowDockCore
 
 struct ManagedWindow {
     let id = UUID()
-    let candidate: WindowCandidate
+    var candidate: WindowCandidate
     let originalFrame: CGRect
     let originallyMinimized: Bool
 
@@ -40,6 +40,7 @@ final class WindowSession {
     private var assignments: [UUID: Int] = [:]
     private var minimumSizes: [UUID: CGSize] = [:]
     private var isSynchronizing = false
+    private var resyncRequested = false
 
     init(access: WindowAccessClient = WindowAccessClient()) {
         self.access = access
@@ -153,15 +154,9 @@ final class WindowSession {
     }
 
     func select(_ id: UUID, activate: Bool = false) {
-        guard let managed = windows.first(where: { $0.id == id }) else { return }
+        guard windows.contains(where: { $0.id == id }) else { return }
         defer {
-            if activate {
-                do {
-                    try access.focus(managed.candidate.element, managed.candidate.application)
-                } catch {
-                    WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
-                }
-            }
+            if activate { focus(id) }
         }
         if let index = cellIndex(for: id) {
             activeCell = index
@@ -172,6 +167,23 @@ final class WindowSession {
         clearPresentation()
         presentVisibleWindows()
         onChange?()
+    }
+
+    /// Focuses a window; if its AX element went stale, re-resolves it once and retries.
+    private func focus(_ id: UUID) {
+        guard let index = windows.firstIndex(where: { $0.id == id }) else { return }
+        do {
+            try access.focus(windows[index].candidate.element, windows[index].candidate.application)
+        } catch {
+            WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
+            guard let fresh = WindowAccess.reresolve(windows[index].candidate, excluding: windows.map(\.candidate)) else { return }
+            windows[index].candidate = fresh
+            do {
+                try access.focus(fresh.element, fresh.application)
+            } catch {
+                WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     func moveWindow(_ id: UUID, toCell destination: Int) {
@@ -216,6 +228,12 @@ final class WindowSession {
         synchronize(bringToFront: false)
     }
 
+    /// Re-applies target frames and re-presents even if nothing appears to have changed.
+    func realign() {
+        requestedFrames.removeAll()
+        synchronize(bringToFront: false)
+    }
+
     func resume() {
         var errors: [Error] = []
         for window in windows where suspendedWindowIDs.contains(window.id) || cells.contains(window.id) {
@@ -248,9 +266,20 @@ final class WindowSession {
     }
 
     private func synchronize(bringToFront: Bool) {
-        guard !windows.isEmpty, !isSynchronizing else { return }
+        guard !windows.isEmpty else { return }
+        // A resize event (e.g. the zoom animation) can arrive while syncing; rerun afterwards so the final frame isn't lost.
+        guard !isSynchronizing else {
+            resyncRequested = true
+            return
+        }
         isSynchronizing = true
-        defer { isSynchronizing = false }
+        defer {
+            isSynchronizing = false
+            if resyncRequested {
+                resyncRequested = false
+                DispatchQueue.main.async { [weak self] in self?.synchronize(bringToFront: false) }
+            }
+        }
         var correction = 0
         var rejectedGrid = false
         while true {
@@ -413,15 +442,35 @@ final class WindowSession {
         return true
     }
 
+    private var pendingClosedIDs: Set<UUID> = []
+
     func pruneClosedWindows() {
-        let closed = windows.filter { window in
+        var invalidIDs: Set<UUID> = []
+        var closed = windows.filter { window in
             if window.candidate.application.isTerminated { return true }
             var value: CFTypeRef?
             let error = AXUIElementCopyAttributeValue(window.candidate.element, kAXRoleAttribute as CFString, &value)
-            return error == .invalidUIElement
+            let failed = ![.success, .noValue, .attributeUnsupported].contains(error)
+            if error == .invalidUIElement { invalidIDs.insert(window.id) }
+            return failed
         }
-        guard !closed.isEmpty else { return }
-        let ids = Set(closed.map(\.id))
+        for window in closed {
+            guard let index = windows.firstIndex(where: { $0.id == window.id }),
+                  !window.candidate.application.isTerminated,
+                  let fresh = WindowAccess.reresolve(window.candidate, excluding: windows.map(\.candidate)) else { continue }
+            windows[index].candidate = fresh
+            WindowAccess.logger.notice("prune re-resolved \(fresh.label, privacy: .public)")
+            closed.removeAll { $0.id == window.id }
+        }
+        let closedIDs = Set(closed.map(\.id)).filter { id in
+            invalidIDs.contains(id) || windows.first { $0.id == id }?.candidate.application.isTerminated == true
+        }
+        // Require two consecutive misses so a transient AX failure doesn't drop tabs.
+        let confirmed = closedIDs.intersection(pendingClosedIDs)
+        pendingClosedIDs = closedIDs.subtracting(confirmed)
+        guard !confirmed.isEmpty else { return }
+        WindowAccess.logger.notice("prune removing \(confirmed.count) windows")
+        let ids = confirmed
         windows.removeAll { ids.contains($0.id) }
         requestedFrames = requestedFrames.filter { !ids.contains($0.key) }
         suspendedWindowIDs.subtract(ids)

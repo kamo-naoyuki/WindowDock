@@ -16,6 +16,13 @@ enum WindowDockApp {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var sessionInactive = false
+    private static var isScreenUnavailable: Bool {
+        guard let info = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
+        return (info["CGSSessionScreenIsLocked"] as? Bool) == true || (info["kCGSessionOnConsoleKey"] as? Bool) == false
+    }
+    private var pruneResumeDate = Date.distantPast
+
     private let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
     private var controllers: [WorkspaceController] = []
     private var projectCounter = 0
@@ -59,10 +66,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self, selector: #selector(frontApplicationChanged(_:)),
             name: NSWorkspace.didActivateApplicationNotification, object: nil
         )
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sessionInactive = true
+            }
+        }
+        center.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sessionInactive = false
+                self?.pruneResumeDate = Date().addingTimeInterval(5)
+                // Global event monitors can stop delivering events across a session switch.
+                self?.refreshGlobalMonitor(force: true)
+            }
+        }
+        let distributed = DistributedNotificationCenter.default()
+        distributed.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sessionInactive = true
+            }
+        }
+        distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sessionInactive = false
+                self?.pruneResumeDate = Date().addingTimeInterval(5)
+                // Global event monitors can stop delivering events across a session switch.
+                self?.refreshGlobalMonitor(force: true)
+            }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.refreshGlobalMonitor()
-                self?.controllers.forEach { $0.session.pruneClosedWindows() }
+                // While the login window / another user is in front, AX queries fail; don't mistake that for closed windows.
+                guard let self, !self.sessionInactive, !Self.isScreenUnavailable, Date() >= self.pruneResumeDate else { return }
+                self.controllers.forEach { $0.session.pruneClosedWindows() }
             }
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -425,9 +462,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         shortcutContext.applicationDidActivate(app.processIdentifier)
     }
 
-    private func refreshGlobalMonitor() {
+    private func refreshGlobalMonitor(force: Bool = false) {
         let trusted = WindowAccess.isTrusted
-        guard monitorTrust != trusted || globalMonitor == nil else { return }
+        guard force || monitorTrust != trusted || globalMonitor == nil else { return }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         monitorTrust = trusted
         let mask: NSEvent.EventTypeMask = trusted
@@ -516,11 +553,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshGlobalMonitor()
         activeController?.scheduleSelectedWindowRaise()
+        sendInactiveProjectsBack()
+    }
+
+    /// Activating the app raises every project's backdrop; keep the other projects behind so their frames don't cover the active one.
+    private func sendInactiveProjectsBack() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let active = self.activeController else { return }
+            for controller in self.controllers where controller !== active && controller.window.isVisible && !controller.window.isMiniaturized {
+                controller.window.orderBack(nil)
+            }
+        }
     }
 
     /// A Dock click brings back only the last used project; others are reachable from the Dock menu.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         activeController?.bringToFront()
+        sendInactiveProjectsBack()
         return false
     }
 

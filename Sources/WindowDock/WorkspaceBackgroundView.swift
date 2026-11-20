@@ -171,6 +171,8 @@ class WorkspaceBackgroundView: NSView {
         needsDisplay = true
         displayIfNeeded()
         CATransaction.flush()
+        // The window server derives click-through from the window's opaque shape; refresh it whenever the apertures change.
+        window?.invalidateShadow()
     }
 
     func prepareForFrameChange(to frame: NSRect) {

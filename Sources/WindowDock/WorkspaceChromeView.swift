@@ -300,6 +300,19 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         window?.orderFront(nil)
         window?.displayIfNeeded()
         CATransaction.flush()
+        watchTabDrag(token: token)
+    }
+
+    /// The drag session's end callback can be lost (e.g. the source tab is re-rendered); never leave the overlays covering the panes.
+    private func watchTabDrag(token: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self, self.dragToken == token else { return }
+            if NSEvent.pressedMouseButtons & 1 == 0 {
+                self.endTabDrag()
+            } else {
+                self.watchTabDrag(token: token)
+            }
+        }
     }
 
     private func updateTabDragOverlays() {

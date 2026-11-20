@@ -190,6 +190,21 @@ extension WindowAccess {
         throw WindowAccessError(operation: L("移動した通常ウィンドウの特定（「＋」から追加してください）"), code: .noValue)
     }
 
+    /// Finds the live AX element for a window whose cached element went stale (e.g. after a login-window round trip).
+    static func reresolve(_ stale: WindowCandidate, excluding others: [WindowCandidate]) -> WindowCandidate? {
+        let application = AXUIElementCreateApplication(stale.application.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.3)
+        guard let windows = try? value(application, kAXWindowsAttribute) as? [AXUIElement] else { return nil }
+        let unclaimed = windows.compactMap { window -> WindowCandidate? in
+            guard let candidate = try? candidate(window, application: stale.application),
+                  !others.contains(where: { $0.isSameWindow(as: candidate) }) else { return nil }
+            return candidate
+        }
+        let titled = unclaimed.filter { $0.title == stale.title }
+        if titled.count == 1 { return titled[0] }
+        return titled.isEmpty && unclaimed.count == 1 ? unclaimed[0] : nil
+    }
+
     private static func candidate(_ window: AXUIElement, application: NSRunningApplication) throws -> WindowCandidate? {
         guard try value(window, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole else { return nil }
         var title: CFTypeRef?
