@@ -1,7 +1,7 @@
 import AppKit
 import WindowDockCore
 
-/// One project: a workspace window together with the session that manages its registered windows.
+/// One workspace: a workspace window together with the session that manages its registered windows.
 @MainActor
 final class WorkspaceController: NSObject, NSWindowDelegate {
     let session = WindowSession()
@@ -15,13 +15,13 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     var quitting = false
 
     var name: String {
-        didSet { window.title = name; workspace.projectButton.title = name }
+        didSet { window.title = name; workspace.workspaceButton.title = name }
     }
     var onClose: ((WorkspaceController) -> Void)?
     var onRename: ((WorkspaceController) -> Void)?
     var onSessionChange: ((WorkspaceController) -> Void)?
     var onDelete: ((WorkspaceController) -> Void)?
-    /// Whether another project already manages the candidate window.
+    /// Whether another workspace already manages the candidate window.
     var isRegisteredElsewhere: ((WindowCandidate) -> Bool)?
 
     init(name: String) {
@@ -41,7 +41,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
 
     private func buildWindow() {
         window.title = name
-        workspace.projectButton.title = name
+        workspace.workspaceButton.title = name
         window.minSize = NSSize(width: 720, height: 480)
         window.isReleasedWhenClosed = false
         window.isOpaque = false
@@ -69,10 +69,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
             self.window.contentView?.layoutSubtreeIfNeeded()
             return fits
         }
-        workspace.projectMenu = { [weak self] in
+        workspace.workspaceMenu = { [weak self] in
             let menu = NSMenu()
-            menu.addItem(withTitle: L("プロジェクト名を変更…"), action: #selector(WorkspaceController.renameFromMenu), keyEquivalent: "").target = self
-            menu.addItem(withTitle: L("プロジェクトを削除…"), action: #selector(WorkspaceController.deleteFromMenu), keyEquivalent: "").target = self
+            menu.addItem(withTitle: L("ワークスペース名を変更…"), action: #selector(WorkspaceController.renameFromMenu), keyEquivalent: "").target = self
+            menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(WorkspaceController.deleteFromMenu), keyEquivalent: "").target = self
             return menu
         }
         workspace.onGridChange = { [weak self] in self?.session.setGrid($0) }
@@ -175,7 +175,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
                   managed.candidate.application.processIdentifier == frontPID else { continue }
             let rect = window.convertToScreen(area.convert(area.bounds, to: nil))
             if rect.contains(point) {
-                // Clicking a managed window directly must also bring this project's backdrop above other projects'.
+                // Clicking a managed window directly must also bring this workspace's backdrop above other workspaces'.
                 window.orderFront(nil)
                 if session.isSplit { session.focusVisibleWindow(id) }
                 return
@@ -220,7 +220,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     @objc func showPicker() { presentPicker(restoring: nil, completion: nil) }
 
     /// With `restoring`, the matching windows start out selected. With `collect`, the chosen windows are handed
-    /// over instead of being added, and `excluding` hides windows already chosen for another project.
+    /// over instead of being added, and `excluding` hides windows already chosen for another workspace.
     /// `completion` runs once the sheet is gone.
     func presentPicker(
         restoring saved: [SavedWindow]?,
@@ -316,7 +316,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
                 session.select(registered.id)
                 showNotice(.information(L("このウィンドウは既に登録されています。")))
             } else if isRegisteredElsewhere?(candidate) == true {
-                showNotice(.information(L("このウィンドウは別のプロジェクトに登録されています。")))
+                showNotice(.information(L("このウィンドウは別のワークスペースに登録されています。")))
             } else {
                 session.add(candidate, originalFrame: drag.originalFrame)
             }

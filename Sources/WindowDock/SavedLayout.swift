@@ -7,7 +7,7 @@ struct SavedWindow: Codable {
     var frame: CGRect
 }
 
-struct SavedProject: Codable {
+struct SavedWorkspace: Codable {
     var name: String
     var windows: [SavedWindow]
     var columns: Int?
@@ -23,19 +23,19 @@ struct SavedProject: Codable {
 enum SavedLayout {
     private static let key = "lastWindows"
 
-    static func save(_ projects: [SavedProject]) {
-        guard let data = try? JSONEncoder().encode(projects) else { return }
+    static func save(_ workspaces: [SavedWorkspace]) {
+        guard let data = try? JSONEncoder().encode(workspaces) else { return }
         UserDefaults.standard.set(data, forKey: key)
     }
 
-    /// Replaces projects with the same name and appends new ones, keeping every other saved project.
-    static func upsert(_ projects: [SavedProject]) {
+    /// Replaces workspaces with the same name and appends new ones, keeping every other saved workspace.
+    static func upsert(_ workspaces: [SavedWorkspace]) {
         var all = load()
-        for project in projects {
-            if let index = all.firstIndex(where: { $0.name == project.name }) {
-                all[index] = project
+        for workspace in workspaces {
+            if let index = all.firstIndex(where: { $0.name == workspace.name }) {
+                all[index] = workspace
             } else {
-                all.append(project)
+                all.append(workspace)
             }
         }
         save(all)
@@ -45,12 +45,12 @@ enum SavedLayout {
         save(load().filter { $0.name != name })
     }
 
-    static func load() -> [SavedProject] {
+    static func load() -> [SavedWorkspace] {
         guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
-        if let projects = try? JSONDecoder().decode([SavedProject].self, from: data) { return projects }
+        if let workspaces = try? JSONDecoder().decode([SavedWorkspace].self, from: data) { return workspaces }
         // Earlier versions saved a flat window list.
         if let windows = try? JSONDecoder().decode([SavedWindow].self, from: data) {
-            return [SavedProject(name: L("プロジェクト %d", 1), windows: windows)]
+            return [SavedWorkspace(name: L("ワークスペース %d", 1), windows: windows)]
         }
         return []
     }

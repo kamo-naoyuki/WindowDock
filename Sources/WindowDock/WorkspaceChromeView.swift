@@ -44,8 +44,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     let permissionButton = makeButton(symbol: "gearshape", title: L("権限設定"), width: 26)
     let columnSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let rowSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    let projectButton = NSButton(title: "", target: nil, action: nil)
-    var projectMenu: (() -> NSMenu)?
+    let workspaceButton = NSButton(title: "", target: nil, action: nil)
+    var workspaceMenu: (() -> NSMenu)?
     private var toolbar: NSView!
     private var hasManagedWindows = false
     private var settingGrid = false
@@ -92,8 +92,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         return button
     }
 
-    @objc private func showProjectMenu() {
-        projectMenu?().popUp(positioning: nil, at: NSPoint(x: 0, y: projectButton.bounds.height), in: projectButton)
+    @objc private func showWorkspaceMenu() {
+        workspaceMenu?().popUp(positioning: nil, at: NSPoint(x: 0, y: workspaceButton.bounds.height), in: workspaceButton)
     }
 
     private func build() {
@@ -129,17 +129,17 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         dragSpace.toolTip = L("ドラッグして移動 / ダブルクリックで最大化")
         configureSelector(columnSelector, prefix: L("横"))
         configureSelector(rowSelector, prefix: L("縦"))
-        projectButton.isBordered = false
-        projectButton.font = .boldSystemFont(ofSize: 12)
-        projectButton.contentTintColor = .secondaryLabelColor
-        projectButton.lineBreakMode = .byTruncatingTail
-        projectButton.alignment = .left
-        projectButton.toolTip = L("プロジェクトの操作")
-        projectButton.target = self
-        projectButton.action = #selector(showProjectMenu)
-        projectButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        projectButton.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
-        let bar = NSStackView(views: [controls, projectButton, tabScroll, addButton, dragSpace, columnSelector, rowSelector, permissionButton])
+        workspaceButton.isBordered = false
+        workspaceButton.font = .boldSystemFont(ofSize: 12)
+        workspaceButton.contentTintColor = .secondaryLabelColor
+        workspaceButton.lineBreakMode = .byTruncatingTail
+        workspaceButton.alignment = .left
+        workspaceButton.toolTip = L("ワークスペースの操作")
+        workspaceButton.target = self
+        workspaceButton.action = #selector(showWorkspaceMenu)
+        workspaceButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        workspaceButton.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
+        let bar = NSStackView(views: [controls, workspaceButton, tabScroll, addButton, dragSpace, columnSelector, rowSelector, permissionButton])
         toolbar = bar
         bar.spacing = 4
         bar.alignment = .centerY

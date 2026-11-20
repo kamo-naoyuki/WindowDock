@@ -1,6 +1,6 @@
 # WindowDock – Guide for Code Agents
 
-macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a "project" and aligns them via the Accessibility API; it never embeds them. UI strings are Japanese keys passed through `L(...)`.
+macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a "workspace" and aligns them via the Accessibility API; it never embeds them. UI strings are Japanese keys passed through `L(...)`.
 
 ## Build / test
 
@@ -21,9 +21,9 @@ macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a
 
 | Concern | File |
 |---|---|
-| Entry point (`@main`), `AppDelegate`: menus, project list, restore on launch, global key/mouse monitors, cross-app window-drag polling, quit/restore | `App.swift` |
-| One project = one `WorkspaceController` (owns the NSWindow, wires `WindowSession` ↔ views, NSWindowDelegate, picker, drop handling) | `WorkspaceController.swift` |
-| Model/state of a project: managed windows, grid cells, selection, sync/align/raise, suspend/resume, restore originals | `WindowSession.swift` |
+| Entry point (`@main`), `AppDelegate`: menus, workspace list, restore on launch, global key/mouse monitors, cross-app window-drag polling, quit/restore | `App.swift` |
+| One workspace = one `WorkspaceController` (owns the NSWindow, wires `WindowSession` ↔ views, NSWindowDelegate, picker, drop handling) | `WorkspaceController.swift` |
+| Model/state of a workspace: managed windows, grid cells, selection, sync/align/raise, suspend/resume, restore originals | `WindowSession.swift` |
 | All Accessibility API calls (`WindowAccess`), `WindowAccessClient` (injectable for tests), `WindowCandidate`, window scanning, window-server list | `Accessibility.swift` |
 | Workspace NSWindow (`WorkspaceWindow`), resize/drag background view, coverage | `WorkspaceBackgroundView.swift` |
 | Tab bar, grid selectors, notices, drop-target UI, tab context menu (`WorkspaceChromeView`), `WorkspaceNotice`, `WorkspaceSplitLayout` | `WorkspaceChromeView.swift` |
@@ -31,14 +31,14 @@ macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a
 | Pane grid layout (`WorkspaceGridSize` up to 4×4, `WorkspaceGridView`) | `WorkspaceGridView.swift` |
 | Ctrl+Tab shortcut context, window-drag tracker (`WorkspaceWindowDragTracker`, `WindowServerWindow`) | `WorkspaceInput.swift` |
 | "Add windows" sheet | `WindowPicker.swift` |
-| Persisted last session (`SavedProject`, `SavedLayout`, stored in UserDefaults key `lastWindows`) | `SavedLayout.swift` |
+| Persisted last session (`SavedWorkspace`, `SavedLayout`, stored in UserDefaults key `lastWindows`) | `SavedLayout.swift` |
 | `L()` string lookup, en/zh/ko/es tables (Japanese text is the key) | `Localization.swift` |
 
 Other: `Support/Info.plist`, `Support/AppIcon.*` (bundle resources), `Package.swift`, `build-app.sh`, `build-dmg.sh`.
 
 ## Data flow
 
-1. `AppDelegate` creates a `WorkspaceController` per project (⌘N / restore).
+1. `AppDelegate` creates a `WorkspaceController` per workspace (⌘N / restore).
 2. The controller owns a `WindowSession` (model) and a `WorkspaceChromeView` (view). The session reports via callbacks (`onChange`, `onMessage`, `onPresentedFrames`, …) that the controller sets in `wireSession()`; the controller re-renders tabs (`renderTabs()`) and supplies target frames (`targetFrames()`).
 3. Moving/resizing the workspace window → controller `windowDidMove/Resize` → `session.sync()` → `Accessibility.swift` sets positions/sizes of managed windows.
 4. `AppDelegate` global monitors handle Ctrl+Tab and focus-by-click; a 50 ms timer tracks dragging of foreign windows into a workspace (`pollWindowDrag`).
@@ -47,7 +47,7 @@ Other: `Support/Info.plist`, `Support/AppIcon.*` (bundle resources), `Package.sw
 
 - UI and session code is `@MainActor`. Keep Accessibility calls behind `WindowAccessClient` so they can be faked.
 - Add every user-visible string through `L("<Japanese key>")` and add its en/zh/ko/es entries in `Localization.swift`.
-- A window may belong to only one project; `WindowSession.contains` enforces it.
+- A window may belong to only one workspace; `WindowSession.contains` enforces it.
 - Windows must be restored to their original frames on release/quit (`restoreAll`, `ManagedWindow.restore`).
 - Window-server coordinates (AX, top-left origin) differ from AppKit (bottom-left); see `pollWindowDrag` for the conversion.
 - Update `README.md` when user-facing behavior or shortcuts change.

@@ -25,9 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
     private var controllers: [WorkspaceController] = []
-    private var projectCounter = 0
+    private var workspaceCounter = 0
     private var skipLayoutSave = false
-    private var projectMenu: NSMenu!
+    private var workspaceMenu: NSMenu!
     private var timer: Timer?
     private var localMonitor: Any?
     private var globalMonitor: Any?
@@ -39,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastWindowSnapshot: TimeInterval = 0
     private var dragSamplingFailed = false
 
-    /// The project whose window is key, falling back to the main or first one.
+    /// The workspace whose window is key, falling back to the main or first one.
     private var activeController: WorkspaceController? {
         controllers.first { $0.window.isKeyWindow } ??
             controllers.first { $0.window.isMainWindow } ?? controllers.first
@@ -103,17 +103,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         NSApp.activate(ignoringOtherApps: true)
-        let saved = chooseProjectsToRestore(SavedLayout.load().filter { !$0.windows.isEmpty })
-        let first = addProject(name: saved.first?.name)
+        let saved = chooseWorkspacesToRestore(SavedLayout.load().filter { !$0.windows.isEmpty })
+        let first = addWorkspace(name: saved.first?.name)
         if !saved.isEmpty { restore(saved[...], in: first) }
     }
 
-    /// Lets the user pick which saved projects to bring back; a single project needs no question.
-    private func chooseProjectsToRestore(_ projects: [SavedProject]) -> [SavedProject] {
-        guard projects.count > 1 else { return projects }
-        let checks = projects.map { project -> NSButton in
+    /// Lets the user pick which saved workspaces to bring back; a single workspace needs no question.
+    private func chooseWorkspacesToRestore(_ workspaces: [SavedWorkspace]) -> [SavedWorkspace] {
+        guard workspaces.count > 1 else { return workspaces }
+        let checks = workspaces.map { workspace -> NSButton in
             let check = NSButton(
-                checkboxWithTitle: "\(project.name) — " + L("%d個のウィンドウ", project.windows.count),
+                checkboxWithTitle: "\(workspace.name) — " + L("%d個のウィンドウ", workspace.windows.count),
                 target: nil, action: nil
             )
             check.state = .on
@@ -124,49 +124,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         list.alignment = .leading
         list.frame = NSRect(origin: .zero, size: list.fittingSize)
         let alert = NSAlert()
-        alert.messageText = L("前回のプロジェクトを復元")
-        alert.informativeText = L("復元するプロジェクトを選んでください。")
+        alert.messageText = L("前回のワークスペースを復元")
+        alert.informativeText = L("復元するワークスペースを選んでください。")
         alert.accessoryView = list
         alert.addButton(withTitle: L("復元"))
         alert.addButton(withTitle: L("復元しない"))
         guard alert.runModal() == .alertFirstButtonReturn else { return [] }
-        return zip(projects, checks).filter { $0.1.state == .on }.map { $0.0 }
+        return zip(workspaces, checks).filter { $0.1.state == .on }.map { $0.0 }
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         let active = activeController
         for controller in controllers {
-            let item = NSMenuItem(title: controller.name, action: #selector(showProject(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: controller.name, action: #selector(showWorkspace(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = controller
             item.state = controller === active ? .on : .off
             menu.addItem(item)
         }
-        appendClosedProjects(to: menu)
+        appendClosedWorkspaces(to: menu)
         menu.addItem(.separator())
-        let new = NSMenuItem(title: L("新規プロジェクト"), action: #selector(newProject), keyEquivalent: "")
+        let new = NSMenuItem(title: L("新規ワークスペース"), action: #selector(newWorkspace), keyEquivalent: "")
         new.target = self
         menu.addItem(new)
         return menu
     }
 
-    /// Asks for every project's windows first and adds them all afterwards, so that activating one project's
-    /// windows never covers the dialog of the next project.
-    private func restore(_ projects: ArraySlice<SavedProject>, in controller: WorkspaceController,
+    /// Asks for every workspace's windows first and adds them all afterwards, so that activating one workspace's
+    /// windows never covers the dialog of the next workspace.
+    private func restore(_ workspaces: ArraySlice<SavedWorkspace>, in controller: WorkspaceController,
                          chosen: [(WorkspaceController, [WindowCandidate], WorkspaceGridSize?)] = []) {
-        guard let project = projects.first else { return }
+        guard let workspace = workspaces.first else { return }
         var chosen = chosen
         var picked: [WindowCandidate] = []
         controller.presentPicker(
-            restoring: project.windows,
+            restoring: workspace.windows,
             excluding: chosen.flatMap { $0.1 },
             collect: { picked = $0 }
         ) { [weak self] in
             guard let self else { return }
-            chosen.append((controller, picked, project.gridSize))
-            if let next = projects.dropFirst().first {
-                self.restore(projects.dropFirst(), in: self.addProject(name: next.name), chosen: chosen)
+            chosen.append((controller, picked, workspace.gridSize))
+            if let next = workspaces.dropFirst().first {
+                self.restore(workspaces.dropFirst(), in: self.addWorkspace(name: next.name), chosen: chosen)
                 return
             }
             for (controller, candidates, grid) in chosen.reversed() {
@@ -192,11 +192,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appItem.submenu = appMenu
         menu.addItem(appItem)
 
-        let projectItem = NSMenuItem()
-        projectMenu = NSMenu(title: L("プロジェクト"))
-        projectMenu.delegate = self
-        projectItem.submenu = projectMenu
-        menu.addItem(projectItem)
+        let workspaceItem = NSMenuItem()
+        workspaceMenu = NSMenu(title: L("ワークスペース"))
+        workspaceMenu.delegate = self
+        workspaceItem.submenu = workspaceMenu
+        menu.addItem(workspaceItem)
 
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: L("ウィンドウ"))
@@ -215,56 +215,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.mainMenu = menu
     }
 
-    /// Rebuilt each time it opens: fixed commands, then every project with its registered windows.
+    /// Rebuilt each time it opens: fixed commands, then every workspace with its registered windows.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === projectMenu else { return }
+        guard menu === workspaceMenu else { return }
         menu.removeAllItems()
-        menu.addItem(withTitle: L("新規プロジェクト"), action: #selector(newProject), keyEquivalent: "n")
-        menu.addItem(withTitle: L("プロジェクト名を変更…"), action: #selector(renameProject), keyEquivalent: "")
-        let close = menu.addItem(withTitle: L("プロジェクトを閉じる"), action: #selector(closeProject), keyEquivalent: "w")
+        menu.addItem(withTitle: L("新規ワークスペース"), action: #selector(newWorkspace), keyEquivalent: "n")
+        menu.addItem(withTitle: L("ワークスペース名を変更…"), action: #selector(renameWorkspace), keyEquivalent: "")
+        let close = menu.addItem(withTitle: L("ワークスペースを閉じる"), action: #selector(closeWorkspace), keyEquivalent: "w")
         close.keyEquivalentModifierMask = [.command, .shift]
-        menu.addItem(withTitle: L("プロジェクトを削除…"), action: #selector(deleteProject), keyEquivalent: "")
+        menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(deleteWorkspace), keyEquivalent: "")
         menu.addItem(.separator())
         let active = activeController
         for controller in controllers {
             let item = NSMenuItem(
                 title: "\(controller.name) — " + L("%d個のウィンドウ", controller.session.windows.count),
-                action: #selector(showProject(_:)), keyEquivalent: ""
+                action: #selector(showWorkspace(_:)), keyEquivalent: ""
             )
             item.target = self
             item.representedObject = controller
             item.state = controller === active ? .on : .off
             menu.addItem(item)
             for managed in controller.session.windows {
-                let windowItem = NSMenuItem(title: managed.candidate.label, action: #selector(showProjectWindow(_:)), keyEquivalent: "")
+                let windowItem = NSMenuItem(title: managed.candidate.label, action: #selector(showWorkspaceWindow(_:)), keyEquivalent: "")
                 windowItem.target = self
                 windowItem.indentationLevel = 1
-                windowItem.representedObject = ProjectWindowRef(controller: controller, id: managed.id)
+                windowItem.representedObject = WorkspaceWindowRef(controller: controller, id: managed.id)
                 windowItem.state = controller.session.selectedID == managed.id ? .mixed : .off
                 menu.addItem(windowItem)
             }
         }
-        appendClosedProjects(to: menu)
+        appendClosedWorkspaces(to: menu)
     }
 
-    /// Saved projects that are not open right now; each can be reopened or deleted.
-    private func appendClosedProjects(to menu: NSMenu) {
+    /// Saved workspaces that are not open right now; each can be reopened or deleted.
+    private func appendClosedWorkspaces(to menu: NSMenu) {
         let open = Set(controllers.map(\.name))
         let closed = SavedLayout.load().filter { !open.contains($0.name) }
         guard !closed.isEmpty else { return }
         menu.addItem(.separator())
-        menu.addItem(withTitle: L("閉じているプロジェクト"), action: nil, keyEquivalent: "").isEnabled = false
-        for project in closed {
+        menu.addItem(withTitle: L("閉じているワークスペース"), action: nil, keyEquivalent: "").isEnabled = false
+        for workspace in closed {
             let item = NSMenuItem(
-                title: "\(project.name) — " + L("%d個のウィンドウ", project.windows.count),
+                title: "\(workspace.name) — " + L("%d個のウィンドウ", workspace.windows.count),
                 action: nil, keyEquivalent: ""
             )
             let submenu = NSMenu()
-            let reopen = NSMenuItem(title: L("開く"), action: #selector(reopenSavedProject(_:)), keyEquivalent: "")
-            let delete = NSMenuItem(title: L("プロジェクトを削除…"), action: #selector(deleteSavedProject(_:)), keyEquivalent: "")
+            let reopen = NSMenuItem(title: L("開く"), action: #selector(reopenSavedWorkspace(_:)), keyEquivalent: "")
+            let delete = NSMenuItem(title: L("ワークスペースを削除…"), action: #selector(deleteSavedWorkspace(_:)), keyEquivalent: "")
             for entry in [reopen, delete] {
                 entry.target = self
-                entry.representedObject = project.name
+                entry.representedObject = workspace.name
                 submenu.addItem(entry)
             }
             item.submenu = submenu
@@ -272,25 +272,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func reopenSavedProject(_ sender: NSMenuItem) {
+    @objc private func reopenSavedWorkspace(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String,
-              let project = SavedLayout.load().first(where: { $0.name == name }) else { return }
-        let controller = addProject(name: project.name)
-        if let grid = project.gridSize { controller.session.setGrid(grid) }
-        controller.presentPicker(restoring: project.windows, completion: nil)
+              let workspace = SavedLayout.load().first(where: { $0.name == name }) else { return }
+        let controller = addWorkspace(name: workspace.name)
+        if let grid = workspace.gridSize { controller.session.setGrid(grid) }
+        controller.presentPicker(restoring: workspace.windows, completion: nil)
     }
 
-    @objc private func deleteSavedProject(_ sender: NSMenuItem) {
+    @objc private func deleteSavedWorkspace(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         let alert = NSAlert()
-        alert.messageText = L("プロジェクト「%@」を削除しますか？", name)
+        alert.messageText = L("ワークスペース「%@」を削除しますか？", name)
         alert.informativeText = L("閉じるだけでは前回の構成に残ります。削除すると次回の復元候補からも外れます。")
         alert.addButton(withTitle: L("削除"))
         alert.addButton(withTitle: L("キャンセル"))
         if alert.runModal() == .alertFirstButtonReturn { SavedLayout.remove(named: name) }
     }
 
-    private final class ProjectWindowRef: NSObject {
+    private final class WorkspaceWindowRef: NSObject {
         let controller: WorkspaceController
         let id: UUID
         init(controller: WorkspaceController, id: UUID) {
@@ -299,28 +299,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func showProject(_ sender: NSMenuItem) {
+    @objc private func showWorkspace(_ sender: NSMenuItem) {
         (sender.representedObject as? WorkspaceController)?.bringToFront()
     }
 
-    @objc private func showProjectWindow(_ sender: NSMenuItem) {
-        guard let ref = sender.representedObject as? ProjectWindowRef else { return }
+    @objc private func showWorkspaceWindow(_ sender: NSMenuItem) {
+        guard let ref = sender.representedObject as? WorkspaceWindowRef else { return }
         ref.controller.session.select(ref.id)
         ref.controller.bringToFront()
     }
 
-    // MARK: Projects
+    // MARK: Workspaces
 
-    @objc private func newProject() { addProject() }
+    @objc private func newWorkspace() { addWorkspace() }
 
     @discardableResult
-    private func addProject(name: String? = nil) -> WorkspaceController {
-        let controller = WorkspaceController(name: name ?? nextProjectName())
+    private func addWorkspace(name: String? = nil) -> WorkspaceController {
+        let controller = WorkspaceController(name: name ?? nextWorkspaceName())
         controller.onClose = { [weak self] in self?.close($0) }
         controller.onSessionChange = { [weak self] controller in
             guard let self, !self.quitting else { return }
-            let project = self.savedProject(controller)
-            if !project.windows.isEmpty { SavedLayout.upsert([project]) }
+            let workspace = self.savedWorkspace(controller)
+            if !workspace.windows.isEmpty { SavedLayout.upsert([workspace]) }
         }
         controller.onRename = { [weak self] in self?.rename($0) }
         controller.onDelete = { [weak self] in self?.delete($0) }
@@ -340,21 +340,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return controller
     }
 
-    /// The first "Project N" not used by an open or saved project.
-    private func nextProjectName() -> String {
+    /// The first "Workspace N" not used by an open or saved workspace.
+    private func nextWorkspaceName() -> String {
         let used = Set(controllers.map(\.name) + SavedLayout.load().map(\.name))
-        projectCounter = 1
-        while used.contains(L("プロジェクト %d", projectCounter)) { projectCounter += 1 }
-        return L("プロジェクト %d", projectCounter)
+        workspaceCounter = 1
+        while used.contains(L("ワークスペース %d", workspaceCounter)) { workspaceCounter += 1 }
+        return L("ワークスペース %d", workspaceCounter)
     }
 
-    @objc private func renameProject() {
+    @objc private func renameWorkspace() {
         if let controller = activeController { rename(controller) }
     }
 
     private func rename(_ controller: WorkspaceController) {
         let alert = NSAlert()
-        alert.messageText = L("プロジェクト名を変更")
+        alert.messageText = L("ワークスペース名を変更")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.stringValue = controller.name
         alert.accessoryView = field
@@ -366,7 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let taken = Set(controllers.filter { $0 !== controller }.map(\.name) + SavedLayout.load().map(\.name))
         if !name.isEmpty, taken.contains(name) {
             let notice = NSAlert()
-            notice.messageText = L("同じ名前のプロジェクトが既にあります。")
+            notice.messageText = L("同じ名前のワークスペースが既にあります。")
             notice.runModal()
         } else if !name.isEmpty {
             SavedLayout.remove(named: controller.name)
@@ -374,17 +374,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func closeProject() {
+    @objc private func closeWorkspace() {
         if let controller = activeController { close(controller) }
     }
 
-    @objc private func deleteProject() {
+    @objc private func deleteWorkspace() {
         if let controller = activeController { delete(controller) }
     }
 
     private func delete(_ controller: WorkspaceController) {
         let alert = NSAlert()
-        alert.messageText = L("プロジェクト「%@」を削除しますか？", controller.name)
+        alert.messageText = L("ワークスペース「%@」を削除しますか？", controller.name)
         alert.informativeText = L("閉じるだけでは前回の構成に残ります。削除すると次回の復元候補からも外れます。")
         alert.addButton(withTitle: L("削除"))
         alert.addButton(withTitle: L("キャンセル"))
@@ -392,21 +392,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         close(controller, forget: true)
     }
 
-    private func savedProject(_ controller: WorkspaceController) -> SavedProject {
-        SavedProject(name: controller.name, windows: controller.session.windows.compactMap { window in
+    private func savedWorkspace(_ controller: WorkspaceController) -> SavedWorkspace {
+        SavedWorkspace(name: controller.name, windows: controller.session.windows.compactMap { window in
             guard let id = window.candidate.application.bundleIdentifier else { return nil }
             return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
         }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows)
     }
 
-    /// Restores the project's windows to their original positions and closes it; closing the last project quits.
-    /// A closed project stays in the saved layout unless `forget` is set.
+    /// Restores the workspace's windows to their original positions and closes it; closing the last workspace quits.
+    /// A closed workspace stays in the saved layout unless `forget` is set.
     private func close(_ controller: WorkspaceController, forget: Bool = false) {
         if forget {
             SavedLayout.remove(named: controller.name)
         } else if controllers.count > 1 {
-            let project = savedProject(controller)
-            if !project.windows.isEmpty { SavedLayout.upsert([project]) }
+            let workspace = savedWorkspace(controller)
+            if !workspace.windows.isEmpty { SavedLayout.upsert([workspace]) }
         }
         if controllers.count == 1 {
             skipLayoutSave = forget
@@ -431,7 +431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controllers.last?.bringToFront()
     }
 
-    // MARK: Menu actions for the active project
+    // MARK: Menu actions for the active workspace
 
     @objc private func showPicker() { activeController?.showPicker() }
     @objc private func removeSelected() { activeController?.removeSelected() }
@@ -553,11 +553,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshGlobalMonitor()
         activeController?.scheduleSelectedWindowRaise()
-        sendInactiveProjectsBack()
+        sendInactiveWorkspacesBack()
     }
 
-    /// Activating the app raises every project's backdrop; keep the other projects behind so their frames don't cover the active one.
-    private func sendInactiveProjectsBack() {
+    /// Activating the app raises every workspace's backdrop; keep the other workspaces behind so their frames don't cover the active one.
+    private func sendInactiveWorkspacesBack() {
         DispatchQueue.main.async { [weak self] in
             guard let self, let active = self.activeController else { return }
             for controller in self.controllers where controller !== active && controller.window.isVisible && !controller.window.isMiniaturized {
@@ -566,10 +566,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// A Dock click brings back only the last used project; others are reachable from the Dock menu.
+    /// A Dock click brings back only the last used workspace; others are reachable from the Dock menu.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         activeController?.bringToFront()
-        sendInactiveProjectsBack()
+        sendInactiveWorkspacesBack()
         return false
     }
 
@@ -584,7 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         quitting = true
         controllers.forEach { $0.quitting = true }
-        let saved = controllers.map(savedProject).filter { !$0.windows.isEmpty }
+        let saved = controllers.map(savedWorkspace).filter { !$0.windows.isEmpty }
         if !saved.isEmpty && !skipLayoutSave { SavedLayout.upsert(saved) }
         let failures = controllers.flatMap { $0.session.restoreAll() }
         if !failures.isEmpty {
