@@ -16,6 +16,7 @@ Working on one task usually means a browser, an editor, a terminal, and more, al
 - Dragging an already registered app window by its own titlebar never shows the window-addition bar in any workspace. Use its tab to move it between workspaces; unregistered windows from the same app can still be added normally.
 - Split the workspace into up to 4×4 panes to view several windows side by side
 - Move and resize the workspace and all its windows follow, using the standard window buttons (including the green button's tiling menu). Every edge, corner (including the top edge and top corners in the titlebar area), and the bottom-right grip resizes, even while a size-constraint warning is shown; the top edge stops at the menu bar.
+- After clicking or dragging the workspace's titlebar, or resizing from an edge, releasing the mouse returns focus to the selected pane's app window. The next click can operate that window without an extra activation click. Toolbar controls and menus keep their normal focus behavior.
 
 During window alignment, overlapping covered areas remain visible without blanking the whole pane. Coverage is confirmed against WindowServer's rendered window positions, rather than relying only on Accessibility coordinates.
 Native position and frame changes also constrain the transparent area before moving, keeping exposed edges opaque during fast movement.

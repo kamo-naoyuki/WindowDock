@@ -90,6 +90,7 @@ final class WorkspaceWindow: NSWindow {
 }
 
 class WorkspaceBackgroundView: NSView {
+    var onFrameInteractionEnd: (() -> Void)?
     weak var contentArea: NSView?
     weak var secondaryContentArea: NSView?
     var gridContentAreas: [NSView] = [] { didSet { needsDisplay = true } }
@@ -159,6 +160,7 @@ class WorkspaceBackgroundView: NSView {
         guard let window = window as? WorkspaceWindow else { return }
         if edges.isEmpty, event.clickCount == 2 {
             window.toggleMaximize()
+            onFrameInteractionEnd?()
             return
         }
         let startFrame = window.frame
@@ -185,7 +187,10 @@ class WorkspaceBackgroundView: NSView {
                 )
             }
             window.setWorkspaceFrame(frame)
-            if next.type == .leftMouseUp { break }
+            if next.type == .leftMouseUp {
+                onFrameInteractionEnd?()
+                break
+            }
         }
     }
 

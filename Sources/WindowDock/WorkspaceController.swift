@@ -4,13 +4,14 @@ import WindowDockCore
 /// One workspace: a workspace window together with the session that manages its registered windows.
 @MainActor
 final class WorkspaceController: NSObject, NSWindowDelegate {
-    let session = WindowSession()
+    let session: WindowSession
     let window: WorkspaceWindow
     private let workspace = WorkspaceChromeView(frame: .zero)
     private var picker: WindowPicker?
     private var tabIDs: [UUID] = []
     private var windowRaisePending = false
     private var windowRaiseScheduled = false
+    private var windowFocusPending = false
     private var coverageGeneration = 0
     private(set) var suspended = false
     var quitting = false
@@ -30,8 +31,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     /// Whether another workspace already manages the candidate window.
     var isRegisteredElsewhere: ((WindowCandidate) -> Bool)?
 
-    init(name: String) {
+    init(name: String, access: WindowAccessClient = WindowAccessClient()) {
         self.name = name
+        session = WindowSession(access: access)
         window = WorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -70,6 +72,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
 
     private func wireSession() {
         window.onWorkspaceFrameChange = { [weak self] in self?.syncIfVisible() }
+        workspace.onFrameInteractionEnd = { [weak self] in self?.scheduleSelectedWindowRaise(activate: true) }
         session.targetFrames = { [weak self] in self?.targetFrames() ?? [:] }
         session.fitMinimumSizes = { [weak self] sizes in
             guard let self else { return false }
@@ -442,8 +445,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         if windowRaisePending { scheduleSelectedWindowRaise() }
     }
 
-    func scheduleSelectedWindowRaise() {
+    func scheduleSelectedWindowRaise(activate: Bool = false) {
         windowRaisePending = true
+        windowFocusPending = windowFocusPending || activate
         guard !windowRaiseScheduled else { return }
         windowRaiseScheduled = true
         // Do not change window ordering during button tracking or window dragging.
@@ -453,10 +457,12 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
                 self.windowRaiseScheduled = false
                 guard self.windowRaisePending, NSEvent.pressedMouseButtons == 0 else { return }
                 self.windowRaisePending = false
+                let activate = self.windowFocusPending
+                self.windowFocusPending = false
                 guard NSApp.isActive, self.window.isKeyWindow,
                       !self.suspended, !self.quitting, !self.window.isMiniaturized,
                       self.picker == nil, self.window.attachedSheet == nil else { return }
-                self.session.raiseSelected()
+                self.session.raiseSelected(activate: activate)
                 self.window.orderFront(nil)
             }
         }

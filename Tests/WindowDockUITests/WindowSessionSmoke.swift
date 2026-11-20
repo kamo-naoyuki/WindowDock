@@ -61,9 +61,7 @@ enum WindowSessionSmoke {
         }
     }
 
-    private static func fixture(registering indexes: [Int] = [0, 1, 2], windowCount: Int = 4,
-                                sharedModel: Model? = nil) -> (WindowSession, Model) {
-        let model = sharedModel ?? Model(windowCount: windowCount)
+    private static func access(for model: Model) -> WindowAccessClient {
         var access = WindowAccessClient()
         access.requireWritable = { element, _ in
             let index = try model.index(of: element)
@@ -99,7 +97,13 @@ enum WindowSessionSmoke {
             if model.failedFocuses.contains(index) { throw InjectedFailure() }
             model.focusedWindows.append(index)
         }
-        let session = WindowSession(access: access)
+        return access
+    }
+
+    private static func fixture(registering indexes: [Int] = [0, 1, 2], windowCount: Int = 4,
+                                sharedModel: Model? = nil) -> (WindowSession, Model) {
+        let model = sharedModel ?? Model(windowCount: windowCount)
+        let session = WindowSession(access: access(for: model))
         session.targetFrame = { model.target }
         session.secondaryTargetFrame = { model.rightTarget }
         session.targetFrames = { model.gridTargets ?? [0: model.target, 1: model.rightTarget] }
@@ -321,6 +325,100 @@ enum WindowSessionSmoke {
         session.add(WindowCandidate(element: model.windows[3].element, application: .current, title: "Invalid"), at: -1)
         if session.windows.map(\.id) != originals || model.notices.last?.needsAttention != true {
             failures.append("an invalid insertion position changed the session or failed silently")
+        }
+        return failures
+    }
+
+    static func runTitlebarFocusChecks() -> [String] {
+        let model = Model(windowCount: 2)
+        let controller = WorkspaceController(name: "Titlebar focus", access: access(for: model))
+        let window = controller.window
+        defer {
+            controller.quitting = true
+            window.orderOut(nil)
+        }
+        guard let chrome = window.contentView as? WorkspaceChromeView,
+              let screen = NSScreen.screens.first else { return ["titlebar focus fixture could not find its content or screen"] }
+        func settle(_ seconds: TimeInterval = 0.5) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true) {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        window.setFrame(NSRect(x: 160, y: 180, width: 900, height: 600), display: true)
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Focus probe")
+        })
+        controller.bringToFront()
+        settle()
+        guard NSApp.isActive, window.isKeyWindow else { return ["titlebar focus fixture did not become active and key"] }
+        guard let dragSpace = chrome.subviews.compactMap({ $0 as? NSStackView })
+            .flatMap(\.arrangedSubviews).first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") })
+        else { return ["titlebar focus fixture could not find the toolbar drag area"] }
+        var failures: [String] = []
+        if !model.focusedWindows.isEmpty {
+            failures.append("making the workspace key stole focus before any titlebar gesture")
+        }
+        func gesture(at point: NSPoint, delta: NSSize) -> Bool {
+            guard let down = NSEvent.mouseEvent(
+                with: .leftMouseDown, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+            ) else { return false }
+            let start = window.convertPoint(toScreen: point)
+            let types: [CGEventType] = delta == .zero ? [.leftMouseUp] : [.leftMouseDragged, .leftMouseUp]
+            let events = types.compactMap { type -> NSEvent? in
+                guard let event = CGEvent(
+                    mouseEventSource: nil, mouseType: type,
+                    mouseCursorPosition: CGPoint(x: start.x + delta.width, y: screen.frame.maxY - start.y - delta.height),
+                    mouseButton: .left
+                ) else { return nil }
+                return NSEvent(cgEvent: event)
+            }
+            guard events.count == types.count else { return false }
+            // Queue only in this app, without moving the system pointer or clicking another app.
+            for event in events { NSApp.postEvent(event, atStart: false) }
+            window.sendEvent(down)
+            return true
+        }
+        let barPoint = dragSpace.convert(NSPoint(x: dragSpace.bounds.midX, y: dragSpace.bounds.midY), to: nil)
+        let gestures: [(String, NSPoint, NSSize)] = [
+            ("titlebar click", barPoint, .zero),
+            ("titlebar click while already key", barPoint, .zero),
+            ("titlebar drag", barPoint, NSSize(width: 20, height: 10)),
+            ("resize grip", NSPoint(x: chrome.bounds.maxX - 12, y: 12), NSSize(width: 20, height: -10))
+        ]
+        for (label, point, delta) in gestures {
+            model.focusedWindows.removeAll()
+            guard gesture(at: point, delta: delta) else {
+                failures.append("\(label): could not create mouse events")
+                continue
+            }
+            if !model.focusedWindows.isEmpty {
+                failures.append("\(label): handed off focus before mouse tracking returned")
+            }
+            settle()
+            if model.focusedWindows != [1] {
+                failures.append("\(label): selected pane was not focused on release; another activation click is needed: \(model.focusedWindows)")
+            }
+        }
+
+        // A pending handoff must not steal focus from a window opened before it runs.
+        model.focusedWindows.removeAll()
+        if !gesture(at: barPoint, delta: .zero) { failures.append("could not create interrupted titlebar click") }
+        let other = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 300, height: 200),
+                             styleMask: [.titled], backing: .buffered, defer: false)
+        other.isReleasedWhenClosed = false
+        defer { other.close() }
+        other.makeKeyAndOrderFront(nil)
+        settle()
+        window.makeKeyAndOrderFront(nil)
+        settle()
+        if !model.focusedWindows.isEmpty {
+            failures.append("a stale titlebar handoff stole focus after another window became key")
         }
         return failures
     }

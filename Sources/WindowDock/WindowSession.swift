@@ -309,7 +309,7 @@ final class WindowSession {
         report(errors)
     }
 
-    func raiseSelected() {
+    func raiseSelected(activate: Bool = false) {
         var errors: [Error] = []
         for window in presentationOrder {
             do {
@@ -319,6 +319,7 @@ final class WindowSession {
             }
         }
         report(errors)
+        if activate, let selectedID { focus(selectedID) }
     }
 
     private var presentationOrder: [ManagedWindow] {
