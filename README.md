@@ -2,6 +2,8 @@
 
 A native macOS app that groups the windows of different apps by project and lets you switch between them with browser-style tabs.
 
+![WindowDock screenshot](docs/screenshot.png)
+
 Working on one task usually means a browser, an editor, a terminal, and more, all scattered across the screen. WindowDock collects those windows into one **project**, a single workspace with a tab bar. Click a tab to bring that app's window forward, just like switching tabs in a browser. Use a separate project for each task and keep them apart.
 
 - One project = one set of windows from any apps, switched with tabs
@@ -39,3 +41,7 @@ Each WindowDock window is a project: one task's worth of windows, shown as tabs.
 WindowDock doesn't embed other apps' windows. It uses the Accessibility API to align the position, size, and stacking of ordinary windows, so each app stays fully usable.
 
 Full-screen windows, windows in other Spaces, and apps that can't be moved or resized are not supported. Tabs are not saved, but each project's split layout is, and at launch the add-window dialog opens with the windows from the last session pre-selected, one project at a time (matched by app, then title and position).
+
+## License
+
+[MIT](LICENSE)
