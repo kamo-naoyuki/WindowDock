@@ -10,14 +10,20 @@ public enum WorkspaceTabDragRoute: Equatable {
     case transfer(Int)
 
     /// `destinationFrames` are the other workspaces ordered front to back among workspaces only, so ordinary
-    /// windows covering a workspace do not block it.
+    /// windows covering a workspace do not block it; the first `destinationsInFront` of them are in front of the
+    /// source. Where workspaces overlap, the frontmost one receives the tab, as the user sees it.
     public static func resolve(
-        at point: CGPoint, sourceFrame: CGRect, sourceTabRowContains: Bool, destinationFrames: [CGRect]
+        at point: CGPoint, sourceFrame: CGRect, sourceTabRowContains: Bool, destinationFrames: [CGRect],
+        destinationsInFront: Int
     ) -> Self {
-        if sourceTabRowContains { return .source }
+        let inFront = min(max(destinationsInFront, 0), destinationFrames.count)
+        if let index = destinationFrames[..<inFront].firstIndex(where: { $0.contains(point) }) {
+            return .transfer(index)
+        }
+        if sourceTabRowContains || sourceFrame.contains(point) { return .source }
         if let index = WindowGeometry.workspaceTabDropTarget(at: point, orderedFrames: destinationFrames) {
             return .transfer(index)
         }
-        return sourceFrame.contains(point) ? .source : .none
+        return .none
     }
 }

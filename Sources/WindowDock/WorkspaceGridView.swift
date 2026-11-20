@@ -11,6 +11,8 @@ struct WorkspaceGridSize: Equatable {
 
 private final class WorkspaceGridCell: NSView {
     var onClick: (() -> Void)?
+    // The click that activates WindowDock must already hand focus to the pane's window.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 

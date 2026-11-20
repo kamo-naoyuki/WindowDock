@@ -5,25 +5,35 @@ import WindowDockCore
 /// and changes the active application, so it runs in the `--activation-only` harness process.
 @MainActor
 enum WorkspaceActivationSmoke {
-    static func runDockMenuSwitchChecks() -> [String] {
-        guard let executable = Bundle.main.executableURL else { return ["Dock menu switch check could not find its executable"] }
-        let helper = Process()
-        let output = Pipe()
-        let input = Pipe()
-        helper.executableURL = executable
-        helper.arguments = ["--activation-helper"]
-        helper.standardOutput = output
-        helper.standardInput = input
-        do { try helper.run() } catch { return ["Dock menu switch helper failed to launch: \(error.localizedDescription)"] }
-        defer {
-            helper.terminate()
-            helper.waitUntilExit()
+    /// A simulated managed window; the client intercepts every operation.
+    private final class FocusProbe {
+        let element = AXUIElementCreateApplication(pid_t(910_000))
+        var frame = CGRect(x: 200, y: 200, width: 500, height: 400)
+        var focusCount = 0
+
+        var access: WindowAccessClient {
+            var access = WindowAccessClient()
+            access.requireWritable = { _, _ in }
+            access.frame = { [unowned self] _ in frame }
+            access.setFrame = { [unowned self] _, frame in self.frame = frame }
+            access.setPosition = { [unowned self] _, position in frame.origin = position }
+            access.isMinimized = { _ in false }
+            access.minimize = { _, _ in false }
+            access.raise = { _ in }
+            access.focus = { [unowned self] _, _ in focusCount += 1 }
+            return access
         }
-        let fields = (String(data: output.fileHandleForReading.availableData, encoding: .utf8) ?? "")
-            .split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
-        guard fields.count == 4 else { return ["Dock menu switch helper did not report its windows"] }
-        let helperPID = pid_t(fields[0])
-        let otherAppWindow = fields[3]
+    }
+
+    static func runDockMenuSwitchChecks() -> [String] {
+        let helper: WindowSessionSmoke.ActivationHelperProcess
+        switch WindowSessionSmoke.ActivationHelperProcess.launch() {
+        case .success(let launched): helper = launched
+        case .failure(let failure): return ["Dock menu switch: \(failure.message)"]
+        }
+        defer { helper.terminate() }
+        let helperPID = helper.pid
+        let otherAppWindow = helper.windows[2]
         // App activation arrives as an event, so dispatch events while waiting.
         func wait(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
             let deadline = Date().addingTimeInterval(seconds)
@@ -39,7 +49,8 @@ enum WorkspaceActivationSmoke {
         }
 
         // The helper's windows lie inside both workspaces, which overlap each other.
-        let first = WorkspaceController(name: "Smoke 1")
+        let probe = FocusProbe()
+        let first = WorkspaceController(name: "Smoke 1", access: probe.access)
         let second = WorkspaceController(name: "Smoke 2")
         first.window.setFrame(NSRect(x: 160, y: 160, width: 720, height: 480), display: false)
         second.window.setFrame(NSRect(x: 260, y: 240, width: 720, height: 480), display: false)
@@ -47,6 +58,7 @@ enum WorkspaceActivationSmoke {
             first.window.orderOut(nil)
             second.window.orderOut(nil)
         }
+        first.session.add([WindowCandidate(element: probe.element, application: .current, title: "Focus probe")])
         wait(0.5)
         first.window.orderFrontRegardless()
         second.window.orderFrontRegardless()
@@ -77,7 +89,7 @@ enum WorkspaceActivationSmoke {
                 wait(2) { NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID }
                 wait(0.3)
             }
-            input.fileHandleForWriting.write(Data("yield \(ProcessInfo.processInfo.processIdentifier)\n".utf8))
+            helper.send("yield \(ProcessInfo.processInfo.processIdentifier)")
             wait(0.3)
         }
         // The user works in the second workspace, e.g. by clicking it.
@@ -92,7 +104,7 @@ enum WorkspaceActivationSmoke {
         // Then in another app's window in front of both workspaces.
         func useSecondThenOtherApp() -> Bool {
             guard useSecond() else { return false }
-            input.fileHandleForWriting.write(Data("raise 2\n".utf8))
+            helper.send("raise 2")
             wait(0.3)
             _ = WindowAccess.activateFrontWindowOnly(helperPID)
             wait(2) {
@@ -103,10 +115,15 @@ enum WorkspaceActivationSmoke {
                 stackIndex(otherAppWindow) < stackIndex(secondNumber)
         }
         func chooseFirst(_ situation: String) -> [String] {
+            probe.focusCount = 0
             activation.show(first)
             wait(2) { NSApp.isActive }
             wait(0.5)
+            wait(1) { probe.focusCount > 0 }
             var failures: [String] = []
+            if probe.focusCount == 0 {
+                failures.append("\(situation): only the chosen workspace's frame came forward; its window stayed behind")
+            }
             if !NSApp.isActive {
                 failures.append("\(situation): choosing a workspace from the Dock menu did not activate WindowDock")
             }
@@ -130,7 +147,7 @@ enum WorkspaceActivationSmoke {
         // The Dock activates WindowDock, raising every workspace and restoring the second one as key, before
         // the menu item's action arrives.
         if useSecondThenOtherApp() {
-            input.fileHandleForWriting.write(Data("activate \(ProcessInfo.processInfo.processIdentifier)\n".utf8))
+            helper.send("activate \(ProcessInfo.processInfo.processIdentifier)")
             wait(2) { NSApp.isActive }
             wait(0.3)
             failures += chooseFirst("after the Dock activated WindowDock")

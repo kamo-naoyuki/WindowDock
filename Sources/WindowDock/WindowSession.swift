@@ -184,7 +184,7 @@ final class WindowSession {
         do {
             try access.focus(windows[index].candidate.element, windows[index].candidate.application)
         } catch let error as WindowAccessError where error.code == .invalidUIElement {
-            guard let fresh = WindowAccess.reresolve(windows[index].candidate, excluding: windows.map(\.candidate)) else {
+            guard let fresh = reresolve(windows[index].candidate) else {
                 report(error)
                 return
             }
@@ -310,6 +310,12 @@ final class WindowSession {
     }
 
     func raiseSelected(activate: Bool = false) {
+        guard !activate else {
+            // Front-window-only activation brings one window per call above other apps, so every visible
+            // window takes its turn, ending with the selected one.
+            for window in presentationOrder { focus(window.id) }
+            return
+        }
         var errors: [Error] = []
         for window in presentationOrder {
             do {
@@ -319,7 +325,6 @@ final class WindowSession {
             }
         }
         report(errors)
-        if activate, let selectedID { focus(selectedID) }
     }
 
     private var presentationOrder: [ManagedWindow] {
@@ -514,20 +519,29 @@ final class WindowSession {
 
     private var pendingClosedIDs: Set<UUID> = []
 
+    /// Whether another workspace manages a window; such a window must never be taken over.
+    var isClaimedElsewhere: (WindowCandidate) -> Bool = { _ in false }
+
+    private func reresolve(_ stale: WindowCandidate) -> WindowCandidate? {
+        guard let live = access.applicationWindows(stale.application) else { return nil }
+        return WindowAccess.reresolve(stale, among: live) { candidate in
+            contains(candidate) || isClaimedElsewhere(candidate)
+        }
+    }
+
     func pruneClosedWindows() {
         var invalidIDs: Set<UUID> = []
         var closed = windows.filter { window in
             if window.candidate.application.isTerminated { return true }
-            var value: CFTypeRef?
-            let error = AXUIElementCopyAttributeValue(window.candidate.element, kAXRoleAttribute as CFString, &value)
-            let failed = ![.success, .noValue, .attributeUnsupported].contains(error)
+            let error = access.probe(window.candidate.element)
             if error == .invalidUIElement { invalidIDs.insert(window.id) }
-            return failed
+            return ![.success, .noValue, .attributeUnsupported].contains(error)
         }
-        for window in closed {
+        // A busy app (e.g. a timed-out Electron window) still owns its element; only a stale element is looked up again.
+        for window in closed where invalidIDs.contains(window.id) {
             guard let index = windows.firstIndex(where: { $0.id == window.id }),
                   !window.candidate.application.isTerminated,
-                  let fresh = WindowAccess.reresolve(window.candidate, excluding: windows.map(\.candidate)) else { continue }
+                  let fresh = reresolve(window.candidate) else { continue }
             windows[index].candidate = fresh
             WindowAccess.logger.notice("prune re-resolved \(fresh.label, privacy: .public)")
             closed.removeAll { $0.id == window.id }

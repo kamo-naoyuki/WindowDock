@@ -147,6 +147,21 @@ enum WindowAccess {
         let frontWindowOnly: OptionBits = 1 // kSetFrontProcessFrontWindowOnly
         return setFront(&process, frontWindowOnly) == noErr
     }
+
+    private typealias GetWindowFunction = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+
+    // Private but long-standing HIServices function that maps an AX window to its WindowServer number.
+    private static let getWindow: GetWindowFunction? = {
+        guard let handle = dlopen(nil, RTLD_LAZY), let symbol = dlsym(handle, "_AXUIElementGetWindow") else { return nil }
+        return unsafeBitCast(symbol, to: GetWindowFunction.self)
+    }()
+
+    /// The WindowServer number of an AX window. Unlike frames, it stays exact while the window is being dragged.
+    static func windowID(of element: AXUIElement) -> CGWindowID? {
+        guard let getWindow else { return nil }
+        var id: CGWindowID = 0
+        return getWindow(element, &id) == .success && id != 0 ? id : nil
+    }
 }
 
 struct WindowAccessClient {
@@ -158,6 +173,9 @@ struct WindowAccessClient {
     var minimize: (AXUIElement, Bool) throws -> Bool = WindowAccess.minimize
     var raise: (AXUIElement) throws -> Void = WindowAccess.raise
     var focus: (AXUIElement, NSRunningApplication) throws -> Void = WindowAccess.focus
+    /// The AX error of a cheap attribute read, used to notice closed windows and stale elements.
+    var probe: (AXUIElement) -> AXError = WindowAccess.probe
+    var applicationWindows: (NSRunningApplication) -> [WindowCandidate]? = WindowAccess.applicationWindows
 }
 
 struct WindowCandidate {
@@ -207,6 +225,11 @@ extension WindowAccess {
         guard let windows = try value(application, kAXWindowsAttribute) as? [AXUIElement] else {
             throw WindowAccessError(operation: L("移動したウィンドウの一覧取得"), code: .illegalArgument)
         }
+        // Frames can lag behind the WindowServer, and same-sized windows of one app can share a frame.
+        if let identified = windows.first(where: { windowID(of: $0) == moved.id }),
+           let candidate = try? candidate(identified, application: app) {
+            return candidate
+        }
         var matches: [WindowCandidate] = []
         var failures: [WindowAccessError] = []
         for window in windows {
@@ -229,16 +252,25 @@ extension WindowAccess {
         throw WindowAccessError(operation: L("移動した通常ウィンドウの特定（「＋」から追加してください）"), code: .noValue)
     }
 
-    /// Finds the live AX element for a window whose cached element went stale (e.g. after a login-window round trip).
-    static func reresolve(_ stale: WindowCandidate, excluding others: [WindowCandidate]) -> WindowCandidate? {
-        let application = AXUIElementCreateApplication(stale.application.processIdentifier)
-        AXUIElementSetMessagingTimeout(application, 0.3)
-        guard let windows = try? value(application, kAXWindowsAttribute) as? [AXUIElement] else { return nil }
-        let unclaimed = windows.compactMap { window -> WindowCandidate? in
-            guard let candidate = try? candidate(window, application: stale.application),
-                  !others.contains(where: { $0.isSameWindow(as: candidate) }) else { return nil }
-            return candidate
-        }
+    static func probe(_ element: AXUIElement) -> AXError {
+        var role: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+    }
+
+    /// The standard windows of an application, or nil when they cannot be listed.
+    static func applicationWindows(_ application: NSRunningApplication) -> [WindowCandidate]? {
+        let element = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.3)
+        guard let windows = try? value(element, kAXWindowsAttribute) as? [AXUIElement] else { return nil }
+        return windows.compactMap { try? candidate($0, application: application) }
+    }
+
+    /// Picks the live window for a cached element that went stale (e.g. after a login-window round trip).
+    /// Windows that any workspace already manages are never taken, even when they are the app's only other window.
+    static func reresolve(
+        _ stale: WindowCandidate, among windows: [WindowCandidate], isClaimed: (WindowCandidate) -> Bool
+    ) -> WindowCandidate? {
+        let unclaimed = windows.filter { !isClaimed($0) }
         let titled = unclaimed.filter { $0.title == stale.title }
         if titled.count == 1 { return titled[0] }
         return titled.isEmpty && unclaimed.count == 1 ? unclaimed[0] : nil

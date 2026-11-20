@@ -34,13 +34,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var quitting = false
     private var monitorTrust: Bool?
     private var shortcutContext = WorkspaceShortcutContext()
-    private var windowDragTracker = WorkspaceWindowDragTracker()
-    private var windowDragRegistration = WorkspaceWindowDragRegistration()
     private var dragTimer: Timer?
-    private var lastWindowSnapshot: TimeInterval = 0
-    private var dragSamplingFailed = false
-    private var activeTabDrag: (controller: WorkspaceController, id: UUID, token: String, button: NSButton)?
+    private lazy var tabTransfer: WorkspaceTabTransfer = {
+        let transfer = WorkspaceTabTransfer { [weak self] in self?.controllers ?? [] }
+        transfer.onBegin = { [weak self] in self?.cancelWindowDrag() }
+        transfer.onTransfer = { [weak self] source, destination in
+            guard let self else { return }
+            SavedLayout.upsert([self.savedWorkspace(source), self.savedWorkspace(destination)])
+        }
+        return transfer
+    }()
     private lazy var activation = WorkspaceActivation { [weak self] in self?.controllers ?? [] }
+    private lazy var windowDrop: WorkspaceWindowDrop = {
+        let drop = WorkspaceWindowDrop { [weak self] in self?.controllers ?? [] }
+        drop.onSamplingFailure = { [weak self] error in
+            self?.activeController?.showNotice(.attention(error.localizedDescription))
+        }
+        return drop
+    }()
 
     private var activeController: WorkspaceController? { activation.activeController }
 
@@ -97,7 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             MainActor.assumeIsolated {
                 self?.refreshGlobalMonitor()
                 // While the login window / another user is in front, AX queries fail; don't mistake that for closed windows.
-                guard let self, self.activeTabDrag == nil, !self.sessionInactive,
+                guard let self, !self.tabTransfer.isActive, !self.sessionInactive,
                       !Self.isScreenUnavailable, Date() >= self.pruneResumeDate else { return }
                 self.controllers.forEach { $0.session.pruneClosedWindows() }
             }
@@ -173,8 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let grid { controller.session.setGrid(grid) }
                 if !candidates.isEmpty { controller.session.add(candidates) }
             }
-            chosen.first?.0.bringToFront()
-            chosen.first?.0.scheduleSelectedWindowRaise()
+            chosen.first?.0.present()
         }
     }
 
@@ -328,81 +338,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.onSuspend = { [weak self] in
             self?.shortcutContext.reset()
             self?.cancelWindowDrag()
-            self?.clearTabDrag()
+            self?.tabTransfer.clear()
         }
         controller.isRegisteredElsewhere = { [weak self, weak controller] candidate in
             guard let self else { return false }
             return self.controllers.contains { $0 !== controller && $0.session.contains(candidate) }
         }
-        controller.onTabDragBegin = { [weak self, weak controller] id, token, button in
-            guard let self, let controller else { return }
-            self.clearTabDrag()
-            self.cancelWindowDrag()
-            self.activeTabDrag = (controller, id, token, button)
-        }
-        controller.onTabDragMove = { [weak self] token, board, button, point in
-            guard let self, let drag = self.activeTabDrag, drag.token == token, drag.button === button else { return }
-            let destination = self.tabDragDestination(at: point, from: drag.controller)
-            let target = destination === drag.controller ? nil : destination
-            for controller in self.controllers where controller !== target {
-                controller.hideTabTransferTargets()
-            }
-            target?.previewTabTransfer(pasteboard: board, source: button, at: point)
-        }
-        controller.acceptsExternalTab = { [weak self, weak controller] token, button in
-            guard let self, let drag = self.activeTabDrag, let controller else { return false }
-            return drag.controller !== controller && drag.token == token && drag.button === button
-        }
-        controller.onExternalTabDrop = { [weak self, weak controller] token, button, index, cell in
-            guard let self, let controller, let drag = self.activeTabDrag,
-                  drag.token == token, drag.button === button, drag.controller !== controller else { return false }
-            return self.transferDraggedTab(to: controller, index: index, cell: cell)
-        }
-        controller.onTabDragEnd = { [weak self] token, board, point, cancelled in
-            guard let self, let drag = self.activeTabDrag, drag.token == token else { return }
-            if !cancelled, drag.controller.acceptsWindowDrag,
-               let destination = self.tabDragDestination(at: point, from: drag.controller) {
-                _ = destination.completeTabDrop(pasteboard: board, source: drag.button, at: point)
-            }
-            self.clearTabDrag()
-        }
+        tabTransfer.attach(controller)
         if let origin = activeController?.window.frame.origin {
             controller.window.setFrameOrigin(NSPoint(x: origin.x + 30, y: origin.y - 30))
         }
         controllers.append(controller)
         controller.bringToFront()
         return controller
-    }
-
-    private func tabDragDestination(at point: NSPoint, from source: WorkspaceController) -> WorkspaceController? {
-        let candidates = NSApp.orderedWindows.compactMap { window in
-            controllers.first { $0 !== source && $0.window === window && $0.acceptsWindowDrag }
-        }
-        switch WorkspaceTabDragRoute.resolve(
-            at: point, sourceFrame: source.window.frame, sourceTabRowContains: source.tabRowContains(point),
-            destinationFrames: candidates.map { $0.window.frame }
-        ) {
-        case .none: return nil
-        case .source: return source
-        case .transfer(let index): return candidates[index]
-        }
-    }
-
-    private func clearTabDrag() {
-        activeTabDrag?.controller.endTabTransferDrag()
-        activeTabDrag = nil
-        controllers.forEach { $0.hideTabTransferTargets() }
-    }
-
-    @discardableResult
-    private func transferDraggedTab(to destination: WorkspaceController, index: Int? = nil, cell: Int? = nil) -> Bool {
-        guard let drag = activeTabDrag else { return false }
-        clearTabDrag()
-        guard drag.controller.session.transferWindow(drag.id, to: destination.session, at: index, cell: cell) else { return false }
-        SavedLayout.upsert([savedWorkspace(drag.controller), savedWorkspace(destination)])
-        destination.bringToFront()
-        destination.scheduleSelectedWindowRaise()
-        return true
     }
 
     /// The first "Workspace N" not used by an open or saved workspace.
@@ -467,7 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Restores the workspace's windows to their original positions and closes it; closing the last workspace quits.
     /// A closed workspace stays in the saved layout unless `forget` is set.
     private func close(_ controller: WorkspaceController, forget: Bool = false) {
-        clearTabDrag()
+        tabTransfer.clear()
         if forget {
             SavedLayout.remove(named: controller.name)
         } else if controllers.count > 1 {
@@ -494,7 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.window.delegate = nil
         controller.window.orderOut(nil)
         controller.window.close()
-        controllers.last?.bringToFront()
+        controllers.last?.present()
     }
 
     // MARK: Menu actions for the active workspace
@@ -569,83 +517,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func pollWindowDrag() {
-        guard activeTabDrag == nil else { return }
-        guard !quitting, controllers.contains(where: \.acceptsWindowDrag), let screen = NSScreen.screens.first else {
-            cancelWindowDrag()
-            return
-        }
-        let down = NSEvent.pressedMouseButtons & 1 != 0
-        let now = ProcessInfo.processInfo.systemUptime
-        guard down || windowDragTracker.isTrackingPress || now - lastWindowSnapshot >= 0.2 else { return }
-        lastWindowSnapshot = now
-        let point = NSEvent.mouseLocation
-        let axPoint = CGPoint(x: point.x, y: screen.frame.maxY - point.y)
-        do {
-            let windows = try WindowAccess.windowServerWindows()
-            dragSamplingFailed = false
-            switch windowDragTracker.update(
-                buttonDown: down, point: axPoint, windows: windows.filter { $0.layer == 0 },
-                ownPID: ProcessInfo.processInfo.processIdentifier
-            ) {
-            case .idle:
-                windowDragRegistration.reset()
-                controllers.forEach { $0.hideWindowDropTarget() }
-            case .moving(let drag):
-                if NSRunningApplication(processIdentifier: drag.window.processID)?.activationPolicy == .regular {
-                    let target = try windowDropTarget(at: point, accessibilityPoint: axPoint, drag: drag, windows: windows)
-                    for controller in controllers {
-                        if controller === target {
-                            controller.showWindowDropTarget(at: point)
-                        } else {
-                            controller.hideWindowDropTarget()
-                        }
-                    }
-                } else {
-                    controllers.forEach { $0.hideWindowDropTarget() }
-                }
-            case .released(let drag):
-                defer { windowDragRegistration.reset() }
-                let target = try windowDropTarget(at: point, accessibilityPoint: axPoint, drag: drag, windows: windows)
-                controllers.forEach { $0.hideWindowDropTarget() }
-                if NSRunningApplication(processIdentifier: drag.window.processID)?.activationPolicy == .regular {
-                    target?.finishWindowDrag(drag, accessibilityPoint: axPoint, screenPoint: point)
-                }
-            }
-        } catch {
-            cancelWindowDrag()
-            if !dragSamplingFailed {
-                dragSamplingFailed = true
-                WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
-                activeController?.showNotice(.attention(error.localizedDescription))
-            }
-        }
-    }
-
-    private func windowDropTarget(
-        at point: NSPoint, accessibilityPoint: CGPoint, drag: WorkspaceWindowDrag, windows: [WindowServerWindow]
-    ) throws -> WorkspaceController? {
-        var excluded: Set<CGWindowID> = [drag.window.id]
-        for controller in controllers {
-            if let number = controller.windowDropPanelNumber, number > 0 {
-                excluded.insert(CGWindowID(number))
-            }
-        }
-        guard let frontmost = WindowHitTesting.frontmostWindow(
-            at: accessibilityPoint, windows: windows.map { (id: $0.id, frame: $0.frame) }, excluding: excluded
-        ) else { return nil }
-        guard let target = controllers.first(where: {
-            $0.window.windowNumber > 0 && CGWindowID($0.window.windowNumber) == frontmost &&
-                $0.acceptsWindowDrop(at: point)
-        }) else { return nil }
-        let registered = controllers.flatMap { $0.session.windows.map(\.candidate) }
-        guard try !windowDragRegistration.isRegistered(drag.window, among: registered) else { return nil }
-        return target
+        guard !tabTransfer.isActive else { return }
+        guard !quitting else { return cancelWindowDrag() }
+        windowDrop.poll()
     }
 
     private func cancelWindowDrag() {
-        windowDragTracker.cancel()
-        windowDragRegistration.reset()
-        controllers.forEach { $0.hideWindowDropTarget() }
+        windowDrop.cancel()
     }
 
     // MARK: Application lifecycle

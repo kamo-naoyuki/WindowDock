@@ -11,7 +11,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     private var tabIDs: [UUID] = []
     private var windowRaisePending = false
     private var windowRaiseScheduled = false
-    private var windowFocusPending = false
+    /// When a focus handoff was requested; activation can complete well after the request.
+    private var windowFocusRequest: TimeInterval?
     private var coverageGeneration = 0
     private(set) var suspended = false
     var quitting = false
@@ -71,6 +72,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     }
 
     private func wireSession() {
+        session.isClaimedElsewhere = { [weak self] candidate in self?.isRegisteredElsewhere?(candidate) ?? false }
         window.onWorkspaceFrameChange = { [weak self] in self?.syncIfVisible() }
         workspace.onFrameInteractionEnd = { [weak self] in self?.scheduleSelectedWindowRaise(activate: true) }
         session.targetFrames = { [weak self] in self?.targetFrames() ?? [:] }
@@ -312,7 +314,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         }
         picker?.present(on: window) { [weak self] in
             self?.picker = nil
-            if collect == nil { self?.scheduleSelectedWindowRaise() }
+            if collect == nil { self?.scheduleSelectedWindowRaise(activate: true) }
             completion?()
         }
     }
@@ -325,10 +327,39 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Whether a view under a click (window-server coordinates) acts on the click itself, such as a tab,
+    /// a toolbar control or a pane, instead of leaving the workspace in front of its windows.
+    func handlesActivatingClick(at point: CGPoint) -> Bool {
+        guard let screen = NSScreen.screens.first, let frameView = window.contentView?.superview else { return false }
+        let location = window.convertPoint(fromScreen: NSPoint(x: point.x, y: screen.frame.maxY - point.y))
+        var view = frameView.hitTest(location)
+        while let current = view {
+            if current is NSControl || current is NSScrollView || current.acceptsFirstMouse(for: nil) { return true }
+            view = current.superview
+        }
+        return false
+    }
+
     func bringToFront() {
         if window.isMiniaturized { window.deminiaturize(nil) }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Brings the workspace and then its windows to the front without waiting for WindowDock to be active,
+    /// such as while a tab is dragged over it.
+    func reveal() {
+        guard acceptsWindowDrag, window.attachedSheet == nil else { return }
+        window.orderFrontRegardless()
+        session.raiseSelected(activate: true)
+    }
+
+    /// Makes this the workspace that comes back when WindowDock is activated again. Activating WindowDock now would
+    /// bring every workspace forward, and while it is still active, the raise that becoming key schedules could
+    /// order the frame above windows that `reveal()` has just handed focus to.
+    func makeKeyAfterReveal() {
+        window.makeKey()
+        windowRaisePending = false
     }
 
     // MARK: Shortcuts and drag and drop
@@ -441,31 +472,51 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         scheduleSelectedWindowRaise()
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        // Another window became key first; a later handoff would steal its focus.
+        windowRaisePending = false
+        windowFocusRequest = nil
+    }
+
     func scheduleSelectedWindowRaiseIfPending() {
         if windowRaisePending { scheduleSelectedWindowRaise() }
     }
 
+    /// Brings the workspace forward and then its windows above it, handing focus to the selected window.
+    func present() {
+        bringToFront()
+        scheduleSelectedWindowRaise(activate: true)
+    }
+
     func scheduleSelectedWindowRaise(activate: Bool = false) {
         windowRaisePending = true
-        windowFocusPending = windowFocusPending || activate
+        if activate { windowFocusRequest = ProcessInfo.processInfo.systemUptime }
         guard !windowRaiseScheduled else { return }
         windowRaiseScheduled = true
         // Do not change window ordering during button tracking or window dragging.
         RunLoop.main.perform(inModes: [.default]) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.windowRaiseScheduled = false
-                guard self.windowRaisePending, NSEvent.pressedMouseButtons == 0 else { return }
-                self.windowRaisePending = false
-                let activate = self.windowFocusPending
-                self.windowFocusPending = false
-                guard NSApp.isActive, self.window.isKeyWindow,
-                      !self.suspended, !self.quitting, !self.window.isMiniaturized,
-                      self.picker == nil, self.window.attachedSheet == nil else { return }
-                self.session.raiseSelected(activate: activate)
-                self.window.orderFront(nil)
-            }
+            MainActor.assumeIsolated { self?.raiseSelectedWindowIfReady() }
         }
+    }
+
+    private func raiseSelectedWindowIfReady() {
+        windowRaiseScheduled = false
+        // The mouse-up monitor retries once the button is released.
+        guard windowRaisePending, NSEvent.pressedMouseButtons == 0 else { return }
+        guard !suspended, !quitting, !window.isMiniaturized, picker == nil, window.attachedSheet == nil else {
+            windowRaisePending = false
+            windowFocusRequest = nil
+            return
+        }
+        // A click on an inactive workspace can be handled before the app's activation arrives. Keep the request
+        // until the app is active and this window is key, which schedules it again.
+        guard NSApp.isActive, window.isKeyWindow else { return }
+        let activate = windowFocusRequest.map { ProcessInfo.processInfo.systemUptime - $0 < 2 } ?? false
+        windowRaisePending = false
+        windowFocusRequest = nil
+        // Order the frame first so that the windows end up above it.
+        window.orderFront(nil)
+        session.raiseSelected(activate: activate)
     }
 
     var onSuspend: (() -> Void)?
@@ -479,7 +530,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     func windowDidDeminiaturize(_ notification: Notification) {
         suspended = false
         session.resume()
-        scheduleSelectedWindowRaise()
+        scheduleSelectedWindowRaise(activate: true)
     }
 
     func applicationDidHide() {

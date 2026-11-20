@@ -42,6 +42,9 @@ enum WindowSessionSmoke {
         var failedRegistrations: Set<Int> = []
         var failedFocuses: Set<Int> = []
         var focusedWindows: [Int] = []
+        var probeErrors: [Int: AXError] = [:]
+        /// The windows that their app lists, by index.
+        var listedWindows: [Int] = []
         var changeCount = 0
         var notices: [WorkspaceNotice] = []
         var presentedFrames: [CGRect?] = []
@@ -96,6 +99,13 @@ enum WindowSessionSmoke {
             let index = try model.index(of: element)
             if model.failedFocuses.contains(index) { throw InjectedFailure() }
             model.focusedWindows.append(index)
+        }
+        access.probe = { element in
+            guard let index = try? model.index(of: element) else { return .invalidUIElement }
+            return model.probeErrors[index] ?? .success
+        }
+        access.applicationWindows = { _ in
+            model.listedWindows.map { WindowCandidate(element: model.windows[$0].element, application: .current, title: "Live \($0)") }
         }
         return access
     }
@@ -181,57 +191,168 @@ enum WindowSessionSmoke {
         let registered = source.windows.map(\.candidate) + other.windows.map(\.candidate)
         let candidate = source.windows[0].candidate
         let pid = candidate.application.processIdentifier
-        var registration = WorkspaceWindowDragRegistration()
+        let windowNumbers: [CGWindowID] = [80, 84, 81]
+        var lookups = 0
+        let windowID: (AXUIElement) -> CGWindowID? = { element in
+            lookups += 1
+            return (try? model.index(of: element)).map { windowNumbers[$0] }
+        }
+        // A moving window's AX frame lags behind the WindowServer, so frame matching cannot identify it.
         var resolutions = 0
+        let laggingFrame: (WindowServerWindow) throws -> WindowCandidate = { _ in
+            resolutions += 1
+            throw InjectedFailure()
+        }
+        var registration = WorkspaceWindowDragRegistration()
+        for offset in [CGFloat(0), 100, 200] {
+            let moved = WindowServerWindow(id: 80, processID: pid, frame: model.target.offsetBy(dx: offset, dy: 0))
+            if !registration.isRegistered(moved, among: registered, windowID: windowID, resolve: laggingFrame) {
+                failures.append("a registered window was offered for ordinary dragging into a workspace")
+            }
+        }
+        if !registration.isRegistered(WindowServerWindow(id: 84, processID: pid, frame: model.target),
+                                      among: registered, windowID: windowID, resolve: laggingFrame) {
+            failures.append("a window registered in another workspace was not suppressed")
+        }
+        for offset in [CGFloat(0), 100, 200] {
+            let sibling = WindowServerWindow(id: 90, processID: pid, frame: model.target.offsetBy(dx: offset, dy: 40))
+            if registration.isRegistered(sibling, among: registered, windowID: windowID, resolve: laggingFrame) {
+                failures.append("an unregistered window was not droppable while another window of its app was registered")
+                break
+            }
+        }
+        if resolutions != 0 {
+            failures.append("drag identification fell back to frame matching although window numbers were available")
+        }
+        if lookups != registered.count {
+            failures.append("registered window numbers were looked up again during one drag: \(lookups)")
+        }
+        let sibling = WindowCandidate(element: model.windows[2].element, application: .current, title: "Newly registered")
+        if !registration.isRegistered(WindowServerWindow(id: 81, processID: pid, frame: model.target),
+                                      among: registered + [sibling], windowID: windowID, resolve: laggingFrame) {
+            failures.append("drag identification did not notice newly registered ownership")
+        }
+        let unrelated = WindowServerWindow(id: 82, processID: pid + 1, frame: model.target)
+        if registration.isRegistered(unrelated, among: registered, windowID: windowID, resolve: laggingFrame) {
+            failures.append("an app with no registered windows was suppressed")
+        }
+        registration.reset()
+        lookups = 0
+        _ = registration.isRegistered(WindowServerWindow(id: 90, processID: pid, frame: model.target),
+                                      among: registered, windowID: windowID, resolve: laggingFrame)
+        if lookups != registered.count {
+            failures.append("resetting the drag did not discard cached window numbers")
+        }
+
+        // Without window numbers, frames identify the window once it can be matched.
+        let unavailable: (AXUIElement) -> CGWindowID? = { _ in nil }
+        registration.reset()
+        resolutions = 0
         let resolve: (WindowServerWindow) throws -> WindowCandidate = { _ in
             resolutions += 1
             return candidate
         }
-        do {
-            for offset in [CGFloat(0), 100, 200] {
-                let moved = WindowServerWindow(id: 80, processID: pid, frame: model.target.offsetBy(dx: offset, dy: 0))
-                if try !registration.isRegistered(moved, among: registered, resolve: resolve) {
-                    failures.append("a registered window was offered for ordinary dragging into a workspace")
-                }
+        for offset in [CGFloat(0), 100, 200] {
+            let moved = WindowServerWindow(id: 80, processID: pid, frame: model.target.offsetBy(dx: offset, dy: 0))
+            if !registration.isRegistered(moved, among: registered, windowID: unavailable, resolve: resolve) {
+                failures.append("frame fallback did not suppress a registered window")
             }
-            if resolutions != 1 {
-                failures.append("registered-window drag identification repeated AX resolution while moving")
+        }
+        if resolutions != 1 {
+            failures.append("frame fallback repeated AX resolution while moving: \(resolutions)")
+        }
+        registration.reset()
+        resolutions = 0
+        for offset in [CGFloat(0), 100, 200] {
+            let moved = WindowServerWindow(id: 90, processID: pid, frame: model.target.offsetBy(dx: offset, dy: 40))
+            if registration.isRegistered(moved, among: registered, windowID: unavailable, resolve: laggingFrame) {
+                failures.append("a window whose moving frame could not be matched was not droppable")
             }
-            let sibling = WindowCandidate(element: model.windows[2].element, application: .current, title: "Unregistered sibling")
-            let siblingWindow = WindowServerWindow(id: 81, processID: pid, frame: model.target)
-            let resolveSibling: (WindowServerWindow) throws -> WindowCandidate = { _ in sibling }
-            if try registration.isRegistered(siblingWindow, among: registered, resolve: resolveSibling) {
-                failures.append("registration filtering suppressed an unregistered window from the same app")
+        }
+        if resolutions != 1 {
+            failures.append("an unmatched moving frame was resolved again on every sample: \(resolutions)")
+        }
+        return failures
+    }
+
+    /// Drags an unregistered window of an app whose other window is already in a workspace onto the tab bar.
+    static func runExternalWindowDropChecks() -> [String] {
+        let model = Model(windowCount: 2)
+        let controller = WorkspaceController(name: "Window drop", access: access(for: model))
+        let window = controller.window
+        defer {
+            controller.hideWindowDropTarget()
+            controller.quitting = true
+            window.orderOut(nil)
+        }
+        guard let chrome = window.contentView as? WorkspaceChromeView,
+              let screen = NSScreen.screens.first else { return ["window drop fixture could not find its content or screen"] }
+        window.setFrame(NSRect(x: 200, y: 160, width: 900, height: 600), display: true)
+        controller.session.add(WindowCandidate(element: model.windows[0].element, application: .current, title: "Registered"))
+        window.orderFrontRegardless()
+        chrome.layoutSubtreeIfNeeded()
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let registeredNumber: CGWindowID = 9_000_001
+        let draggedNumber: CGWindowID = 9_000_002
+        let workspace = WindowServerWindow(
+            id: CGWindowID(window.windowNumber), processID: pid,
+            frame: WindowGeometry.accessibilityRect(from: window.frame, primaryScreenTop: screen.frame.maxY)
+        )
+        let drop = window.convertPoint(toScreen: chrome.addButton.convert(
+            NSPoint(x: chrome.addButton.bounds.midX, y: chrome.addButton.bounds.midY), to: nil
+        ))
+        guard controller.acceptsWindowDrop(at: drop) else { return ["window drop fixture's tab bar did not accept drops"] }
+        let axDrop = CGPoint(x: drop.x, y: screen.frame.maxY - drop.y)
+        // The dragged window starts outside the workspace and is grabbed 40 points into its titlebar.
+        let start = CGRect(x: workspace.frame.maxX + 60, y: workspace.frame.minY + 40, width: 500, height: 400)
+        let grab = CGPoint(x: start.minX + 40, y: start.minY + 10)
+        let moved = start.offsetBy(dx: axDrop.x - grab.x, dy: axDrop.y - grab.y)
+
+        func run(dragging number: CGWindowID, windowID: @escaping (AXUIElement) -> CGWindowID?) -> (shown: Bool, finished: Bool) {
+            let coordinator = WorkspaceWindowDrop { [controller] }
+            var pointer = WorkspaceWindowDrop.Pointer(location: .zero, buttonDown: false)
+            var frame = start
+            var finished: [WorkspaceController] = []
+            coordinator.pointer = { pointer }
+            coordinator.windows = { [WindowServerWindow(id: number, processID: pid, frame: frame), workspace] }
+            // The harness owns both fake windows, so only the workspace must not count as its own app.
+            coordinator.ownPID = -1
+            coordinator.isRegularApplication = { _ in true }
+            coordinator.windowID = windowID
+            coordinator.resolve = { _ in throw InjectedFailure() }
+            coordinator.finish = { target, _, _, _ in finished.append(target) }
+            func sample(_ point: CGPoint, down: Bool) {
+                pointer = .init(location: NSPoint(x: point.x, y: screen.frame.maxY - point.y), buttonDown: down)
+                coordinator.poll()
             }
-            if try !registration.isRegistered(siblingWindow, among: registered + [sibling], resolve: resolveSibling) {
-                failures.append("cached drag identity did not notice newly registered ownership")
-            }
-            let unrelated = WindowServerWindow(id: 82, processID: pid + 1, frame: model.target)
-            if try registration.isRegistered(unrelated, among: registered, resolve: { _ in throw InjectedFailure() }) {
-                failures.append("an app with no registered windows was suppressed")
-            }
-            registration.reset()
-            if try !registration.isRegistered(
-                WindowServerWindow(id: 80, processID: pid, frame: model.target), among: registered, resolve: resolve
-            ) || resolutions != 2 {
-                failures.append("resetting the drag did not discard its cached window identity")
-            }
-            if try !registration.isRegistered(
-                WindowServerWindow(id: 84, processID: pid, frame: model.target), among: registered,
-                resolve: { _ in other.windows[0].candidate }
-            ) {
-                failures.append("a window registered in another workspace was not suppressed")
-            }
-            do {
-                _ = try registration.isRegistered(
-                    WindowServerWindow(id: 83, processID: pid, frame: model.target), among: registered,
-                    resolve: { _ in throw InjectedFailure() }
-                )
-                failures.append("window identification failure silently allowed a drop")
-            } catch is InjectedFailure {
-            }
-        } catch {
-            failures.append("registered-window drag identification failed: \(error.localizedDescription)")
+            sample(grab, down: false)
+            sample(grab, down: true)
+            frame = moved
+            sample(axDrop, down: true)
+            let shown = chrome.windowDropPanel?.isVisible == true
+            sample(axDrop, down: false)
+            return (shown, finished.count == 1 && finished.first === controller)
+        }
+
+        var failures: [String] = []
+        let numbers: (AXUIElement) -> CGWindowID? = { element in
+            CFEqual(element, model.windows[0].element) ? registeredNumber : nil
+        }
+        let sibling = run(dragging: draggedNumber, windowID: numbers)
+        if !sibling.shown {
+            failures.append("dragging an unregistered window over the tab bar showed no drop target when another window of its app was registered")
+        }
+        if !sibling.finished {
+            failures.append("releasing an unregistered window on the tab bar did not add it when another window of its app was registered")
+        }
+        if chrome.windowDropPanel?.isVisible == true { failures.append("the drop target stayed visible after release") }
+        let fallback = run(dragging: draggedNumber, windowID: { _ in nil })
+        if !fallback.shown || !fallback.finished {
+            failures.append("a window whose moving frame could not be matched was not added: \(fallback)")
+        }
+        let registered = run(dragging: registeredNumber, windowID: numbers)
+        if registered.shown || registered.finished {
+            failures.append("dragging an already registered window offered it for addition: \(registered)")
         }
         return failures
     }
@@ -339,9 +460,9 @@ enum WindowSessionSmoke {
         }
         guard let chrome = window.contentView as? WorkspaceChromeView,
               let screen = NSScreen.screens.first else { return ["titlebar focus fixture could not find its content or screen"] }
-        func settle(_ seconds: TimeInterval = 0.5) {
+        func settle(_ seconds: TimeInterval = 0.5, until condition: () -> Bool = { false }) {
             let deadline = Date().addingTimeInterval(seconds)
-            while Date() < deadline {
+            while !condition(), Date() < deadline {
                 if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true) {
                     NSApp.sendEvent(event)
                 }
@@ -401,8 +522,11 @@ enum WindowSessionSmoke {
                 failures.append("\(label): handed off focus before mouse tracking returned")
             }
             settle()
-            if model.focusedWindows != [1] {
-                failures.append("\(label): selected pane was not focused on release; another activation click is needed: \(model.focusedWindows)")
+            // Each visible pane's window comes above other apps, and the selected one keeps focus.
+            if model.focusedWindows != [0, 1] {
+                failures.append("\(label): selected pane was not focused on release; another activation click is needed: " +
+                    "\(model.focusedWindows) (active \(NSApp.isActive), key \(window.isKeyWindow), " +
+                    "frontmost \(NSWorkspace.shared.frontmostApplication?.localizedName ?? "none"))")
             }
         }
 
@@ -419,6 +543,67 @@ enum WindowSessionSmoke {
         settle()
         if !model.focusedWindows.isEmpty {
             failures.append("a stale titlebar handoff stole focus after another window became key")
+        }
+
+        // Clicks on an inactive workspace. The click is handled before WindowDock's activation arrives.
+        let helper: ActivationHelperProcess
+        switch ActivationHelperProcess.launch() {
+        case .success(let launched): helper = launched
+        case .failure(let failure): return failures + [failure.message]
+        }
+        defer { helper.terminate() }
+        settle(0.5)
+        // NSApp.deactivate() does not give up activation, so another app takes it.
+        func deactivate() -> Bool {
+            if NSApp.isActive {
+                _ = WindowAccess.activateFrontWindowOnly(helper.pid)
+                settle(2) { !NSApp.isActive }
+            }
+            return !NSApp.isActive
+        }
+        if deactivate() {
+            model.focusedWindows.removeAll()
+            if !gesture(at: barPoint, delta: .zero) { failures.append("could not create inactive titlebar click") }
+            settle(0.3)
+            if !model.focusedWindows.isEmpty {
+                failures.append("inactive titlebar click handed off focus before WindowDock was active")
+            }
+            // Stands in for the click, which lets WindowDock activate itself.
+            helper.send("yield \(ProcessInfo.processInfo.processIdentifier)")
+            settle(0.3)
+            controller.bringToFront()
+            settle(2) { NSApp.isActive && window.isKeyWindow && !model.focusedWindows.isEmpty }
+            settle(0.2)
+            if model.focusedWindows != [0, 1] {
+                failures.append("titlebar click on an inactive workspace left only the frame in front once WindowDock became active; another click is needed: \(model.focusedWindows)")
+            }
+        } else {
+            failures.append("titlebar focus fixture could not deactivate WindowDock")
+        }
+        let paneArea = chrome.gridAreas[0]
+        let panePoint = paneArea.convert(NSPoint(x: paneArea.bounds.midX, y: paneArea.bounds.midY), to: nil)
+        let tabButtons = chrome.tabs.arrangedSubviews.compactMap {
+            ($0 as? WorkspaceTabGroup)?.arrangedSubviews.compactMap { $0 as? WorkspaceTabButton }.first
+        }
+        if let tab = tabButtons.first(where: { $0.tag == 0 }) {
+            let tabPoint = tab.convert(NSPoint(x: tab.bounds.midX, y: tab.bounds.midY), to: nil)
+            for (label, point) in [("pane", panePoint), ("tab", tabPoint)] {
+                controller.session.select(controller.session.windows[1].id)
+                guard deactivate() else {
+                    failures.append("titlebar focus fixture could not deactivate WindowDock before a \(label) click")
+                    continue
+                }
+                model.focusedWindows.removeAll()
+                if !gesture(at: point, delta: .zero) { failures.append("could not create inactive \(label) click") }
+                settle(1) { !model.focusedWindows.isEmpty }
+                // A pane does not track the mouse; deliver its queued mouse-up before the next click.
+                settle(0.3)
+                if model.focusedWindows != [0] {
+                    failures.append("the first click on a \(label) of an inactive workspace did not focus its window: \(model.focusedWindows)")
+                }
+            }
+        } else {
+            failures.append("titlebar focus fixture could not find its first tab")
         }
         return failures
     }
@@ -523,27 +708,65 @@ enum WindowSessionSmoke {
         }
     }
 
+    /// A running `runActivationHelper` process, which can take activation away from the harness.
+    final class ActivationHelperProcess {
+        let pid: pid_t
+        let windows: [Int]
+        private let process: Process
+        private let input: Pipe
+
+        /// Fails with a description when the helper cannot be launched.
+        static func launch() -> Result<ActivationHelperProcess, SmokeFailure> {
+            guard let executable = Bundle.main.executableURL else { return .failure(.init("activation helper could not find its executable")) }
+            let process = Process()
+            let output = Pipe()
+            let input = Pipe()
+            process.executableURL = executable
+            process.arguments = ["--activation-helper"]
+            process.standardOutput = output
+            process.standardInput = input
+            do { try process.run() } catch { return .failure(.init("activation helper failed to launch: \(error.localizedDescription)")) }
+            let fields = (String(data: output.fileHandleForReading.availableData, encoding: .utf8) ?? "")
+                .split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
+            guard fields.count == 4 else {
+                process.terminate()
+                process.waitUntilExit()
+                return .failure(.init("activation helper did not report its windows"))
+            }
+            return .success(ActivationHelperProcess(process: process, input: input, pid: pid_t(fields[0]), windows: Array(fields[1...])))
+        }
+
+        private init(process: Process, input: Pipe, pid: pid_t, windows: [Int]) {
+            self.process = process
+            self.input = input
+            self.pid = pid
+            self.windows = windows
+        }
+
+        func send(_ command: String) { input.fileHandleForWriting.write(Data("\(command)\n".utf8)) }
+
+        func terminate() {
+            process.terminate()
+            process.waitUntilExit()
+        }
+    }
+
+    struct SmokeFailure: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
+    }
+
     /// Uses real windows of another process and changes the active application, so it runs in its own
     /// harness process (`--activation-only`) that is not the active app when it launches the helper.
     static func runFrontWindowOnlyActivationChecks() -> [String] {
-        guard let executable = Bundle.main.executableURL else { return ["activation check could not find its executable"] }
-        let helper = Process()
-        let output = Pipe()
-        let input = Pipe()
-        helper.executableURL = executable
-        helper.arguments = ["--activation-helper"]
-        helper.standardOutput = output
-        helper.standardInput = input
-        do { try helper.run() } catch { return ["activation helper failed to launch: \(error.localizedDescription)"] }
-        defer {
-            helper.terminate()
-            helper.waitUntilExit()
+        let helper: ActivationHelperProcess
+        switch ActivationHelperProcess.launch() {
+        case .success(let launched): helper = launched
+        case .failure(let failure): return [failure.message]
         }
-        let fields = (String(data: output.fileHandleForReading.availableData, encoding: .utf8) ?? "")
-            .split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
-        guard fields.count == 4 else { return ["activation helper did not report its windows"] }
-        let helperPID = pid_t(fields[0])
-        let helperWindows = Array(fields[1...])
+        defer { helper.terminate() }
+        let helperPID = helper.pid
+        let helperWindows = helper.windows
         func wait(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
             let deadline = Date().addingTimeInterval(seconds)
             while !condition(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
@@ -561,7 +784,7 @@ enum WindowSessionSmoke {
         let other = otherApplication.windowNumber
         wait(0.3)
         // The registered window is raised within its inactive app before the app is activated.
-        input.fileHandleForWriting.write(Data("raise 2\n".utf8))
+        helper.send("raise 2")
         wait(2) { stackIndex(helperWindows[2]) < stackIndex(other) }
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID ||
             helperWindows[..<2].contains(where: { stackIndex($0) < stackIndex(other) }) {
@@ -587,12 +810,296 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    /// A tab whose window stops answering must not take over another workspace's window of the same app,
+    /// which would leave both workspaces managing it and make it impossible to move.
+    static func runReresolveChecks() -> [String] {
+        var failures: [String] = []
+        let model = Model(windowCount: 3)
+        let (first, _) = fixture(registering: [0], sharedModel: model)
+        let (second, _) = fixture(registering: [1], sharedModel: model)
+        first.isClaimedElsewhere = { second.contains($0) }
+        second.isClaimedElsewhere = { first.contains($0) }
+        func manages(_ session: WindowSession, _ index: Int) -> Bool {
+            session.windows.contains { CFEqual($0.candidate.element, model.windows[index].element) }
+        }
+
+        // A busy app (e.g. VS Code timing out) still owns the window.
+        model.listedWindows = [1, 2]
+        model.probeErrors = [0: .cannotComplete]
+        first.pruneClosedWindows()
+        first.pruneClosedWindows()
+        if !manages(first, 0) || first.windows.count != 1 {
+            failures.append("a tab whose window was busy was re-bound or dropped")
+        }
+
+        // The window closed while the app's only other window belongs to another workspace.
+        model.listedWindows = [1]
+        model.probeErrors = [0: .invalidUIElement]
+        first.pruneClosedWindows()
+        if manages(first, 1) {
+            failures.append("a tab whose window closed took over another workspace's window")
+        }
+        first.pruneClosedWindows()
+        if !first.windows.isEmpty {
+            failures.append("a tab whose window closed was not removed")
+        }
+        if !second.transferWindow(second.windows[0].id, to: first) || !manages(first, 1) || !second.windows.isEmpty {
+            failures.append("a window could not be moved to a workspace whose closed tab had the same app")
+        }
+
+        // A stale element of a window that still exists is found again among unclaimed windows.
+        let (third, _) = fixture(registering: [0], sharedModel: model)
+        third.isClaimedElsewhere = { first.contains($0) }
+        model.listedWindows = [1, 2]
+        third.pruneClosedWindows()
+        if !manages(third, 2) || third.windows.count != 1 {
+            failures.append("a tab with a stale element was not re-resolved to its app's unclaimed window")
+        }
+        return failures
+    }
+
+    static func runTabTransferRevealChecks() -> [String] {
+        let model = Model(windowCount: 3)
+        let source = WorkspaceController(name: "Reveal source", access: access(for: model))
+        let destination = WorkspaceController(name: "Reveal destination", access: access(for: model))
+        defer {
+            for controller in [source, destination] {
+                controller.hideTabTransferTargets()
+                controller.quitting = true
+                controller.window.orderOut(nil)
+            }
+        }
+        guard let visible = NSScreen.main?.visibleFrame,
+              let chrome = source.window.contentView as? WorkspaceChromeView,
+              let destinationChrome = destination.window.contentView as? WorkspaceChromeView else {
+            return ["tab reveal fixture could not find its screen or content"]
+        }
+        source.window.setFrame(NSRect(x: visible.minX + 40, y: visible.minY + 40, width: 700, height: 500), display: true)
+        destination.window.setFrame(source.window.frame.offsetBy(dx: 400, dy: 100), display: true)
+        source.session.add(WindowCandidate(element: model.windows[0].element, application: .current, title: "Moved"))
+        source.session.add(WindowCandidate(element: model.windows[1].element, application: .current, title: "Stays"))
+        destination.session.add(WindowCandidate(element: model.windows[2].element, application: .current, title: "Destination"))
+        destination.window.orderFrontRegardless()
+        source.window.orderFrontRegardless()
+        chrome.layoutSubtreeIfNeeded()
+        destinationChrome.layoutSubtreeIfNeeded()
+        let sourceFrame = source.window.frame
+        let destinationFrame = destination.window.frame
+        let sourceOnly = NSPoint(x: sourceFrame.minX + 60, y: sourceFrame.minY + 60)
+        let destinationOnly = NSPoint(x: destinationFrame.maxX - 60, y: destinationFrame.midY)
+        let overlap = NSPoint(x: destinationFrame.minX + 60, y: destinationFrame.minY + 60)
+        guard !destinationFrame.contains(sourceOnly), !sourceFrame.contains(destinationOnly),
+              sourceFrame.contains(overlap), destinationFrame.contains(overlap), !source.tabRowContains(overlap) else {
+            return ["tab reveal fixture could not place overlapping workspaces: \(sourceFrame) \(destinationFrame)"]
+        }
+
+        let transfer = WorkspaceTabTransfer { [source, destination] }
+        var transfers: [(WorkspaceController, WorkspaceController)] = []
+        transfer.onTransfer = { transfers.append(($0, $1)) }
+        transfer.attach(source)
+        transfer.attach(destination)
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        var button: WorkspaceTabButton?
+        func begin() {
+            chrome.layoutSubtreeIfNeeded()
+            button = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?.arrangedSubviews.first as? WorkspaceTabButton
+            let token = UUID().uuidString
+            board.clearContents()
+            board.setString(token, forType: workspaceTabDragType)
+            button?.onDragBegin?(button!, token, NSPoint(x: 10, y: 10), NSImage(size: NSSize(width: 100, height: 28)))
+        }
+        func move(_ point: NSPoint) { button?.onDragMove?(board, point) }
+        func end(_ point: NSPoint, cancelled: Bool) { button?.onDragEnd?(board, point, cancelled) }
+        func inFront(_ front: WorkspaceController, of back: WorkspaceController) -> Bool {
+            let order = NSApp.orderedWindows
+            guard let first = order.firstIndex(where: { $0 === front.window }),
+                  let second = order.firstIndex(where: { $0 === back.window }) else { return false }
+            return first < second
+        }
+        func modelIndex(of id: UUID?, in session: WindowSession) -> Int? {
+            guard let window = session.windows.first(where: { $0.id == id }) else { return nil }
+            return model.windows.firstIndex { CFEqual($0.element, window.candidate.element) }
+        }
+        let sourceSelected = modelIndex(of: source.session.selectedID, in: source.session)
+        var failures: [String] = []
+
+        begin()
+        guard button != nil, transfer.isActive else { return ["tab reveal fixture could not start a tab drag"] }
+        move(overlap)
+        if !model.focusedWindows.isEmpty || !inFront(source, of: destination) ||
+            destinationChrome.windowDropPanel?.isVisible == true {
+            failures.append("a workspace hidden behind the tab's own workspace took the tab where they overlap: " +
+                "focused \(model.focusedWindows), source front \(inFront(source, of: destination)), " +
+                "marker \(destinationChrome.windowDropPanel?.isVisible == true)")
+        }
+        move(destinationOnly)
+        if !inFront(destination, of: source) || model.focusedWindows != [2] ||
+            destinationChrome.windowDropPanel?.isVisible != true {
+            failures.append("a tab dragged over a workspace behind did not bring it and its windows forward: " +
+                "front \(inFront(destination, of: source)), focused \(model.focusedWindows)")
+        }
+        move(overlap)
+        if !inFront(destination, of: source) || model.focusedWindows != [2] ||
+            destinationChrome.windowDropPanel?.isVisible != true {
+            failures.append("the workspace brought forward lost the overlap to the one behind it: \(model.focusedWindows)")
+        }
+        move(sourceOnly)
+        if !inFront(source, of: destination) || model.focusedWindows.count < 2 || model.focusedWindows.last != sourceSelected {
+            failures.append("moving the tab back did not bring its own workspace forward: \(model.focusedWindows)")
+        }
+        move(destinationOnly)
+        model.focusedWindows.removeAll()
+        end(destinationOnly, cancelled: true)
+        if transfer.isActive || !inFront(source, of: destination) || model.focusedWindows.last != sourceSelected ||
+            !transfers.isEmpty || source.session.windows.count != 2 || destinationChrome.windowDropPanel?.isVisible == true {
+            failures.append("a cancelled tab drag left the workspace it passed over in front: \(model.focusedWindows)")
+        }
+
+        model.focusedWindows.removeAll()
+        begin()
+        move(destinationOnly)
+        end(destinationOnly, cancelled: false)
+        if transfer.isActive || transfers.count != 1 || transfers.first?.0 !== source || transfers.first?.1 !== destination ||
+            modelIndex(of: destination.session.selectedID, in: destination.session) != 0 || source.session.windows.count != 1 {
+            failures.append("dropping a tab on another workspace did not move it there")
+        }
+        if !inFront(destination, of: source) || model.focusedWindows.last != 0 {
+            failures.append("the workspace that received a tab was not left in front with the moved window: \(model.focusedWindows)")
+        }
+        return failures
+    }
+
+    /// A drop does not activate WindowDock, which would bring every workspace forward; it only makes the destination
+    /// key. Whether or not WindowDock was active at the drop, the destination must be the workspace that comes back
+    /// when WindowDock is activated again, e.g. with Cmd+Tab. Changes the active application, so it runs in the
+    /// `--activation-only` harness.
+    static func runTabTransferKeyChecks() -> [String] {
+        let model = Model(windowCount: 4)
+        let source = WorkspaceController(name: "Key source", access: access(for: model))
+        let destination = WorkspaceController(name: "Key destination", access: access(for: model))
+        defer {
+            for controller in [source, destination] {
+                controller.hideTabTransferTargets()
+                controller.quitting = true
+                controller.window.orderOut(nil)
+            }
+        }
+        func settle(_ seconds: TimeInterval = 0.5, until condition: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline {
+                if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true) {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        guard let visible = NSScreen.main?.visibleFrame,
+              let chrome = source.window.contentView as? WorkspaceChromeView else {
+            return ["tab drop key fixture could not find its screen or content"]
+        }
+        source.window.setFrame(NSRect(x: visible.minX + 40, y: visible.minY + 40, width: 500, height: 400), display: true)
+        destination.window.setFrame(source.window.frame.offsetBy(dx: 560, dy: 0), display: true)
+        source.session.add((0..<3).map {
+            WindowCandidate(element: model.windows[$0].element, application: .current, title: "Moved \($0)")
+        })
+        destination.session.add(WindowCandidate(element: model.windows[3].element, application: .current, title: "Destination"))
+        let dropPoint = NSPoint(x: destination.window.frame.midX, y: destination.window.frame.midY)
+        let transfer = WorkspaceTabTransfer { [source, destination] }
+        transfer.attach(source)
+        transfer.attach(destination)
+        let activation = WorkspaceActivation { [source, destination] }
+        activation.latestClick = { nil }
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let helper: ActivationHelperProcess
+        switch ActivationHelperProcess.launch() {
+        case .success(let launched): helper = launched
+        case .failure(let failure): return [failure.message]
+        }
+        defer { helper.terminate() }
+        settle(0.5)
+        let pid = ProcessInfo.processInfo.processIdentifier
+        // NSApp.deactivate() does not give up activation, so the helper takes it.
+        func setActive(_ active: Bool) -> Bool {
+            if active, !NSApp.isActive {
+                helper.send("yield \(pid)")
+                settle(0.3)
+                NSApp.activate(ignoringOtherApps: true)
+                settle(2) { NSApp.isActive }
+            } else if !active, NSApp.isActive {
+                _ = WindowAccess.activateFrontWindowOnly(helper.pid)
+                settle(2) { !NSApp.isActive }
+            }
+            return NSApp.isActive == active
+        }
+        func inFront(_ front: WorkspaceController, of back: WorkspaceController) -> Bool {
+            let order = NSApp.orderedWindows
+            guard let first = order.firstIndex(where: { $0 === front.window }),
+                  let second = order.firstIndex(where: { $0 === back.window }) else { return false }
+            return first < second
+        }
+
+        var failures: [String] = []
+        for activeAtDrop in [true, false] {
+            let state = activeAtDrop ? "active" : "inactive"
+            guard setActive(true) else {
+                failures.append("tab drop key fixture could not activate WindowDock")
+                continue
+            }
+            destination.window.orderFrontRegardless()
+            source.window.makeKeyAndOrderFront(nil)
+            settle(2) { source.window.isKeyWindow }
+            guard source.window.isKeyWindow, setActive(activeAtDrop) else {
+                failures.append("tab drop key fixture could not make the source key while WindowDock was \(state)")
+                continue
+            }
+            settle(0.3)
+            chrome.layoutSubtreeIfNeeded()
+            guard let button = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?
+                .arrangedSubviews.first as? WorkspaceTabButton else {
+                failures.append("tab drop key fixture could not find a tab to drag")
+                continue
+            }
+            let count = source.session.windows.count
+            let token = UUID().uuidString
+            board.clearContents()
+            board.setString(token, forType: workspaceTabDragType)
+            button.onDragBegin?(button, token, NSPoint(x: 10, y: 10), NSImage(size: NSSize(width: 100, height: 28)))
+            button.onDragMove?(board, dropPoint)
+            button.onDragEnd?(board, dropPoint, false)
+            guard source.session.windows.count == count - 1 else {
+                failures.append("tab drop key fixture could not drop a tab while WindowDock was \(state)")
+                continue
+            }
+            let operations = model.operations.count
+            settle()
+            if model.operations.dropFirst(operations).contains(where: { if case .raise = $0 { true } else { false } }) {
+                failures.append("a tab dropped while WindowDock was \(state) raised the workspace again after its windows " +
+                    "were handed focus, which can order the frame above them")
+            }
+            guard setActive(false), setActive(true) else {
+                failures.append("tab drop key fixture could not switch WindowDock away and back")
+                continue
+            }
+            activation.applicationDidBecomeActive()
+            settle()
+            if activation.activeController !== destination || !inFront(destination, of: source) {
+                failures.append("after a tab was dropped while WindowDock was \(state), activating WindowDock again " +
+                    "brought back the workspace the tab came from")
+            }
+        }
+        return failures
+    }
+
     static func runChecks() -> [String] {
         var failures: [String] = []
         failures += runManyTabMoveChecks()
+        failures += runReresolveChecks()
+        failures += runTabTransferRevealChecks()
         failures += runConstraintNoticeChecks()
         failures += runTransferChecks()
         failures += runRegisteredWindowDragChecks()
+        failures += runExternalWindowDropChecks()
         failures += runKeyboardFocusChecks()
         failures += runWindowInsertionChecks()
         let (orderingSession, orderingModel) = fixture()

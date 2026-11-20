@@ -503,7 +503,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         }
         layoutSubtreeIfNeeded()
         updateTabDragOverlays()
-        window?.orderFront(nil)
+        // A tab of an inactive workspace can be dragged with the first click, before WindowDock is active.
+        window?.orderFrontRegardless()
         window?.displayIfNeeded()
         CATransaction.flush()
         onTabDragBegin?(source.tag, token, source)

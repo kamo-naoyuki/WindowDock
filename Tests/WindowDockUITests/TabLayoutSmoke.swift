@@ -568,7 +568,7 @@ enum TabLayoutSmoke {
                 _ = chrome.completeTabDrop(pasteboard: board, source: source, screenPoint: point)
             }
         }
-        func replayTabDrag(to destination: NSPoint, escape: Bool) {
+        func replayTabDrag(to destination: NSPoint, escape: Bool, completes: Bool = true) {
             guard let screen = NSScreen.screens.first else {
                 failures.append("could not find a screen for mouse tracking")
                 return
@@ -609,7 +609,7 @@ enum TabLayoutSmoke {
                 failures.append("could not create tab mouse tracking events")
                 return
             }
-            events.append(completion)
+            if completes { events.append(completion) }
             for event in events { NSApp.postEvent(event, atStart: false) }
             source.mouseDown(with: down)
         }
@@ -673,6 +673,23 @@ enum TabLayoutSmoke {
         expectedOrder.swapAt(sourceIndex, neighborIndex)
         if movedCell != nil || committedOrder != expectedOrder {
             failures.append("releasing a tab over the only pane did not reorder it like the tab bar: moved=\(String(describing: movedCell)) order=\(String(describing: committedOrder)) expected=\(expectedOrder) tag=\(source.tag)")
+        }
+        // Another app activated during the drag may receive its mouse-up; tracking must end once the button is up.
+        let completionsBeforeLostRelease = mouseCompletions.count
+        var trackingHung = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            guard mouseCompletions.count == completionsBeforeLostRelease, let screen = NSScreen.screens.first else { return }
+            trackingHung = true
+            let point = CGPoint(x: outside.x, y: screen.frame.maxY - outside.y)
+            if let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+                .flatMap({ NSEvent(cgEvent: $0) }) {
+                NSApp.postEvent(up, atStart: false)
+            }
+        }
+        replayTabDrag(to: outside, escape: false, completes: false)
+        if trackingHung || mouseCompletions.count != completionsBeforeLostRelease + 1 ||
+            mouseCompletions.last?.1 != false || chrome.tabDragPreviewPanel?.isVisible == true {
+            failures.append("a tab drag whose mouse-up went to another app kept tracking after the button was released")
         }
         host.close()
         if failures.isEmpty {

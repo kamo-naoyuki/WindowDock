@@ -27,7 +27,7 @@ final class WorkspaceActivation {
 
     /// Brings a workspace forward on request, e.g. from the Dock menu or the Workspace menu.
     func show(_ controller: WorkspaceController) {
-        controller.bringToFront()
+        controller.present()
         // No activation may follow (the app is already active), or the Dock may already have activated the app,
         // raising every workspace and keying the last used one, before its menu item's action arrives.
         sendInactiveWorkspacesBack(behind: controller)
@@ -35,29 +35,32 @@ final class WorkspaceActivation {
 
     /// A Dock click brings back only the last used workspace.
     func reopen() {
-        activeController?.bringToFront()
+        activeController?.present()
         sendInactiveWorkspacesBack()
     }
 
     func applicationDidBecomeActive() {
         // A click raises only the clicked workspace, which is not key yet; guessing the active workspace now
         // would send the clicked one behind the others until the mouse is released.
-        if let clicked = activatingClickWindow() {
-            controllers().first { CGWindowID($0.window.windowNumber) == clicked }?.scheduleSelectedWindowRaise()
+        if let (clicked, point) = activatingClick() {
+            if let controller = controllers().first(where: { CGWindowID($0.window.windowNumber) == clicked }) {
+                // Like a titlebar click, the click returns focus to the selected window once released.
+                controller.scheduleSelectedWindowRaise(activate: !controller.handlesActivatingClick(at: point))
+            }
             return
         }
         activeController?.scheduleSelectedWindowRaise()
         sendInactiveWorkspacesBack()
     }
 
-    private func activatingClickWindow() -> CGWindowID? {
+    private func activatingClick() -> (window: CGWindowID, point: CGPoint)? {
         guard let click = latestClick(), let windows = try? WindowAccess.windowServerWindows() else { return nil }
         return WindowHitTesting.activatingClick(
             at: click.point,
             windows: windows.map { ($0.id, $0.processID, $0.frame) },
             ownPID: ProcessInfo.processInfo.processIdentifier,
             buttonDown: click.buttonDown, secondsSinceMouseDown: click.secondsSinceMouseDown
-        )
+        ).map { ($0, click.point) }
     }
 
     private static func currentClick() -> Click? {

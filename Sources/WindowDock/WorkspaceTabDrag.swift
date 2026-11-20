@@ -1,4 +1,5 @@
 import AppKit
+import WindowDockCore
 
 let workspaceTabDragType = NSPasteboard.PasteboardType("local.windowdock.tab-move")
 
@@ -66,6 +67,9 @@ final class WorkspaceTabButton: NSButton {
 
     override func menu(for event: NSEvent) -> NSMenu? { makeContextMenu?() }
 
+    // Like browser tabs, a tab of an inactive workspace can be chosen or dragged with the first click.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         let start = convert(event.locationInWindow, from: nil)
@@ -124,10 +128,24 @@ final class WorkspaceTabButton: NSButton {
         var point = initialScreenPoint
         var cancelled = true
         onDragMove?(board, point)
-        while let event = NSApp.nextEvent(
-            matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
-            until: .distantFuture, inMode: .eventTracking, dequeue: true
-        ) {
+        while true {
+            guard let event = NSApp.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
+                until: Date(timeIntervalSinceNow: 0.05), inMode: .eventTracking, dequeue: true
+            ) else {
+                // Bringing a workspace forward activates another app, which must not leave the drag without its
+                // mouse-up, so follow the pointer directly while no events arrive.
+                let released = NSEvent.pressedMouseButtons & 1 == 0
+                if released || NSEvent.mouseLocation != point {
+                    point = NSEvent.mouseLocation
+                    onDragMove?(board, point)
+                }
+                if released {
+                    cancelled = false
+                    break
+                }
+                continue
+            }
             if event.type == .keyDown {
                 if event.keyCode == 53 { break }
                 continue
@@ -223,5 +241,142 @@ final class WorkspaceTabDropOverlay: NSView {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         chrome?.performTabDrop(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton, cell: cellIndex) == true
+    }
+}
+
+/// Moves dragged tabs between workspaces. As with browser tabs, the workspace under the pointer comes to the front
+/// with its windows, so the user sees where the tab will land instead of only an insertion line.
+@MainActor
+final class WorkspaceTabTransfer {
+    private struct Drag {
+        let source: WorkspaceController
+        let id: UUID
+        let token: String
+        let button: NSButton
+    }
+
+    private let controllers: () -> [WorkspaceController]
+    var orderedWindows: () -> [NSWindow] = { NSApp.orderedWindows }
+    var reveal: (WorkspaceController) -> Void = { $0.reveal() }
+    var onBegin: () -> Void = {}
+    /// Called after a tab moved from the first workspace to the second.
+    var onTransfer: (WorkspaceController, WorkspaceController) -> Void = { _, _ in }
+
+    private var drag: Drag?
+    private var revealed: WorkspaceController?
+    private var transferred = false
+
+    init(controllers: @escaping () -> [WorkspaceController]) {
+        self.controllers = controllers
+    }
+
+    var isActive: Bool { drag != nil }
+
+    /// Routes the workspace's tab drags through this coordinator.
+    func attach(_ controller: WorkspaceController) {
+        controller.onTabDragBegin = { [weak self, weak controller] id, token, button in
+            guard let self, let controller else { return }
+            self.begin(from: controller, id: id, token: token, button: button)
+        }
+        controller.onTabDragMove = { [weak self] token, board, button, point in
+            self?.move(token: token, pasteboard: board, button: button, at: point)
+        }
+        controller.acceptsExternalTab = { [weak self, weak controller] token, button in
+            guard let self, let controller else { return false }
+            return self.accepts(controller, token: token, button: button)
+        }
+        controller.onExternalTabDrop = { [weak self, weak controller] token, button, index, cell in
+            guard let self, let controller else { return false }
+            return self.drop(on: controller, token: token, button: button, index: index, cell: cell)
+        }
+        controller.onTabDragEnd = { [weak self] token, board, point, cancelled in
+            self?.end(token: token, pasteboard: board, at: point, cancelled: cancelled)
+        }
+    }
+
+    private func begin(from source: WorkspaceController, id: UUID, token: String, button: NSButton) {
+        clear()
+        onBegin()
+        drag = Drag(source: source, id: id, token: token, button: button)
+        revealed = source
+    }
+
+    private func move(token: String, pasteboard: NSPasteboard, button: NSButton, at point: NSPoint) {
+        guard let drag, drag.token == token, drag.button === button else { return }
+        let destination = self.destination(at: point, from: drag.source)
+        let target = destination === drag.source ? nil : destination
+        for controller in controllers() where controller !== target {
+            controller.hideTabTransferTargets()
+        }
+        if let destination, destination !== revealed {
+            revealed = destination
+            reveal(destination)
+        }
+        target?.previewTabTransfer(pasteboard: pasteboard, source: button, at: point)
+    }
+
+    private func accepts(_ controller: WorkspaceController, token: String, button: NSButton?) -> Bool {
+        guard let drag else { return false }
+        return drag.source !== controller && drag.token == token && drag.button === button
+    }
+
+    private func drop(on destination: WorkspaceController, token: String, button: NSButton?, index: Int?, cell: Int?) -> Bool {
+        guard let drag, accepts(destination, token: token, button: button) else { return false }
+        // The source's floating tab must be gone before the transfer re-renders its tabs.
+        hideTargets()
+        guard drag.source.session.transferWindow(drag.id, to: destination.session, at: index, cell: cell) else { return false }
+        transferred = true
+        revealed = destination
+        onTransfer(drag.source, destination)
+        reveal(destination)
+        destination.makeKeyAfterReveal()
+        return true
+    }
+
+    private func end(token: String, pasteboard: NSPasteboard, at point: NSPoint, cancelled: Bool) {
+        guard let drag, drag.token == token else { return }
+        if !cancelled, drag.source.acceptsWindowDrag, let destination = self.destination(at: point, from: drag.source) {
+            _ = destination.completeTabDrop(pasteboard: pasteboard, source: drag.button, at: point)
+        }
+        // The tab stayed in its workspace, so bring that workspace back in front of those it passed over.
+        let restoresSource = !transferred && revealed !== drag.source
+        clear()
+        if restoresSource { reveal(drag.source) }
+    }
+
+    func clear() {
+        hideTargets()
+        drag = nil
+        revealed = nil
+        transferred = false
+    }
+
+    private func hideTargets() {
+        drag?.source.endTabTransferDrag()
+        controllers().forEach { $0.hideTabTransferTargets() }
+    }
+
+    /// The workspace that receives the tab at `point`: the frontmost one there, as the user sees it.
+    private func destination(at point: NSPoint, from source: WorkspaceController) -> WorkspaceController? {
+        let controllers = controllers()
+        var candidates: [WorkspaceController] = []
+        var destinationsInFront: Int?
+        for window in orderedWindows() {
+            if window === source.window {
+                destinationsInFront = candidates.count
+            } else if let controller = controllers.first(where: {
+                $0 !== source && $0.window === window && $0.acceptsWindowDrag
+            }) {
+                candidates.append(controller)
+            }
+        }
+        switch WorkspaceTabDragRoute.resolve(
+            at: point, sourceFrame: source.window.frame, sourceTabRowContains: source.tabRowContains(point),
+            destinationFrames: candidates.map { $0.window.frame }, destinationsInFront: destinationsInFront ?? 0
+        ) {
+        case .none: return nil
+        case .source: return source
+        case .transfer(let index): return candidates[index]
+        }
     }
 }
