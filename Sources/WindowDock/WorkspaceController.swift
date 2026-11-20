@@ -286,6 +286,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
             window.isOnActiveSpace && !window.isMiniaturized && !NSApp.isHidden
     }
 
+    var windowDropPanelNumber: Int? { workspace.windowDropPanel?.windowNumber }
+
     func showWindowDropTarget(at point: NSPoint) {
         guard acceptsWindowDrag else { return hideWindowDropTarget() }
         workspace.showWindowDropTarget(

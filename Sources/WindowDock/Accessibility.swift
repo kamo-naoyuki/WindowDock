@@ -149,13 +149,14 @@ extension WindowAccess {
             throw WindowAccessError(operation: L("移動中ウィンドウの検出"), code: .cannotComplete)
         }
         return entries.compactMap { entry in
-            guard entry[kCGWindowLayer as String] as? Int == 0,
+            guard let layer = entry[kCGWindowLayer as String] as? Int,
+                  (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
                   let id = entry[kCGWindowNumber as String] as? CGWindowID,
                   let pid = entry[kCGWindowOwnerPID as String] as? pid_t,
                   let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds),
                   !frame.isEmpty, !frame.isInfinite else { return nil }
-            return WindowServerWindow(id: id, processID: pid, frame: frame)
+            return WindowServerWindow(id: id, processID: pid, frame: frame, layer: layer)
         }
     }
 

@@ -8,6 +8,7 @@ Working on one task usually means a browser, an editor, a terminal, and more, al
 
 - One workspace = one set of windows from any apps, switched with tabs
 - Drag a tab onto another tab to swap their order, or onto a pane to move/swap its window
+- Drag another app's window onto a visible workspace tab bar to add it; an empty workspace also accepts drops in its main area
 - Split the workspace into up to 4×4 panes to view several windows side by side
 - Move and resize the workspace and all its windows follow, using the standard window buttons (including the green button's tiling menu)
 

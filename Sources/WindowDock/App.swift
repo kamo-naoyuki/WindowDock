@@ -517,21 +517,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let windows = try WindowAccess.windowServerWindows()
             dragSamplingFailed = false
             switch windowDragTracker.update(
-                buttonDown: down, point: axPoint, windows: windows,
+                buttonDown: down, point: axPoint, windows: windows.filter { $0.layer == 0 },
                 ownPID: ProcessInfo.processInfo.processIdentifier
             ) {
             case .idle:
                 controllers.forEach { $0.hideWindowDropTarget() }
             case .moving(let drag):
                 if NSRunningApplication(processIdentifier: drag.window.processID)?.activationPolicy == .regular {
-                    controllers.forEach { $0.showWindowDropTarget(at: point) }
+                    let target = windowDropTarget(at: point, accessibilityPoint: axPoint, drag: drag, windows: windows)
+                    for controller in controllers {
+                        if controller === target {
+                            controller.showWindowDropTarget(at: point)
+                        } else {
+                            controller.hideWindowDropTarget()
+                        }
+                    }
                 } else {
                     controllers.forEach { $0.hideWindowDropTarget() }
                 }
             case .released(let drag):
+                let target = windowDropTarget(at: point, accessibilityPoint: axPoint, drag: drag, windows: windows)
                 controllers.forEach { $0.hideWindowDropTarget() }
-                controllers.first { $0.acceptsWindowDrop(at: point) }?
-                    .finishWindowDrag(drag, accessibilityPoint: axPoint)
+                if NSRunningApplication(processIdentifier: drag.window.processID)?.activationPolicy == .regular {
+                    target?.finishWindowDrag(drag, accessibilityPoint: axPoint)
+                }
             }
         } catch {
             cancelWindowDrag()
@@ -540,6 +549,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
                 activeController?.showNotice(.attention(error.localizedDescription))
             }
+        }
+    }
+
+    private func windowDropTarget(
+        at point: NSPoint, accessibilityPoint: CGPoint, drag: WorkspaceWindowDrag, windows: [WindowServerWindow]
+    ) -> WorkspaceController? {
+        var excluded: Set<CGWindowID> = [drag.window.id]
+        for controller in controllers {
+            if let number = controller.windowDropPanelNumber, number > 0 {
+                excluded.insert(CGWindowID(number))
+            }
+        }
+        guard let frontmost = WindowHitTesting.frontmostWindow(
+            at: accessibilityPoint, windows: windows.map { (id: $0.id, frame: $0.frame) }, excluding: excluded
+        ) else { return nil }
+        return controllers.first {
+            $0.window.windowNumber > 0 && CGWindowID($0.window.windowNumber) == frontmost &&
+                $0.acceptsWindowDrop(at: point)
         }
     }
 

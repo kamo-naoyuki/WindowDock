@@ -40,6 +40,7 @@ struct WindowServerWindow: Equatable {
     let id: CGWindowID
     let processID: pid_t
     let frame: CGRect
+    var layer: Int = 0
 }
 
 struct WorkspaceWindowDragTracker {
