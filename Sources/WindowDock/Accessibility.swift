@@ -185,15 +185,20 @@ struct WindowAccessClient {
     var setFullScreen: (AXUIElement, Bool) throws -> Void = WindowAccess.setFullScreen
     var raise: (AXUIElement) throws -> Void = WindowAccess.raise
     var focus: (AXUIElement, NSRunningApplication) throws -> Void = WindowAccess.focus
-    /// The AX error of a cheap attribute read, used to notice closed windows and stale elements.
-    var probe: (AXUIElement) -> AXError = WindowAccess.probe
+    /// Reads the title while checking whether the element is still available.
+    var probe: (AXUIElement) -> WindowProbeResult = WindowAccess.probe
     var applicationWindows: (NSRunningApplication) -> [WindowCandidate]? = WindowAccess.applicationWindows
+}
+
+struct WindowProbeResult {
+    let error: AXError
+    let title: String?
 }
 
 struct WindowCandidate {
     let element: AXUIElement
     let application: NSRunningApplication
-    let title: String
+    var title: String
 
     var label: String {
         "\(application.localizedName ?? "App") — \(title.isEmpty ? L("名称未設定") : title)"
@@ -264,9 +269,13 @@ extension WindowAccess {
         throw WindowAccessError(operation: L("移動した通常ウィンドウの特定（「＋」から追加してください）"), code: .noValue)
     }
 
-    static func probe(_ element: AXUIElement) -> AXError {
-        var role: CFTypeRef?
-        return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+    static func probe(_ element: AXUIElement) -> WindowProbeResult {
+        var title: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
+        let currentTitle = error == .success || error == .noValue || error == .attributeUnsupported
+            ? title as? String ?? ""
+            : nil
+        return WindowProbeResult(error: error, title: currentTitle)
     }
 
     /// The standard windows of an application, or nil when they cannot be listed.

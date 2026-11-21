@@ -206,7 +206,15 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
             let side = session.isSplit ? cell.map {
                 L("%d行%d列 · ", $0 / session.gridSize.columns + 1, $0 % session.gridSize.columns + 1)
             } ?? "" : ""
-            let tab = workspace.appendTab(title: side + managed.candidate.label, icon: managed.candidate.application.icon, selected: selected, displayed: displayed)
+            let candidate = managed.candidate
+            let title = candidate.title.isEmpty ? candidate.application.localizedName ?? "App" : candidate.title
+            let tab = workspace.appendTab(
+                title: side + title,
+                toolTip: side + candidate.label,
+                icon: candidate.application.icon,
+                selected: selected,
+                displayed: displayed
+            )
             tab.select.target = self
             tab.select.action = #selector(selectTab(_:))
             tab.select.tag = index

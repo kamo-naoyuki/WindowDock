@@ -55,6 +55,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     let workspaceButton = NSButton(title: "", target: nil, action: nil)
     var workspaceMenu: (() -> NSMenu)?
     private var toolbar: NSStackView!
+    private static let minimumWorkspaceNameWidth: CGFloat = 48
     private var hasManagedWindows = false
     private var settingGrid = false
     private weak var dragSource: NSButton?
@@ -109,9 +110,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         let count = CGFloat(tabSizing.count)
         let spacing = CGFloat(max(0, tabSizing.count - 1)) * tabs.spacing
         let fixedGroupWidth: CGFloat = 34
+        let nameWidth = min(ceil(workspaceButton.intrinsicContentSize.width), Self.minimumWorkspaceNameWidth)
         let fixedControlsWidth = toolbar.arrangedSubviews
-            .filter { $0 !== tabScroll }
-            .reduce(CGFloat.zero) { $0 + $1.fittingSize.width }
+            .filter { $0 !== tabScroll && $0 !== workspaceButton }
+            .reduce(nameWidth) { $0 + $1.fittingSize.width }
         let toolbarGaps = CGFloat(toolbar.arrangedSubviews.count - 1) * toolbar.spacing
         let availableWidth = max(0, bounds.width - fixedControlsWidth - toolbarGaps
             - toolbar.edgeInsets.left - toolbar.edgeInsets.right)
@@ -197,8 +199,13 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         workspaceButton.toolTip = L("ワークスペースの操作")
         workspaceButton.target = self
         workspaceButton.action = #selector(showWorkspaceMenu)
+        // Hug the name tightly and let tabs take its space first; keep a short prefix visible.
+        workspaceButton.setContentHuggingPriority(NSLayoutConstraint.Priority(490), for: .horizontal)
         workspaceButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         workspaceButton.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
+        let minimumName = workspaceButton.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumWorkspaceNameWidth)
+        minimumName.priority = NSLayoutConstraint.Priority(480)
+        minimumName.isActive = true
         let bar = NSStackView(views: [controls, workspaceButton, tabScroll, addButton, dragSpace, columnSelector, rowSelector, permissionButton])
         toolbar = bar
         bar.spacing = 4
@@ -807,7 +814,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     }
 
     @discardableResult
-    func appendTab(title: String, icon: NSImage? = nil, selected: Bool, displayed: Bool = false) -> (view: NSView, select: NSButton, close: NSButton) {
+    func appendTab(title: String, toolTip: String? = nil, icon: NSImage? = nil, selected: Bool, displayed: Bool = false) -> (view: NSView, select: NSButton, close: NSButton) {
         let select = WorkspaceTabButton(title: title, target: nil, action: nil)
         select.chrome = self
         select.onDragBegin = { [weak self] button, token, anchor, image in
@@ -847,7 +854,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         select.isBordered = false
         select.font = .systemFont(ofSize: 12, weight: selected ? .semibold : .regular)
         select.lineBreakMode = .byTruncatingTail
-        select.toolTip = title
+        select.toolTip = toolTip ?? title
         select.setAccessibilityValue(selected ? L("操作対象") : (displayed ? L("分割表示中") : L("未選択")))
         let close = Self.makeButton(symbol: "xmark", title: L("元の位置に戻してタブから解除"), width: 18)
         let group = WorkspaceTabGroup(views: [select, close])

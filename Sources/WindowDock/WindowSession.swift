@@ -582,17 +582,30 @@ final class WindowSession {
 
     func pruneClosedWindows() {
         var invalidIDs: Set<UUID> = []
-        var closed = windows.filter { window in
-            if window.candidate.application.isTerminated { return true }
-            let error = access.probe(window.candidate.element)
-            if error == .invalidUIElement { invalidIDs.insert(window.id) }
-            return ![.success, .noValue, .attributeUnsupported].contains(error)
+        var closed: [ManagedWindow] = []
+        var titleChanged = false
+        for index in windows.indices {
+            let window = windows[index]
+            if window.candidate.application.isTerminated {
+                closed.append(window)
+                continue
+            }
+            let probe = access.probe(window.candidate.element)
+            if let title = probe.title, windows[index].candidate.title != title {
+                windows[index].candidate.title = title
+                titleChanged = true
+            }
+            if probe.error == .invalidUIElement { invalidIDs.insert(window.id) }
+            if ![.success, .noValue, .attributeUnsupported].contains(probe.error) {
+                closed.append(window)
+            }
         }
         // A busy app (e.g. a timed-out Electron window) still owns its element; only a stale element is looked up again.
         for window in closed where invalidIDs.contains(window.id) {
             guard let index = windows.firstIndex(where: { $0.id == window.id }),
                   !window.candidate.application.isTerminated,
                   let fresh = reresolve(window.candidate) else { continue }
+            titleChanged = titleChanged || windows[index].candidate.title != fresh.title
             windows[index].candidate = fresh
             WindowAccess.logger.notice("prune re-resolved \(fresh.label, privacy: .public)")
             closed.removeAll { $0.id == window.id }
@@ -603,7 +616,10 @@ final class WindowSession {
         // Require two consecutive misses so a transient AX failure doesn't drop tabs.
         let confirmed = closedIDs.intersection(pendingClosedIDs)
         pendingClosedIDs = closedIDs.subtracting(confirmed)
-        guard !confirmed.isEmpty else { return }
+        guard !confirmed.isEmpty else {
+            if titleChanged { onChange?() }
+            return
+        }
         WindowAccess.logger.notice("prune removing \(confirmed.count) windows")
         let ids = confirmed
         windows.removeAll { ids.contains($0.id) }

@@ -49,6 +49,7 @@ enum WindowSessionSmoke {
         /// Windows asked to leave full screen, by index.
         var fullScreenExits: [Int] = []
         var probeErrors: [Int: AXError] = [:]
+        var titles: [Int: String] = [:]
         /// The windows that their app lists, by index.
         var listedWindows: [Int] = []
         var changeCount = 0
@@ -118,8 +119,14 @@ enum WindowSessionSmoke {
             model.focusedWindows.append(index)
         }
         access.probe = { element in
-            guard let index = try? model.index(of: element) else { return .invalidUIElement }
-            return model.probeErrors[index] ?? .success
+            guard let index = try? model.index(of: element) else {
+                return WindowProbeResult(error: .invalidUIElement, title: nil)
+            }
+            let error = model.probeErrors[index] ?? .success
+            let title = [.success, .noValue, .attributeUnsupported].contains(error)
+                ? model.titles[index] ?? "Test \(index)"
+                : nil
+            return WindowProbeResult(error: error, title: title)
         }
         access.applicationWindows = { _ in
             model.listedWindows.map { WindowCandidate(element: model.windows[$0].element, application: .current, title: "Live \($0)") }
@@ -831,6 +838,22 @@ enum WindowSessionSmoke {
     /// which would leave both workspaces managing it and make it impossible to move.
     static func runReresolveChecks() -> [String] {
         var failures: [String] = []
+        let (renamed, renameModel) = fixture(registering: [0], windowCount: 1)
+        renameModel.titles[0] = "Updated title"
+        renamed.pruneClosedWindows()
+        if renamed.windows[0].candidate.title != "Updated title" || renameModel.changeCount != 1 {
+            failures.append("a changed window title was not reflected in the session")
+        }
+        renamed.pruneClosedWindows()
+        if renameModel.changeCount != 1 {
+            failures.append("an unchanged window title triggered another session update")
+        }
+        renameModel.titles[0] = ""
+        renamed.pruneClosedWindows()
+        if !renamed.windows[0].candidate.title.isEmpty || renameModel.changeCount != 2 {
+            failures.append("a removed window title was not reflected in the session")
+        }
+
         let model = Model(windowCount: 3)
         let (first, _) = fixture(registering: [0], sharedModel: model)
         let (second, _) = fixture(registering: [1], sharedModel: model)

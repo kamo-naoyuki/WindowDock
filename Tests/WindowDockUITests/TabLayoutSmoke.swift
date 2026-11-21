@@ -99,6 +99,10 @@ enum TabLayoutSmoke {
                     failures.append("\(label): toolbar control is clipped")
                 }
             }
+            let nameWidth = chrome.workspaceButton.frame.width
+            if nameWidth > ceil(chrome.workspaceButton.intrinsicContentSize.width) + 0.5 {
+                failures.append("\(label): workspace name is wider than its text (\(nameWidth))")
+            }
             for group in chrome.tabs.arrangedSubviews {
                 guard let tab = (group as? WorkspaceTabGroup)?.arrangedSubviews.first as? NSButton else {
                     failures.append("\(label): tab button missing")
@@ -135,10 +139,10 @@ enum TabLayoutSmoke {
         let single = chrome.appendTab(title: "First application window", selected: true)
         checkVisible("first tab after empty layout")
         let singleWidth = single.select.bounds.width
-        for index in 1..<6 {
+        for index in 1..<7 {
             chrome.appendTab(title: "Application \(index)", selected: false)
         }
-        checkVisible("six tabs")
+        checkVisible("seven tabs")
         if single.select.bounds.width >= singleWidth {
             failures.append("tabs did not shrink as more were added")
         }
@@ -155,14 +159,20 @@ enum TabLayoutSmoke {
             failures.append("switching to a normal tab did not immediately remove the warning bar")
         }
         host.setFrame(NSRect(x: 100, y: 100, width: 720, height: 480), display: false)
-        checkVisible("six tabs in narrow window")
+        checkVisible("seven tabs in narrow window")
         if single.select.bounds.width > wideWidth + 0.5 {
             failures.append("tabs grew when the window narrowed")
         }
-        for index in 6..<20 {
+        for index in 7..<20 {
             chrome.appendTab(title: "Application \(index)", selected: false)
         }
         checkVisible("twenty tabs")
+        chrome.workspaceButton.title = String(repeating: "Long workspace name ", count: 6)
+        checkVisible("long workspace name with crowded tabs")
+        if chrome.workspaceButton.frame.width > 49 {
+            failures.append("crowded tabs did not take space from the workspace name")
+        }
+        chrome.workspaceButton.title = "Workspace"
         if chrome.tabs.bounds.width <= chrome.tabs.visibleRect.width {
             failures.append("minimum-width tabs did not scroll")
         }
