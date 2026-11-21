@@ -21,6 +21,8 @@ enum WindowSessionSmoke {
         var frame: CGRect
         var minimized: Bool
         var minimumSize = CGSize.zero
+        /// In native full screen, the window ignores frame changes.
+        var fullScreen = false
 
         init(index: Int) {
             // These handles only identify simulated windows; the client intercepts every operation.
@@ -44,6 +46,8 @@ enum WindowSessionSmoke {
         var failedRegistrations: Set<Int> = []
         var failedFocuses: Set<Int> = []
         var focusedWindows: [Int] = []
+        /// Windows asked to leave full screen, by index.
+        var fullScreenExits: [Int] = []
         var probeErrors: [Int: AXError] = [:]
         /// The windows that their app lists, by index.
         var listedWindows: [Int] = []
@@ -78,6 +82,7 @@ enum WindowSessionSmoke {
             let index = try model.index(of: element)
             model.onSetFrame?(index, frame)
             model.operations.append(.resize(index))
+            guard !model.windows[index].fullScreen else { return }
             model.windows[index].frame = frame
             model.windows[index].frame.size.width = max(frame.width, model.windows[index].minimumSize.width)
             model.windows[index].frame.size.height = max(frame.height, model.windows[index].minimumSize.height)
@@ -87,7 +92,16 @@ enum WindowSessionSmoke {
             model.onMove?()
             if model.failedMoves.contains(index) { throw InjectedFailure() }
             model.operations.append(.move(index))
+            guard !model.windows[index].fullScreen else { return }
             model.windows[index].frame.origin = position
+        }
+        access.isFullScreen = { element in
+            (try? model.index(of: element)).map { model.windows[$0].fullScreen } ?? false
+        }
+        // Leaving full screen animates; a check ends it by clearing `fullScreen`.
+        access.setFullScreen = { element, fullScreen in
+            let index = try model.index(of: element)
+            if !fullScreen { model.fullScreenExits.append(index) }
         }
         access.minimize = { element, minimized in
             let index = try model.index(of: element)
@@ -1140,10 +1154,120 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    private static func runDisplacedWindowChecks() -> [String] {
+        let (session, model) = fixture(registering: [0, 1, 3])
+        session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        func modelIndex(_ id: UUID?) -> Int? {
+            guard let window = session.windows.first(where: { $0.id == id }) else { return nil }
+            return model.windows.firstIndex { CFEqual($0.element, window.candidate.element) }
+        }
+        guard let left = modelIndex(session.cells[0]), let right = modelIndex(session.cells[1]),
+              let hidden = [0, 1, 3].first(where: { $0 != left && $0 != right }),
+              model.windows[left].frame == model.target, model.windows[right].frame == model.rightTarget
+        else { return ["displaced window fixture could not show two panes"] }
+        let fitted = model.windows.map(\.frame)
+        var failures: [String] = []
+
+        model.operations.removeAll()
+        session.refitDisplacedWindows()
+        if !model.operations.isEmpty {
+            failures.append("refitting moved or raised windows although none had left its pane: \(model.operations)")
+        }
+
+        model.windows[left].frame = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        model.windows[hidden].frame.origin.x += 300
+        model.operations.removeAll()
+        session.refitDisplacedWindows()
+        if model.windows[left].frame != fitted[left] || session.cells[0].flatMap({ model.paneFrames[$0] }) != fitted[left] {
+            failures.append("a window maximized outside WindowDock was not fitted back into its pane: \(model.windows[left].frame)")
+        }
+        if model.windows[hidden].frame != fitted[hidden] {
+            failures.append("a background tab's window moved outside WindowDock was not fitted back: \(model.windows[hidden].frame)")
+        }
+        if model.operations.contains(.resize(right)) || model.operations.contains(.move(right)) {
+            failures.append("refitting moved a window that had stayed in its pane")
+        }
+        return failures
+    }
+
+    /// Windows maximized or made full screen while another app was active return to their panes once WindowDock is active.
+    static func runActivationRefitChecks() -> [String] {
+        let model = Model(windowCount: 2)
+        let controller = WorkspaceController(name: "Activation refit", access: access(for: model))
+        let window = controller.window
+        defer {
+            controller.quitting = true
+            window.orderOut(nil)
+        }
+        func settle(_ seconds: TimeInterval = 0.5, until condition: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline {
+                if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true) {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        window.setFrame(NSRect(x: 160, y: 180, width: 900, height: 600), display: true)
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Refit probe")
+        })
+        controller.bringToFront()
+        settle()
+        guard NSApp.isActive, window.isKeyWindow else { return ["activation refit fixture did not become active and key"] }
+        let fitted = model.windows.map(\.frame)
+        let grid = controller.session.gridSize
+        let activation = WorkspaceActivation(controllers: { [controller] })
+        activation.latestClick = { nil }
+        func raised(_ index: Int? = nil) -> Bool {
+            model.operations.contains { operation in
+                if case .raise(let raised) = operation { return index.map { $0 == raised } ?? true }
+                return false
+            }
+        }
+        var failures: [String] = []
+
+        model.windows[0].frame = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        model.operations.removeAll()
+        activation.applicationDidBecomeActive()
+        settle { raised(0) }
+        if model.windows[0].frame != fitted[0] {
+            failures.append("a window maximized while another app was active stayed maximized when WindowDock became active: \(model.windows[0].frame)")
+        }
+        if model.operations.contains(.resize(1)) || model.operations.contains(.move(1)) {
+            failures.append("activation moved a window that had stayed in its pane")
+        }
+
+        model.windows[1].fullScreen = true
+        model.windows[1].frame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        model.operations.removeAll()
+        activation.applicationDidBecomeActive()
+        settle(0.4)
+        if model.fullScreenExits != [1] {
+            failures.append("activation did not take a full-screen window out of full screen: \(model.fullScreenExits)")
+        }
+        if raised() {
+            // Raising a full-screen window switches to its Space instead of showing it in its pane.
+            failures.append("activation raised windows before the full-screen window had left full screen")
+        }
+        model.windows[1].fullScreen = false
+        model.windows[1].frame = fitted[1].offsetBy(dx: 0, dy: 40)
+        settle(2) { raised(1) }
+        if model.windows[1].frame != fitted[1] || controller.session.gridSize != grid {
+            failures.append("a window that left full screen was not fitted back into its pane: " +
+                "\(model.windows[1].frame), grid \(controller.session.gridSize.columns)×\(controller.session.gridSize.rows)")
+        }
+        if !raised(1) {
+            failures.append("the workspace's windows were not raised once the window had left full screen")
+        }
+        return failures
+    }
+
     static func runChecks() -> [String] {
         var failures: [String] = []
         failures += runManyTabMoveChecks()
         failures += runRemovalApertureChecks()
+        failures += runDisplacedWindowChecks()
         failures += runReresolveChecks()
         failures += runTabTransferRevealChecks()
         failures += runConstraintNoticeChecks()

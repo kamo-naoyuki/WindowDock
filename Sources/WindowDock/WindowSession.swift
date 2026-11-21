@@ -42,6 +42,8 @@ final class WindowSession {
     private var constraintWarningIDs: Set<UUID> = []
     /// The frames last passed to `onPresentedFrames`, which the workspace shows through.
     private var presentedFrames: [UUID: CGRect] = [:]
+    /// The frames windows had once they were last aligned, to notice when they are moved, resized or maximized outside WindowDock.
+    private var alignedFrames: [UUID: CGRect] = [:]
     private var isSynchronizing = false
     private var resyncRequested = false
 
@@ -296,6 +298,40 @@ final class WindowSession {
         synchronize(bringToFront: false)
     }
 
+    /// Puts windows that were moved, resized or maximized outside WindowDock back into their panes.
+    func refitDisplacedWindows() {
+        var displaced = false
+        for window in windows {
+            guard let aligned = alignedFrames[window.id],
+                  let actual = try? access.frame(window.candidate.element),
+                  !WindowGeometry.fits(actual, requested: aligned, tolerance: 1) else { continue }
+            requestedFrames.removeValue(forKey: window.id)
+            displaced = true
+        }
+        if displaced { synchronize(bringToFront: false) }
+    }
+
+    var hasFullScreenWindow: Bool {
+        windows.contains { access.isFullScreen($0.candidate.element) }
+    }
+
+    /// Takes windows out of native full screen, where they can't be fitted into their panes.
+    /// Returns whether any window was in full screen; leaving it animates, so fit the windows once it is done.
+    func leaveFullScreen() -> Bool {
+        var fullScreen = false
+        var errors: [Error] = []
+        for window in windows where access.isFullScreen(window.candidate.element) {
+            fullScreen = true
+            do {
+                try access.setFullScreen(window.candidate.element, false)
+            } catch {
+                errors.append(error)
+            }
+        }
+        report(errors)
+        return fullScreen
+    }
+
     func resume() {
         var errors: [Error] = []
         for window in windows where suspendedWindowIDs.contains(window.id) || cells.contains(window.id) {
@@ -409,6 +445,7 @@ final class WindowSession {
                     errors.append(error)
                 }
             }
+            alignedFrames.merge(actualFrames) { $1 }
             if isSplit, !mismatches.isEmpty {
                 report(errors)
                 if correction == 0 {

@@ -57,7 +57,7 @@ enum WorkspaceBackgroundSmoke {
             } else if activationOnly {
                 failures = WindowSessionSmoke.runFrontWindowOnlyActivationChecks() +
                     WorkspaceActivationSmoke.runDockMenuSwitchChecks() + WindowSessionSmoke.runTitlebarFocusChecks() +
-                    WindowSessionSmoke.runTabTransferKeyChecks()
+                    WindowSessionSmoke.runTabTransferKeyChecks() + WindowSessionSmoke.runActivationRefitChecks()
             } else {
                 failures = WindowSessionSmoke.runChecks() + checkWindowPicker() + runChecks() + checkCompactLayout() +
                     checkGridLayout() + checkTabMoveRouting() + checkNativeWindowDrops()
@@ -69,7 +69,7 @@ enum WorkspaceBackgroundSmoke {
             if failures.isEmpty {
                 print(dropOnly ? "PASS: native WindowServer move/release sampling and nonactivating drop feedback" :
                     focused ? "PASS: tab move routing, context menu and drag overlay cleanup" :
-                    activationOnly ? "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus and tab drop key" :
+                    activationOnly ? "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus, tab drop key and activation refit" :
                     "PASS: window drop feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking and resize")
                 exit(0)
             }

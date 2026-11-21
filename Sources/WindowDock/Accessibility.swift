@@ -95,6 +95,16 @@ enum WindowAccess {
         return true
     }
 
+    private static let fullScreenAttribute = "AXFullScreen"
+
+    static func isFullScreen(_ element: AXUIElement) -> Bool {
+        (try? value(element, fullScreenAttribute)) as? Bool == true
+    }
+
+    static func setFullScreen(_ element: AXUIElement, _ fullScreen: Bool) throws {
+        try set(element, fullScreenAttribute, fullScreen ? kCFBooleanTrue : kCFBooleanFalse)
+    }
+
     static func raise(_ element: AXUIElement) throws {
         let error = AXUIElementPerformAction(element, kAXRaiseAction as CFString)
         guard error == .success else {
@@ -171,6 +181,8 @@ struct WindowAccessClient {
     var setPosition: (AXUIElement, CGPoint) throws -> Void = WindowAccess.setPosition
     var isMinimized: (AXUIElement) throws -> Bool = WindowAccess.isMinimized
     var minimize: (AXUIElement, Bool) throws -> Bool = WindowAccess.minimize
+    var isFullScreen: (AXUIElement) -> Bool = WindowAccess.isFullScreen
+    var setFullScreen: (AXUIElement, Bool) throws -> Void = WindowAccess.setFullScreen
     var raise: (AXUIElement) throws -> Void = WindowAccess.raise
     var focus: (AXUIElement, NSRunningApplication) throws -> Void = WindowAccess.focus
     /// The AX error of a cheap attribute read, used to notice closed windows and stale elements.

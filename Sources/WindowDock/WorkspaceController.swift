@@ -516,7 +516,38 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         windowFocusRequest = nil
         // Order the frame first so that the windows end up above it.
         window.orderFront(nil)
+        fullScreenExitTimer?.invalidate()
+        fullScreenExitTimer = nil
+        // Focusing a full-screen window would switch to its Space instead of showing it in its pane.
+        guard !session.leaveFullScreen() else {
+            raiseAfterLeavingFullScreen(activate: activate)
+            return
+        }
+        session.refitDisplacedWindows()
         session.raiseSelected(activate: activate)
+    }
+
+    private var fullScreenExitTimer: Timer?
+
+    private func raiseAfterLeavingFullScreen(activate: Bool) {
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        fullScreenExitTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, !self.suspended, !self.quitting, !self.window.isMiniaturized, self.picker == nil else {
+                    return timer.invalidate()
+                }
+                guard !self.session.hasFullScreenWindow else {
+                    if ProcessInfo.processInfo.systemUptime > deadline { timer.invalidate() }
+                    return
+                }
+                timer.invalidate()
+                self.fullScreenExitTimer = nil
+                self.session.refitDisplacedWindows()
+                guard NSApp.isActive, self.window.isKeyWindow else { return }
+                self.window.orderFront(nil)
+                self.session.raiseSelected(activate: activate)
+            }
+        }
     }
 
     var onSuspend: (() -> Void)?

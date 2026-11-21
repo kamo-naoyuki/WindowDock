@@ -26,7 +26,8 @@ On first launch, allow WindowDock to move and resize windows in **System Setting
 - Click a tab to switch windows. Use **Control+Tab** for the next tab or **Control+Shift+Tab** for the previous one.
 - Press **⌘N** to create another workspace. Drag tabs to reorder them or move them between workspaces; a workspace comes to the front when you drag a tab over it.
 - Press **⌘W** to remove the selected window from the workspace without closing it.
+- If you maximize, move, or resize a window outside WindowDock, or make it full screen, switching back to WindowDock fits it into its pane again.
 
-Use windows from the current Space. Full-screen windows and windows that can't be moved or resized aren't supported.
+Use windows from the current Space. Windows that are already full screen and windows that can't be moved or resized aren't supported.
 
 [MIT License](LICENSE)
