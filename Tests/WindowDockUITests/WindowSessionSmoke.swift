@@ -37,6 +37,8 @@ enum WindowSessionSmoke {
         var target = CGRect(x: 200, y: 160, width: 900, height: 600)
         var operations: [Operation] = []
         var onMove: (() -> Void)?
+        /// Called before a window's frame is set, with its index and the new frame.
+        var onSetFrame: ((Int, CGRect) -> Void)?
         var failedMoves: Set<Int> = []
         var failedMinimizations: Set<Int> = []
         var failedRegistrations: Set<Int> = []
@@ -74,6 +76,7 @@ enum WindowSessionSmoke {
         access.isMinimized = { element in model.windows[try model.index(of: element)].minimized }
         access.setFrame = { element, frame in
             let index = try model.index(of: element)
+            model.onSetFrame?(index, frame)
             model.operations.append(.resize(index))
             model.windows[index].frame = frame
             model.windows[index].frame.size.width = max(frame.width, model.windows[index].minimumSize.width)
@@ -1091,9 +1094,56 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    /// Releasing a tab moves its window back to where it was. Its pane must stop showing through the workspace first,
+    /// or what is behind the workspace shows there until the tab is gone; the other panes stay shown.
+    private static func runRemovalApertureChecks() -> [String] {
+        var failures: [String] = []
+        func shownWhileRestoring(_ index: Int, in session: WindowSession, _ model: Model) -> (Bool, Set<UUID>?) {
+            guard let id = session.windows.first(where: {
+                CFEqual($0.candidate.element, model.windows[index].element)
+            })?.id else { return (false, nil) }
+            var shown: Set<UUID>?
+            model.onSetFrame = { moved, frame in
+                if moved == index, frame == model.windows[index].originalFrame { shown = Set(model.paneFrames.keys) }
+            }
+            defer { model.onSetFrame = nil }
+            return (session.remove(id), shown)
+        }
+
+        let (single, singleModel) = fixture(registering: [0])
+        guard singleModel.paneFrames.count == 1 else { return ["removal aperture fixture did not show its tab"] }
+        let (removedLast, shownForLast) = shownWhileRestoring(0, in: single, singleModel)
+        if !removedLast || shownForLast != [] || !singleModel.paneFrames.isEmpty {
+            failures.append("removing the last tab moved its window away while the workspace still showed through to it: " +
+                "\(shownForLast.map { "\($0.count) panes" } ?? "not restored")")
+        }
+
+        let (split, splitModel) = fixture(registering: [0, 1, 3])
+        split.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        guard let left = split.cells[0], let right = split.cells[1], splitModel.paneFrames.count == 2,
+              let leftIndex = splitModel.windows.firstIndex(where: { window in
+                  split.windows.contains { $0.id == left && CFEqual($0.candidate.element, window.element) }
+              }) else { return failures + ["removal aperture fixture could not show two panes"] }
+        let (removedPane, shownForPane) = shownWhileRestoring(leftIndex, in: split, splitModel)
+        if !removedPane || shownForPane != [right] {
+            failures.append("removing a split pane's tab did not stop showing only that pane before moving its window: " +
+                "\(shownForPane.map { $0.contains(left) ? "still shown" : "\($0.count) panes shown" } ?? "not restored")")
+        }
+
+        let (failing, failingModel) = fixture(registering: [0])
+        failingModel.failedMinimizations.insert(0)
+        let (removedFailing, _) = shownWhileRestoring(0, in: failing, failingModel)
+        if removedFailing || failing.windows.count != 1 ||
+            failing.selectedID.map({ failingModel.paneFrames[$0] }) != .some(failingModel.target) {
+            failures.append("a tab whose window could not be restored was not shown in its pane again")
+        }
+        return failures
+    }
+
     static func runChecks() -> [String] {
         var failures: [String] = []
         failures += runManyTabMoveChecks()
+        failures += runRemovalApertureChecks()
         failures += runReresolveChecks()
         failures += runTabTransferRevealChecks()
         failures += runConstraintNoticeChecks()

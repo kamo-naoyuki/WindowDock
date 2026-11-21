@@ -40,6 +40,8 @@ final class WindowSession {
     private var assignments: [UUID: Int] = [:]
     private var minimumSizes: [UUID: CGSize] = [:]
     private var constraintWarningIDs: Set<UUID> = []
+    /// The frames last passed to `onPresentedFrames`, which the workspace shows through.
+    private var presentedFrames: [UUID: CGRect] = [:]
     private var isSynchronizing = false
     private var resyncRequested = false
 
@@ -428,6 +430,7 @@ final class WindowSession {
                     errors.append(error)
                 }
             }
+            presentedFrames = frames
             onPresentedFrame?(selectedID.flatMap { frames[$0] })
             onPresentedFrames?(frames)
             constraintWarningIDs.formUnion(mismatches)
@@ -474,8 +477,16 @@ final class WindowSession {
 
     private func clearPresentation() {
         if let selectedID { requestedFrames.removeValue(forKey: selectedID) }
+        presentedFrames = [:]
         onPresentedFrame?(nil)
         onPresentedFrames?([:])
+    }
+
+    /// Stops showing a window through the workspace before it leaves its pane, while the other panes stay shown.
+    private func withdrawPresentation(of id: UUID) {
+        guard presentedFrames.removeValue(forKey: id) != nil else { return }
+        onPresentedFrame?(selectedID.flatMap { presentedFrames[$0] })
+        onPresentedFrames?(presentedFrames)
     }
 
     func suspend() {
@@ -496,10 +507,13 @@ final class WindowSession {
     @discardableResult
     func remove(_ id: UUID) -> Bool {
         guard let index = windows.firstIndex(where: { $0.id == id }) else { return true }
+        // Restoring moves the window out of its pane; until the pane is closed, it would show what is behind the workspace.
+        withdrawPresentation(of: id)
         do {
             try windows[index].restore(using: access)
         } catch {
             report(error)
+            synchronize(bringToFront: true)
             return false
         }
         windows.remove(at: index)
