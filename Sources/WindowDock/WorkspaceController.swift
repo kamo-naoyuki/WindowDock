@@ -97,9 +97,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
                 self.session.select(id, activate: true)
             }
         }
-        workspace.onCloseTabs = { [weak self] range in
+        workspace.onReleaseTabs = { [weak self] indexes in
             guard let self else { return }
-            let ids = Array(self.tabIDs[range.clamped(to: self.tabIDs.indices)])
+            let ids = indexes.filter { self.tabIDs.indices.contains($0) }.map { self.tabIDs[$0] }
             for id in ids { self.session.remove(id) }
         }
         workspace.onMoveTab = { [weak self] tab, cell in

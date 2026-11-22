@@ -184,6 +184,40 @@ enum TabLayoutSmoke {
         }
         chrome.clearTabs()
         settle()
+        for title in ["Release first", "Release target", "Release third", "Release fourth"] {
+            chrome.appendTab(title: title, selected: false)
+        }
+        for (tag, group) in chrome.tabs.arrangedSubviews.enumerated() {
+            ((group as! WorkspaceTabGroup).arrangedSubviews.first as! NSButton).tag = tag
+        }
+        var released: [IndexSet] = []
+        chrome.onReleaseTabs = { released.append($0) }
+        let rightClick = NSEvent.mouseEvent(
+            with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: host.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        let releaseMenu = (((chrome.tabs.arrangedSubviews[1] as! WorkspaceTabGroup).arrangedSubviews.first) as! NSButton).menu(for: rightClick)
+        let releaseItems = releaseMenu?.items.filter { $0.representedObject is IndexSet } ?? []
+        let expectedReleases: [(String, [Int])] = [
+            (L("タブを解除"), [1]), (L("他のタブをすべて解除"), [0, 2, 3]),
+            (L("右側のタブを解除"), [2, 3]), (L("左側のタブを解除"), [0]), (L("すべてのタブを解除"), [0, 1, 2, 3])
+        ]
+        if releaseItems.map(\.title) != expectedReleases.map(\.0) {
+            failures.append("tab context menu did not offer the release items: \(releaseItems.map(\.title))")
+        }
+        for (item, expectation) in zip(releaseItems, expectedReleases) {
+            let expected = expectation.1
+            guard let action = item.action else {
+                failures.append("release item \(item.title) is disabled")
+                continue
+            }
+            released.removeAll()
+            _ = NSApp.sendAction(action, to: item.target, from: item)
+            if released != [IndexSet(expected)] {
+                failures.append("release item \(item.title) reported \(released), expected \(expected)")
+            }
+        }
+        chrome.clearTabs()
+        settle()
         chrome.appendTab(title: "First application window", selected: true)
         checkVisible("first tab after clear")
         if let tab = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?.arrangedSubviews.first,

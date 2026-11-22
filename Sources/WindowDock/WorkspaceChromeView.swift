@@ -42,7 +42,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
     var onPaneLayoutChange: (() -> Void)?
     var onMoveTab: ((Int, Int) -> Void)?
     var onReorderTabs: (([Int]) -> Void)?
-    var onCloseTabs: ((Range<Int>) -> Void)?
+    var onReleaseTabs: ((IndexSet) -> Void)?
     var onTabDragBegin: ((Int, String, NSButton) -> Void)?
     var onTabDragMove: ((String, NSPasteboard, NSButton, NSPoint) -> Void)?
     var onTabDragEnd: ((String, NSPasteboard, NSPoint, Bool) -> Void)?
@@ -768,29 +768,27 @@ final class WorkspaceChromeView: WorkspaceBackgroundView {
         menu.addItem(move)
         menu.addItem(.separator())
         let count = tabs.arrangedSubviews.count
-        let closers: [(String, Range<Int>)] = [
-            ("閉じる", button.tag..<button.tag + 1),
-            ("すべて閉じる", 0..<count),
-            ("右側のタブを閉じる", min(button.tag + 1, count)..<count),
-            ("左側のタブを閉じる", 0..<min(button.tag, count))
+        let own = IndexSet(integer: button.tag)
+        let all = IndexSet(integersIn: 0..<count)
+        let releases: [(String, IndexSet)] = [
+            ("タブを解除", all.intersection(own)),
+            ("他のタブをすべて解除", all.subtracting(own)),
+            ("右側のタブを解除", IndexSet(integersIn: min(button.tag + 1, count)..<count)),
+            ("左側のタブを解除", IndexSet(integersIn: 0..<min(button.tag, count))),
+            ("すべてのタブを解除", all)
         ]
-        for (title, range) in closers {
-            let item = NSMenuItem(title: L(title), action: range.isEmpty ? nil : #selector(closeTabsFromMenu(_:)), keyEquivalent: "")
+        for (title, indexes) in releases {
+            let item = NSMenuItem(title: L(title), action: indexes.isEmpty ? nil : #selector(releaseTabsFromMenu(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = RangeBox(range)
+            item.representedObject = indexes
             menu.addItem(item)
         }
         return menu
     }
 
-    private final class RangeBox: NSObject {
-        let range: Range<Int>
-        init(_ range: Range<Int>) { self.range = range }
-    }
-
-    @objc private func closeTabsFromMenu(_ item: NSMenuItem) {
-        guard let range = (item.representedObject as? RangeBox)?.range else { return }
-        onCloseTabs?(range)
+    @objc private func releaseTabsFromMenu(_ item: NSMenuItem) {
+        guard let indexes = item.representedObject as? IndexSet else { return }
+        onReleaseTabs?(indexes)
     }
 
     @objc private func moveTabFromMenu(_ item: NSMenuItem) {
