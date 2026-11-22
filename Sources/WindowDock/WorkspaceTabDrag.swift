@@ -239,6 +239,10 @@ final class WorkspaceTabDropOverlay: NSView {
         chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton) == true
     }
 
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        chrome?.dismissPaneDropOverlay(self)
+    }
+
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         chrome?.performTabDrop(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton, cell: cellIndex) == true
     }
@@ -312,7 +316,8 @@ final class WorkspaceTabTransfer {
             revealed = destination
             reveal(destination)
         }
-        target?.previewTabTransfer(pasteboard: pasteboard, source: button, at: point)
+        // Resolve overlaps before showing (and raising) any pane overlay.
+        (destination ?? drag.source).previewTabTransfer(pasteboard: pasteboard, source: button, at: point)
     }
 
     private func accepts(_ controller: WorkspaceController, token: String, button: NSButton?) -> Bool {

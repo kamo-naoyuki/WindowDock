@@ -28,6 +28,8 @@ final class WindowSession {
     private(set) var customLayout: PaneLayout?
     private(set) var cells: [UUID?] = [nil]
     private(set) var activeCell = 0
+    private(set) var pinnedCells: Set<Int> = []
+    private var lastUnpinnedCell = 0
     var onChange: (() -> Void)?
     var onMessage: ((WorkspaceNotice) -> Void)?
     var onPresentedFrame: ((CGRect?) -> Void)?
@@ -54,6 +56,13 @@ final class WindowSession {
     }
 
     var selectedID: UUID? { cells[activeCell] }
+    var tabSwitchCell: Int? {
+        guard !cells.isEmpty else { return nil }
+        if cells.indices.contains(lastUnpinnedCell), !pinnedCells.contains(lastUnpinnedCell) {
+            return lastUnpinnedCell
+        }
+        return cells.indices.first { !pinnedCells.contains($0) }
+    }
     var primaryID: UUID? { cells.first ?? nil }
     var secondaryID: UUID? { cells.count > 1 ? cells[1] : nil }
     var splitLayout: WorkspaceSplitLayout { gridSize.columns == 1 ? .stacked : .sideBySide }
@@ -82,6 +91,7 @@ final class WindowSession {
         }
         guard size != gridSize || customLayout != nil else { return }
         configureGrid(size)
+        normalizePaneSwitchState()
         clearPresentation()
         onChange?()
         presentVisibleWindows()
@@ -114,6 +124,7 @@ final class WindowSession {
             newColumns: layout.paneCount, newRows: 1,
             windowIDs: windows.map(\.id), assignments: assignments
         )
+        pinnedCells = Set(pinnedCells.filter { $0 < layout.paneCount })
         applyPaneLayout(layout, reflow: result)
     }
 
@@ -143,6 +154,8 @@ final class WindowSession {
             onMessage?(.attention(L("ペインの配置を変更できませんでした。")))
             return
         }
+        pinnedCells = Set(pinnedCells.map { $0 > index ? $0 + 1 : $0 })
+        if lastUnpinnedCell > index { lastUnpinnedCell += 1 }
         applyPaneLayout(plan.layout, reflow: plan.reflow)
     }
 
@@ -154,6 +167,12 @@ final class WindowSession {
                                             destination: removal.destination, assignments: assignments) else {
             onMessage?(.attention(L("ペインの配置を変更できませんでした。")))
             return
+        }
+        pinnedCells = Set(pinnedCells.compactMap { $0 == index ? nil : ($0 > index ? $0 - 1 : $0) })
+        if lastUnpinnedCell == index {
+            lastUnpinnedCell = removal.destination
+        } else if lastUnpinnedCell > index {
+            lastUnpinnedCell -= 1
         }
         applyPaneLayout(removal.layout, reflow: result)
     }
@@ -171,6 +190,7 @@ final class WindowSession {
         cells = reflow.cells
         activeCell = reflow.activeCell
         assignments = reflow.assignments
+        normalizePaneSwitchState()
         clearPresentation()
         onChange?()
         presentVisibleWindows()
@@ -181,7 +201,42 @@ final class WindowSession {
     func activateCell(_ index: Int) {
         guard cells.indices.contains(index), index != activeCell else { return }
         activeCell = index
+        if !pinnedCells.contains(index) { lastUnpinnedCell = index }
         onChange?()
+    }
+
+    func isPanePinned(_ index: Int) -> Bool { pinnedCells.contains(index) }
+
+    func setPanePinned(_ pinned: Bool, at index: Int) {
+        guard cells.count > 1, cells.indices.contains(index), pinnedCells.contains(index) != pinned else { return }
+        if pinned {
+            pinnedCells.insert(index)
+            if lastUnpinnedCell == index {
+                lastUnpinnedCell = cells.indices.first(where: { !pinnedCells.contains($0) }) ?? index
+            }
+        } else {
+            pinnedCells.remove(index)
+            lastUnpinnedCell = index
+        }
+        onChange?()
+    }
+
+    func setPinnedCells(_ indices: [Int]) {
+        pinnedCells = Set(indices.filter { cells.indices.contains($0) })
+        normalizePaneSwitchState()
+        onChange?()
+    }
+
+    private func normalizePaneSwitchState() {
+        pinnedCells = Set(pinnedCells.filter { cells.indices.contains($0) })
+        if cells.count <= 1 {
+            pinnedCells.removeAll()
+            lastUnpinnedCell = 0
+        } else if let target = tabSwitchCell {
+            lastUnpinnedCell = target
+        } else {
+            lastUnpinnedCell = min(max(lastUnpinnedCell, 0), cells.count - 1)
+        }
     }
 
     func focusVisibleWindow(_ id: UUID) {
@@ -250,15 +305,33 @@ final class WindowSession {
 
     func select(_ id: UUID, activate: Bool = false) {
         guard windows.contains(where: { $0.id == id }) else { return }
-        defer {
-            if activate { focus(id) }
-        }
         if let index = cellIndex(for: id) {
             activeCell = index
+            if !pinnedCells.contains(index) { lastUnpinnedCell = index }
         } else {
-            cells[activeCell] = id
-            assignments[id] = activeCell
+            guard let cell = tabSwitchCell else {
+                onChange?()
+                return
+            }
+            cells[cell] = id
+            assignments[id] = cell
+            activeCell = cell
+            lastUnpinnedCell = cell
         }
+        if activate { focus(id) }
+        clearPresentation()
+        presentVisibleWindows()
+        onChange?()
+    }
+
+    private func select(_ id: UUID, inCell cell: Int, activate: Bool) {
+        guard windows.contains(where: { $0.id == id }), cells.indices.contains(cell),
+              !pinnedCells.contains(cell), cellIndex(for: id) == nil || cellIndex(for: id) == cell else { return }
+        cells[cell] = id
+        assignments[id] = cell
+        activeCell = cell
+        lastUnpinnedCell = cell
+        if activate { focus(id) }
         clearPresentation()
         presentVisibleWindows()
         onChange?()
@@ -298,6 +371,7 @@ final class WindowSession {
         }
         assignments[id] = destination
         activeCell = destination
+        if !pinnedCells.contains(destination) { lastUnpinnedCell = destination }
         clearPresentation()
         onChange?()
         presentVisibleWindows()
@@ -341,6 +415,9 @@ final class WindowSession {
         destination.cells[targetCell] = id
         destination.assignments[id] = targetCell
         destination.activeCell = targetCell
+        if !destination.pinnedCells.contains(targetCell) {
+            destination.lastUnpinnedCell = targetCell
+        }
         destination.clearPresentation()
         // Both ownership lists are updated before observers run; never restore the transferred window here.
         onChange?()
@@ -364,10 +441,15 @@ final class WindowSession {
     }
 
     func cycle(_ offset: Int) {
-        guard !windows.isEmpty else { return }
-        let index = windows.firstIndex { $0.id == selectedID } ?? (offset > 0 ? -1 : 0)
-        let next = ((index + offset) % windows.count + windows.count) % windows.count
-        select(windows[next].id, activate: true)
+        guard let cell = tabSwitchCell else { return }
+        let candidates = windows.filter { window in
+            guard let index = cellIndex(for: window.id) else { return true }
+            return index == cell
+        }
+        guard candidates.count > 1 else { return }
+        let index = candidates.firstIndex { cellIndex(for: $0.id) == cell } ?? (offset > 0 ? -1 : 0)
+        let next = ((index + offset) % candidates.count + candidates.count) % candidates.count
+        select(candidates[next].id, inCell: cell, activate: true)
     }
 
     func sync() {

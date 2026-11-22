@@ -30,7 +30,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     var onSessionChange: ((WorkspaceController) -> Void)?
     var onDelete: ((WorkspaceController) -> Void)?
     var onTabDragBegin: ((UUID, String, NSButton) -> Void)?
-    var onTabDragMove: ((String, NSPasteboard, NSButton, NSPoint) -> Void)?
+    var onTabDragMove: ((String, NSPasteboard, NSButton, NSPoint) -> Void)? {
+        didSet { workspace.onTabDragMove = onTabDragMove }
+    }
     var onTabDragEnd: ((String, NSPasteboard, NSPoint, Bool) -> Void)?
     var acceptsExternalTab: ((String, NSButton?) -> Bool)?
     var onExternalTabDrop: ((String, NSButton?, Int?, Int?) -> Bool)?
@@ -118,6 +120,11 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             guard let self else { return }
             self.session.closePane(at: index, currentLayout: self.workspace.stage.paneLayout)
         }
+        workspace.isPanePinned = { [weak self] in self?.session.isPanePinned($0) ?? false }
+        workspace.onTogglePanePin = { [weak self] index in
+            guard let self else { return }
+            self.session.setPanePinned(!self.session.isPanePinned(index), at: index)
+        }
         workspace.paneForTab = { [weak self] tab in
             guard let self, self.tabIDs.indices.contains(tab) else { return nil }
             return self.session.cellIndex(for: self.tabIDs[tab])
@@ -152,9 +159,6 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         workspace.onTabDragBegin = { [weak self] index, token, button in
             guard let self, self.tabIDs.indices.contains(index) else { return }
             self.onTabDragBegin?(self.tabIDs[index], token, button)
-        }
-        workspace.onTabDragMove = { [weak self] token, board, button, point in
-            self?.onTabDragMove?(token, board, button, point)
         }
         workspace.onTabDragEnd = { [weak self] token, board, point, cancelled in
             self?.onTabDragEnd?(token, board, point, cancelled)
@@ -246,6 +250,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         } else {
             workspace.setGrid(session.gridSize, activeCell: session.activeCell)
         }
+        workspace.setPaneIndicators(switchTargetCell: session.tabSwitchCell, pinnedCells: session.pinnedCells)
         workspace.clearTabs()
         tabIDs = session.windows.map(\.id)
         var selectedTab: NSView?
@@ -260,12 +265,15 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             } ?? "" : ""
             let candidate = managed.candidate
             let title = candidate.title.isEmpty ? candidate.application.localizedName ?? "App" : candidate.title
+            let pinned = cell.map { session.isPanePinned($0) } ?? false
             let tab = workspace.appendTab(
                 title: side + title,
-                toolTip: side + candidate.label,
+                toolTip: side + candidate.label + (pinned ? " · " + L("固定中") : ""),
                 icon: candidate.application.icon,
                 selected: selected,
-                displayed: displayed
+                displayed: displayed,
+                pinned: pinned,
+                tabSwitchTarget: cell == session.tabSwitchCell
             )
             tab.select.target = self
             tab.select.action = #selector(selectTab(_:))
@@ -323,6 +331,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         } else if let grid = saved.gridSize {
             session.setGrid(grid)
         }
+        session.setPinnedCells(saved.pinnedPanes ?? [])
     }
 
     @objc private func toggleAutoHideTabs() {
@@ -552,7 +561,6 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     var autoHideHoverFrame: NSRect { workspace.toolbarHoverFrame }
     var isAutoHiddenToolbarVisible: Bool { workspace.autoHiddenToolbarVisible }
 
-    func showTabTransferTargets() { workspace.showExternalTabTargets() }
     func hideTabTransferTargets() {
         workspace.hideExternalTabTargets()
         workspace.hideWindowDropTarget()
@@ -560,7 +568,6 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     func endTabTransferDrag() { workspace.endTabDrag() }
     func tabRowContains(_ point: NSPoint) -> Bool { workspace.tabRowContains(point) }
     func previewTabTransfer(pasteboard: NSPasteboard, source: NSButton, at point: NSPoint) {
-        workspace.showExternalTabTargets()
         _ = workspace.updateFloatingTab(pasteboard: pasteboard, source: source, screenPoint: point)
     }
     func completeTabDrop(pasteboard: NSPasteboard, source: NSButton, at point: NSPoint) -> Bool {

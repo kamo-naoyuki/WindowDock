@@ -34,6 +34,8 @@ final class WorkspaceGridView: NSView {
     private var columnMinimums: [CGFloat] = [0]
     private var rowMinimums: [CGFloat] = [0]
     private var activeCell = 0
+    private var switchTargetCell: Int?
+    private var pinnedCells: Set<Int> = []
     private var lastBoundsSize = NSSize.zero
     private var layingOut = false
     private var paneMinimums: [Int: CGSize] = [:]
@@ -83,9 +85,29 @@ final class WorkspaceGridView: NSView {
 
     func setActiveCell(_ index: Int) {
         activeCell = min(max(0, index), max(0, areas.count - 1))
+        updatePaneIndicators()
+    }
+
+    func setPaneIndicators(switchTargetCell: Int?, pinnedCells: Set<Int>) {
+        self.switchTargetCell = switchTargetCell
+        self.pinnedCells = pinnedCells
+        updatePaneIndicators()
+    }
+
+    private func updatePaneIndicators() {
         for (i, area) in areas.enumerated() {
-            area.layer?.borderWidth = i == activeCell ? 2 : 0
-            area.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            if pinnedCells.contains(i) {
+                area.layer?.borderWidth = 2
+                area.layer?.borderColor = NSColor.systemOrange.cgColor
+            } else if i == switchTargetCell {
+                area.layer?.borderWidth = 3
+                area.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            } else if i == activeCell {
+                area.layer?.borderWidth = 1
+                area.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.55).cgColor
+            } else {
+                area.layer?.borderWidth = 0
+            }
         }
     }
 

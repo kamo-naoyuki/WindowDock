@@ -15,6 +15,7 @@ struct SavedWorkspace: Codable {
     var rows: Int?
     var autoHideTabs: Bool?
     var paneLayout: PaneLayout?
+    var pinnedPanes: [Int]?
 
     var gridSize: WorkspaceGridSize? {
         guard let columns, let rows else { return nil }

@@ -216,6 +216,60 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    static func runPanePinChecks() -> [String] {
+        var failures: [String] = []
+        let (session, _) = fixture(registering: Array(0..<5), windowCount: 5)
+        session.setGrid(WorkspaceGridSize(columns: 3, rows: 1))
+        func nextTab(in cell: Int) -> UUID? {
+            let candidates = session.windows.filter { window in
+                guard let index = session.cellIndex(for: window.id) else { return true }
+                return index == cell
+            }
+            guard candidates.count > 1 else { return nil }
+            let current = candidates.firstIndex { session.cellIndex(for: $0.id) == cell } ?? -1
+            return candidates[(current + 1) % candidates.count].id
+        }
+        let pinnedWindow = session.cells[0]
+        let otherWindow = session.cells[1]
+        let firstCycleTarget = nextTab(in: 2)
+        session.activateCell(2)
+        session.setPanePinned(true, at: 0)
+        session.activateCell(0)
+        session.cycle(1)
+        if session.cells[0] != pinnedWindow || session.cells[1] != otherWindow ||
+            session.cells[2] != firstCycleTarget || session.activeCell != 2 ||
+            session.tabSwitchCell != 2 {
+            failures.append("cycling from a pinned pane did not replace the last unpinned pane")
+        }
+
+        let secondCycleTarget = nextTab(in: 1)
+        session.setPanePinned(true, at: 2)
+        session.cycle(1)
+        if session.cells[0] != pinnedWindow || session.cells[1] != secondCycleTarget ||
+            session.pinnedCells != [0, 2] {
+            failures.append("cycling with three panes changed a pinned pane or failed to choose an unpinned target")
+        }
+        session.setPanePinned(true, at: 1)
+        let allPinned = session.cells
+        session.cycle(1)
+        if session.cells != allPinned || session.tabSwitchCell != nil {
+            failures.append("cycling changed a pane when every pane was pinned")
+        }
+
+        let (reflow, _) = fixture(registering: [0, 1])
+        reflow.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        reflow.setPanePinned(true, at: 1)
+        reflow.splitPane(at: 0, axis: .vertical)
+        if reflow.pinnedCells != [2] {
+            failures.append("splitting before a pinned pane did not remap its index")
+        }
+        reflow.closePane(at: 0)
+        if reflow.pinnedCells != [1] {
+            failures.append("closing a pane before a pinned pane did not remap its index")
+        }
+        return failures
+    }
+
     static func runNestedPaneUIChecks() -> [String] {
         var failures: [String] = []
         let model = Model(windowCount: 3)
@@ -260,6 +314,21 @@ enum WindowSessionSmoke {
         let menu = rightTab?.menu(for: event(.rightMouseDown))
         perform("上下に分割", in: menu?.item(withTitle: L("ペイン"))?.submenu)
         guard chrome.gridAreas.count == 3 else { return failures + ["tab pane menu did not create a nested split"] }
+        let pinMenu = chrome.gridAreas[0].menu(for: event(.rightMouseDown))
+        perform("ペインを固定", in: pinMenu)
+        let pinnedID = controller.session.cells[0]
+        let pinnedTag = controller.session.windows.firstIndex { $0.id == pinnedID }
+        let pinnedTab = chrome.tabs.arrangedSubviews.compactMap { $0 as? WorkspaceTabGroup }.first {
+            ($0.arrangedSubviews.first as? NSButton)?.tag == pinnedTag
+        }
+        if !controller.session.isPanePinned(0) ||
+            pinnedTab?.subviews.compactMap({ $0 as? NSImageView }).first?.isHidden != false {
+            failures.append("pinning a pane did not update its pin marker")
+        }
+        perform("ペインを固定", in: chrome.gridAreas[0].menu(for: event(.rightMouseDown)))
+        if controller.session.isPanePinned(0) {
+            failures.append("the pane context menu did not unpin a pinned pane")
+        }
         if chrome.gridAreas[0].frame != left ||
             chrome.columnSelector.title != L("カスタム") || chrome.rowSelector.title != L("カスタム") {
             failures.append("a tab's split changed another pane or did not show Custom in the preset controls")
@@ -286,14 +355,16 @@ enum WindowSessionSmoke {
         controller.setAutoHideTabs(true)
         chrome.layoutSubtreeIfNeeded()
         let snapshot = SavedWorkspace(name: controller.name, windows: [], columns: 2, rows: 1,
-                                      autoHideTabs: true, paneLayout: controller.session.customLayout)
+                                      autoHideTabs: true, paneLayout: controller.session.customLayout,
+                                      pinnedPanes: [1])
         do {
             let decoded = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(snapshot))
             restored.restoreLayout(decoded)
             restoredChrome.layoutSubtreeIfNeeded()
             if restored.session.customLayout != snapshot.paneLayout || !restored.autoHideTabs ||
+                restored.session.pinnedCells != [1] ||
                 restoredChrome.gridAreas.map(\.frame) != chrome.gridAreas.map(\.frame) {
-                failures.append("saving and restoring a nested layout lost its shape, ratios, or auto-hide setting")
+                failures.append("saving and restoring a nested layout lost its shape, ratios, pin, or auto-hide setting")
             }
             let legacy = try JSONDecoder().decode(
                 SavedWorkspace.self, from: Data(#"{"name":"Legacy","windows":[],"columns":2,"rows":2}"#.utf8)
@@ -1286,6 +1357,27 @@ enum WindowSessionSmoke {
         if !inFront(destination, of: source) || model.focusedWindows.last != 0 {
             failures.append("the workspace that received a tab was not left in front with the moved window: \(model.focusedWindows)")
         }
+
+        // Both workspaces have a pane at the overlap; moving the pointer there must not raise the source's overlay.
+        source.session.setSplit(true)
+        destination.session.setSplit(true)
+        begin()
+        move(sourceOnly)
+        move(destinationOnly)
+        move(overlap)
+        func highlighted(in chrome: WorkspaceChromeView) -> [NSView] {
+            chrome.gridAreas.filter { $0.subviews.contains { $0 is WorkspaceTabDropOverlay && !$0.isHidden } }
+        }
+        let expected = destinationChrome.gridAreas.filter {
+            destination.window.convertToScreen($0.convert($0.bounds, to: nil)).contains(overlap)
+        }
+        if !highlighted(in: chrome).isEmpty || expected.count != 1 || highlighted(in: destinationChrome) != expected {
+            failures.append("overlapping split workspaces did not highlight just the frontmost drop pane")
+        }
+        end(overlap, cancelled: true)
+        if !highlighted(in: destinationChrome).isEmpty || !highlighted(in: chrome).isEmpty {
+            failures.append("cancelling a tab transfer left a pane highlighted")
+        }
         return failures
     }
 
@@ -1568,6 +1660,7 @@ enum WindowSessionSmoke {
     static func runChecks() -> [String] {
         var failures: [String] = []
         failures += runNestedPaneChecks()
+        failures += runPanePinChecks()
         failures += runNestedPaneUIChecks()
         failures += runNestedPaneLimitChecks()
         failures += runNestedPaneMinimumChecks()

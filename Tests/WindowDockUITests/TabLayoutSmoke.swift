@@ -273,8 +273,7 @@ enum TabLayoutSmoke {
             }
             let panePoint = chrome.gridAreas[0].convert(NSPoint(x: 100, y: 100), to: nil)
             let paneInfo = TabLayoutDragInfo(board: board, source: source, window: host, location: panePoint)
-            let overlay = chrome.gridAreas[0].subviews.last!
-            _ = overlay.draggingUpdated(paneInfo)
+            _ = chrome.draggingUpdated(paneInfo)
             let paneScreenPoint = host.convertPoint(toScreen: panePoint)
             let previewAligned = chrome.tabDragPreviewPanel.map {
                 $0.isVisible &&
@@ -522,7 +521,6 @@ enum TabLayoutSmoke {
         board.setString(transferToken, forType: workspaceTabDragType)
         chrome.beginTabDrag(source: source, token: transferToken)
         otherChrome.acceptsExternalTab = { token, button in token == transferToken && button === source }
-        otherChrome.showExternalTabTargets()
         let destinationGroup = otherChrome.tabs.arrangedSubviews[1] as! WorkspaceTabGroup
         let destinationButton = destinationGroup.arrangedSubviews.first as! WorkspaceTabButton
         var received: (String, Int?, Int?)?
@@ -578,13 +576,25 @@ enum TabLayoutSmoke {
         let cell = otherChrome.gridAreas[0]
         let cellPoint = cell.convert(NSPoint(x: 100, y: 100), to: nil)
         let cellInfo = TabLayoutDragInfo(board: board, source: source, window: otherHost, location: cellPoint)
+        func highlightedPanes() -> [Int] {
+            otherChrome.gridAreas.indices.filter { index in
+                otherChrome.gridAreas[index].subviews.contains { $0 is WorkspaceTabDropOverlay && !$0.isHidden }
+            }
+        }
+        _ = otherChrome.draggingUpdated(cellInfo)
+        if highlightedPanes() != [0] {
+            failures.append("a cross-workspace pane hover did not highlight just the receiving pane")
+        }
+        _ = destinationButton.draggingUpdated(tabInfo)
+        if !highlightedPanes().isEmpty || otherChrome.windowDropPanel?.isVisible != true {
+            failures.append("returning to the destination tab strip did not replace the pane highlight with the insertion line")
+        }
         if !otherChrome.performDragOperation(cellInfo) || received?.2 != 0 || received?.1 != nil {
             failures.append("cross-workspace pane drop did not select the destination pane")
         }
         otherChrome.hideExternalTabTargets()
         otherChrome.setGrid(.single, activeCell: 0)
         otherChrome.layoutSubtreeIfNeeded()
-        otherChrome.showExternalTabTargets()
         received = nil
         let singlePane = otherChrome.gridAreas[0]
         let singlePanePoint = singlePane.convert(NSPoint(x: singlePane.bounds.midX, y: singlePane.bounds.midY), to: nil)

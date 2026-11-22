@@ -77,6 +77,8 @@ private let translations: [String: [String]] = [
     "行数を1 / 2に切替": ["Toggle Rows 1 / 2", "切换行数 1 / 2", "행 수 1 / 2 전환", "Alternar filas 1 / 2"],
     "カスタム": ["Custom", "自定义", "사용자 지정", "Personalizado"],
     "ペイン": ["Pane", "窗格", "패널", "Panel"],
+    "ペインを固定": ["Pin Pane", "固定窗格", "패널 고정", "Fijar panel"],
+    "固定中": ["Pinned", "已固定", "고정됨", "Fijado"],
     "ペイン %d": ["Pane %d", "窗格 %d", "패널 %d", "Panel %d"],
     "左右に分割": ["Split Left and Right", "左右分割", "좌우로 분할", "Dividir a izquierda y derecha"],
     "上下に分割": ["Split Top and Bottom", "上下分割", "상하로 분할", "Dividir arriba y abajo"],

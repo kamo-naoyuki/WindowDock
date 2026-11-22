@@ -52,14 +52,15 @@ enum WorkspaceBackgroundSmoke {
             let nestedOnly = CommandLine.arguments.contains("--nested-split-only")
             let failures: [String]
             if nestedOnly {
-                failures = WindowSessionSmoke.runNestedPaneChecks() + WindowSessionSmoke.runNestedPaneUIChecks() +
+                failures = WindowSessionSmoke.runNestedPaneChecks() + WindowSessionSmoke.runPanePinChecks() +
+                    WindowSessionSmoke.runNestedPaneUIChecks() +
                     WindowSessionSmoke.runNestedPaneLimitChecks() +
                     WindowSessionSmoke.runNestedPaneMinimumChecks() +
                     checkGridLayout() + checkTabMoveRouting()
             } else if dropOnly {
                 failures = checkNativeWindowDrops()
             } else if focused {
-                failures = checkTabMoveRouting()
+                failures = checkTabMoveRouting() + WindowSessionSmoke.runTabTransferRevealChecks()
             } else if activationOnly {
                 failures = WindowSessionSmoke.runFrontWindowOnlyActivationChecks() +
                     WorkspaceActivationSmoke.runDockMenuSwitchChecks() + WindowSessionSmoke.runTitlebarFocusChecks() +
@@ -743,6 +744,7 @@ enum WorkspaceBackgroundSmoke {
             failures.append("context menu did not report source tag and destination cell")
         }
         moves.removeAll()
+        flush()
         let keyBefore = NSApp.keyWindow
         let activeBefore = NSApp.isActive
         let paneSourceGroup = tab.select.superview!
@@ -752,17 +754,26 @@ enum WorkspaceBackgroundSmoke {
         if NSApp.keyWindow !== keyBefore || NSApp.isActive != activeBefore {
             failures.append("tab drag overlay activated the host")
         }
-        for index in 0..<2 {
-            hit(index, expected: host, label: "drag overlay cell \(index)")
-            let area = chrome.gridAreas[index]
-            let center = chrome.convert(NSPoint(x: area.bounds.midX, y: area.bounds.midY), from: area)
-            if chrome.hitTest(center) !== area.subviews.last { failures.append("drag overlay was not the hit-tested destination") }
-        }
         let type = NSPasteboard.PasteboardType("local.windowdock.tab-move")
         board.clearContents()
         board.setString("internal-token", forType: type)
+        func checkHighlight(_ cell: Int?, _ label: String) {
+            flush()
+            for index in targets.indices {
+                hit(index, expected: index == cell ? host : targets[index], label: "\(label), pane \(index)")
+            }
+        }
+        func hover(_ location: NSPoint) {
+            _ = chrome.updateFloatingTab(pasteboard: board, source: tab.select,
+                                         screenPoint: host.convertPoint(toScreen: location))
+        }
+        checkHighlight(nil, "starting a tab drag")
+        for (index, area) in chrome.gridAreas.enumerated() {
+            hover(area.convert(NSPoint(x: 30, y: 30), to: nil))
+            checkHighlight(index, "hovering over pane \(index)")
+        }
         let paneArea = chrome.gridAreas[1]
-        let panePoint = paneArea.convert(NSPoint(x: paneArea.bounds.midX, y: paneArea.bounds.midY), to: nil)
+        let panePoint = paneArea.convert(NSPoint(x: 30, y: 30), to: nil)
         let valid = TabDragInfo(pasteboard: board, source: tab.select, window: host, location: panePoint)
         let external = TabDragInfo(pasteboard: board, source: nil)
         let wrongSource = TabDragInfo(pasteboard: board, source: NSButton())
@@ -788,7 +799,11 @@ enum WorkspaceBackgroundSmoke {
             paneSourceGroup.frame != paneSourceFrame {
             failures.append("dragging below the tab row did not pin the source and show the floating preview (alpha=\(paneSourceGroup.alphaValue), preview=\(String(describing: chrome.tabDragPreviewPanel?.isVisible)), inTabs=\(chrome.tabs.arrangedSubviews.contains(paneSourceGroup)), frame=\(paneSourceGroup.frame) vs \(paneSourceFrame))")
         }
-        if !overlay.prepareForDragOperation(valid) || !overlay.performDragOperation(valid) {
+        hover(location)
+        checkHighlight(nil, "returning to the tab bar")
+        hover(panePoint)
+        guard let dropTarget = paneArea.subviews.last else { return failures + ["returning to the pane lost its drop target"] }
+        if !dropTarget.prepareForDragOperation(valid) || !dropTarget.performDragOperation(valid) {
             failures.append("drag overlay did not route an internal move")
         }
         if chrome.tabDragPreviewPanel?.isVisible == true {
@@ -863,6 +878,7 @@ enum WorkspaceBackgroundSmoke {
         let bottomRight = chrome.gridAreas[2]
         let nestedPoint = bottomRight.convert(NSPoint(x: bottomRight.bounds.midX, y: bottomRight.bounds.midY), to: nil)
         let nestedDrop = TabDragInfo(pasteboard: board, source: nestedTab, window: host, location: nestedPoint)
+        _ = chrome.draggingUpdated(nestedDrop)
         if bottomRight.subviews.last?.performDragOperation(nestedDrop) != true ||
             moves.count != 1 || moves[0].0 != 99 || moves[0].1 != 2 ||
             chrome.gridAreas.contains(where: { !$0.subviews.isEmpty }) {

@@ -419,7 +419,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let id = window.candidate.application.bundleIdentifier else { return nil }
             return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
         }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows,
-            autoHideTabs: controller.autoHideTabs, paneLayout: controller.session.customLayout)
+            autoHideTabs: controller.autoHideTabs, paneLayout: controller.session.customLayout,
+            pinnedPanes: controller.session.pinnedCells.sorted())
     }
 
     /// Restores the workspace's windows to their original positions and closes it; closing the last workspace quits.
