@@ -59,6 +59,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     /// With a single pane, dropping a tab onto it cannot change the layout, so the whole workspace acts as the tab bar.
     private var hasSinglePane: Bool { gridAreas.count <= 1 }
     var onGridChange: ((WorkspaceGridSize) -> Void)?
+    var canSplitPane: ((Int, PaneLayout.Axis) -> Bool)?
+    var onSplitPane: ((Int, PaneLayout.Axis) -> Void)?
+    var onClosePane: ((Int) -> Void)?
+    var paneForTab: ((Int) -> Int?)?
     var onActivateCell: ((Int) -> Void)?
     var onPaneLayoutChange: (() -> Void)?
     var onMoveTab: ((Int, Int) -> Void)?
@@ -375,6 +379,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         stage.wantsLayer = true
         stage.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         stage.onActivate = { [weak self] index in self?.onActivateCell?(index) }
+        stage.menuForPane = { [weak self] index in self?.paneMenu(for: index) }
         stage.onGeometryChange = { [weak self] in
             guard let self else { return }
             self.needsDisplay = true
@@ -425,6 +430,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
 
     private func configureSelector(_ selector: NSPopUpButton, prefix: String) {
         selector.addItems(withTitles: (1...4).map { "\(prefix)\($0)" })
+        selector.addItem(withTitle: L("カスタム"))
+        selector.lastItem?.isEnabled = false
+        selector.menu?.autoenablesItems = false
         selector.controlSize = .small
         selector.font = .systemFont(ofSize: 11)
         selector.toolTip = L("%@の分割数", prefix.trimmingCharacters(in: .whitespaces))
@@ -435,15 +443,18 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     }
 
     @objc private func gridSelectorChanged(_ sender: NSPopUpButton) {
-        let requested = WorkspaceGridSize(columns: columnSelector.indexOfSelectedItem + 1, rows: rowSelector.indexOfSelectedItem + 1)
-        columnSelector.selectItem(at: gridSize.columns - 1)
-        rowSelector.selectItem(at: gridSize.rows - 1)
-        if requested != gridSize { onGridChange?(requested) }
+        let columns = columnSelector.indexOfSelectedItem
+        let rows = rowSelector.indexOfSelectedItem
+        let requested = WorkspaceGridSize(columns: columns < 4 ? columns + 1 : gridSize.columns,
+                                          rows: rows < 4 ? rows + 1 : gridSize.rows)
+        columnSelector.selectItem(at: stage.customLayout == nil ? gridSize.columns - 1 : 4)
+        rowSelector.selectItem(at: stage.customLayout == nil ? gridSize.rows - 1 : 4)
+        if requested != gridSize || stage.customLayout != nil { onGridChange?(requested) }
     }
 
     func setGrid(_ size: WorkspaceGridSize, activeCell: Int) {
         guard size.isValid else { return }
-        let changed = size != gridSize
+        let changed = size != gridSize || stage.customLayout != nil
         if changed {
             endTabDrag()
             gridCoveredScreenRects = [:]
@@ -459,6 +470,45 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         refreshCoverage()
         if changed { onPaneLayoutChange?() }
     }
+
+    func setCustomLayout(_ layout: PaneLayout, activeCell: Int) {
+        let changed = stage.customLayout == nil || layout.paneCount != gridAreas.count
+        if changed {
+            endTabDrag()
+            gridCoveredScreenRects = [:]
+        }
+        settingGrid = true
+        stage.setCustomLayout(layout, activeCell: activeCell)
+        gridContentAreas = stage.areas
+        settingGrid = false
+        columnSelector.selectItem(at: 4)
+        rowSelector.selectItem(at: 4)
+        refreshCoverage()
+        if changed { onPaneLayoutChange?() }
+    }
+
+    func paneMenu(for index: Int) -> NSMenu {
+        let menu = NSMenu()
+        menu.delegate = self
+        let horizontal = canSplitPane?(index, .horizontal) ?? stage.paneLayout.canSplitPane(at: index, axis: .horizontal)
+        let vertical = canSplitPane?(index, .vertical) ?? stage.paneLayout.canSplitPane(at: index, axis: .vertical)
+        let actions: [(String, Selector?)] = [
+            ("左右に分割", horizontal ? #selector(splitPaneHorizontally(_:)) : nil),
+            ("上下に分割", vertical ? #selector(splitPaneVertically(_:)) : nil),
+            ("ペインを閉じる", gridAreas.count > 1 ? #selector(closePane(_:)) : nil)
+        ]
+        for (title, action) in actions {
+            let item = menu.addItem(withTitle: L(title), action: action, keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.isEnabled = action != nil
+        }
+        return menu
+    }
+
+    @objc private func splitPaneHorizontally(_ item: NSMenuItem) { onSplitPane?(item.tag, .horizontal) }
+    @objc private func splitPaneVertically(_ item: NSMenuItem) { onSplitPane?(item.tag, .vertical) }
+    @objc private func closePane(_ item: NSMenuItem) { onClosePane?(item.tag) }
 
     func setActiveCell(_ index: Int) { stage.setActiveCell(index) }
 
@@ -926,10 +976,11 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         menu.delegate = self
         let move = NSMenuItem(title: L("配置を入れ替え"), action: nil, keyEquivalent: "")
         let destinations = NSMenu()
-        for index in 0..<gridSize.cellCount {
+        for index in gridAreas.indices {
             let row = index / gridSize.columns + 1
             let column = index % gridSize.columns + 1
-            let item = NSMenuItem(title: L("%d行 %d列", row, column), action: #selector(moveTabFromMenu(_:)), keyEquivalent: "")
+            let title = stage.customLayout == nil ? L("%d行 %d列", row, column) : L("ペイン %d", index + 1)
+            let item = NSMenuItem(title: title, action: #selector(moveTabFromMenu(_:)), keyEquivalent: "")
             item.target = self
             item.tag = index
             item.representedObject = WorkspaceTabMoveItem(button)
@@ -937,6 +988,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         }
         move.submenu = destinations
         menu.addItem(move)
+        if let pane = paneForTab?(button.tag) {
+            let item = menu.addItem(withTitle: L("ペイン"), action: nil, keyEquivalent: "")
+            item.submenu = paneMenu(for: pane)
+        }
         menu.addItem(.separator())
         let count = tabs.arrangedSubviews.count
         let own = IndexSet(integer: button.tag)

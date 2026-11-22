@@ -75,6 +75,15 @@ private let translations: [String: [String]] = [
     "最大化 / 復元": ["Maximize / Restore", "最大化 / 还原", "최대화 / 복원", "Maximizar / Restaurar"],
     "列数を1 / 2に切替": ["Toggle Columns 1 / 2", "切换列数 1 / 2", "열 수 1 / 2 전환", "Alternar columnas 1 / 2"],
     "行数を1 / 2に切替": ["Toggle Rows 1 / 2", "切换行数 1 / 2", "행 수 1 / 2 전환", "Alternar filas 1 / 2"],
+    "カスタム": ["Custom", "自定义", "사용자 지정", "Personalizado"],
+    "ペイン": ["Pane", "窗格", "패널", "Panel"],
+    "ペイン %d": ["Pane %d", "窗格 %d", "패널 %d", "Panel %d"],
+    "左右に分割": ["Split Left and Right", "左右分割", "좌우로 분할", "Dividir a izquierda y derecha"],
+    "上下に分割": ["Split Top and Bottom", "上下分割", "상하로 분할", "Dividir arriba y abajo"],
+    "ペインを閉じる": ["Close Pane", "关闭窗格", "패널 닫기", "Cerrar panel"],
+    "ペインの配置を変更できませんでした。": [
+        "Could not change the pane layout.", "无法更改窗格布局。",
+        "패널 배치를 변경하지 못했습니다.", "No se pudo cambiar la disposición de los paneles."],
     "%d行%d列 · ": ["Row %d, Col %d · ", "第%d行第%d列 · ", "%d행 %d열 · ", "Fila %d, col. %d · "],
     "システム設定 → プライバシーとセキュリティ → アクセシビリティで WindowDock を許可し、もう一度追加してください。": [
         "Allow WindowDock in System Settings → Privacy & Security → Accessibility, then add the window again.",

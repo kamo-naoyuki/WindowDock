@@ -24,6 +24,7 @@ On first launch, allow WindowDock to move and resize windows in **System Setting
 ## Using a workspace
 
 - Click a tab to switch windows. Use **Control+Tab** for the next tab or **Control+Shift+Tab** for the previous one.
+- Right-click a displayed tab and choose **Pane → Split Left and Right / Split Top and Bottom** to split just that pane. Repeat to nest up to four subdivisions in each direction (4×4 equivalent); unavailable directions are disabled, including known app minimum-size limits. The same actions are available on an empty pane or under **Workspace → Pane**. Drag each divider to resize; **Close Pane** keeps its windows as tabs. The column/row controls return to a regular grid; custom layouts and divider positions are saved.
 - Select **Automatically Hide Tab Bar** from the Workspace menu or the workspace name menu to reclaim vertical space; move the pointer to the top edge to reveal it. Control+Tab briefly reveals the bar too.
 - Press **⌘N** to create another workspace. Drag tabs to reorder them or move them between workspaces; a workspace comes to the front when you drag a tab over it.
 - Press **⌘W** to remove the selected window from the workspace without closing it.

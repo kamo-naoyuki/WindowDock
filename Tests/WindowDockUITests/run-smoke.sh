@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds and runs the AppKit smoke harnesses against real windows (not SwiftPM targets).
-# Usage: Tests/WindowDockUITests/run-smoke.sh [--tab-move-only | --window-drop-only | --activation-only]
+# Usage: Tests/WindowDockUITests/run-smoke.sh [--tab-move-only | --window-drop-only | --activation-only | --nested-split-only]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

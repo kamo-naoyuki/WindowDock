@@ -23,7 +23,9 @@ struct ManagedWindow {
 @MainActor
 final class WindowSession {
     private(set) var windows: [ManagedWindow] = []
+    // The last regular-grid preset; customLayout takes precedence when present.
     private(set) var gridSize = WorkspaceGridSize.single
+    private(set) var customLayout: PaneLayout?
     private(set) var cells: [UUID?] = [nil]
     private(set) var activeCell = 0
     var onChange: (() -> Void)?
@@ -56,7 +58,13 @@ final class WindowSession {
     var secondaryID: UUID? { cells.count > 1 ? cells[1] : nil }
     var splitLayout: WorkspaceSplitLayout { gridSize.columns == 1 ? .stacked : .sideBySide }
     var selected: ManagedWindow? { windows.first { $0.id == selectedID } }
-    var isSplit: Bool { gridSize.cellCount > 1 }
+    var isSplit: Bool { cells.count > 1 }
+    var paneLayout: PaneLayout {
+        customLayout ?? .grid(
+            columnWeights: Array(repeating: 1, count: gridSize.columns),
+            rowWeights: Array(repeating: 1, count: gridSize.rows)
+        )
+    }
     var visibleWindows: [ManagedWindow] {
         windows.filter { cells.contains($0.id) }
     }
@@ -72,7 +80,7 @@ final class WindowSession {
             onMessage?(.attention(L("分割数は縦・横それぞれ1〜4にしてください。")))
             return
         }
-        guard size != gridSize else { return }
+        guard size != gridSize || customLayout != nil else { return }
         configureGrid(size)
         clearPresentation()
         onChange?()
@@ -81,17 +89,91 @@ final class WindowSession {
 
     private func configureGrid(_ size: WorkspaceGridSize) {
         let result = GridReflow.reflow(
-            oldColumns: gridSize.columns,
+            oldColumns: customLayout == nil ? gridSize.columns : cells.count,
             oldCells: cells,
             activeCell: activeCell,
-            newColumns: size.columns,
-            newRows: size.rows,
+            newColumns: customLayout == nil ? size.columns : size.cellCount,
+            newRows: customLayout == nil ? size.rows : 1,
             windowIDs: windows.map(\.id),
             assignments: assignments)
         cells = result.cells
         activeCell = result.activeCell
         assignments = result.assignments
         gridSize = size
+        customLayout = nil
+    }
+
+    func setCustomLayout(_ layout: PaneLayout) {
+        guard layout.isValid else {
+            onMessage?(.attention(L("ペインの配置を変更できませんでした。")))
+            return
+        }
+        guard layout != customLayout else { return }
+        let result = GridReflow.reflow(
+            oldColumns: cells.count, oldCells: cells, activeCell: activeCell,
+            newColumns: layout.paneCount, newRows: 1,
+            windowIDs: windows.map(\.id), assignments: assignments
+        )
+        applyPaneLayout(layout, reflow: result)
+    }
+
+    func canSplitPane(at index: Int, axis: PaneLayout.Axis, currentLayout: PaneLayout? = nil) -> Bool {
+        plannedPaneSplit(at: index, axis: axis, currentLayout: currentLayout) != nil
+    }
+
+    private func plannedPaneSplit(
+        at index: Int, axis: PaneLayout.Axis, currentLayout: PaneLayout?
+    ) -> (layout: PaneLayout, reflow: GridReflowResult<UUID>)? {
+        let layout = currentLayout ?? paneLayout
+        guard layout.isValid, layout.paneCount == cells.count,
+              let split = layout.splittingPane(at: index, axis: axis),
+              let result = PaneReflow.split(cells: cells, activeCell: activeCell, at: index,
+                                            windowIDs: windows.map(\.id), assignments: assignments) else { return nil }
+        if !minimumSizes.isEmpty {
+            let bounds = currentTargets().values.reduce(CGRect.null) { $0.union($1) }
+            guard !bounds.isNull,
+                  let minimum = split.minimumSize(minimums(for: result.assignments), dividerThickness: PaneLayout.dividerThickness),
+                  minimum.width <= bounds.width, minimum.height <= bounds.height else { return nil }
+        }
+        return (split, result)
+    }
+
+    func splitPane(at index: Int, axis: PaneLayout.Axis, currentLayout: PaneLayout? = nil) {
+        guard let plan = plannedPaneSplit(at: index, axis: axis, currentLayout: currentLayout) else {
+            onMessage?(.attention(L("ペインの配置を変更できませんでした。")))
+            return
+        }
+        applyPaneLayout(plan.layout, reflow: plan.reflow)
+    }
+
+    func closePane(at index: Int, currentLayout: PaneLayout? = nil) {
+        let layout = currentLayout ?? paneLayout
+        guard layout.isValid, layout.paneCount == cells.count,
+              let removal = layout.removingPane(at: index),
+              let result = PaneReflow.close(cells: cells, activeCell: activeCell, at: index,
+                                            destination: removal.destination, assignments: assignments) else {
+            onMessage?(.attention(L("ペインの配置を変更できませんでした。")))
+            return
+        }
+        applyPaneLayout(removal.layout, reflow: result)
+    }
+
+    func updatePaneProportions(_ layout: PaneLayout) {
+        guard customLayout != nil, layout.isValid, layout.paneCount == cells.count else {
+            onMessage?(.attention(L("ペインの配置を変更できませんでした。")))
+            return
+        }
+        customLayout = layout
+    }
+
+    private func applyPaneLayout(_ layout: PaneLayout, reflow: GridReflowResult<UUID>) {
+        customLayout = layout
+        cells = reflow.cells
+        activeCell = reflow.activeCell
+        assignments = reflow.assignments
+        clearPresentation()
+        onChange?()
+        presentVisibleWindows()
     }
 
     func cellIndex(for id: UUID) -> Int? { cells.firstIndex { $0 == id } }
@@ -369,6 +451,15 @@ final class WindowSession {
         visibleWindows.filter { $0.id != selectedID } + visibleWindows.filter { $0.id == selectedID }
     }
 
+    private func minimums(for assignments: [UUID: Int]) -> [Int: CGSize] {
+        windows.reduce(into: [Int: CGSize]()) { result, window in
+            guard let size = minimumSizes[window.id] else { return }
+            let cell = assignments[window.id] ?? 0
+            let previous = result[cell] ?? .zero
+            result[cell] = CGSize(width: max(previous.width, size.width), height: max(previous.height, size.height))
+        }
+    }
+
     private func synchronize(bringToFront: Bool) {
         guard !windows.isEmpty else { return }
         // A resize event (e.g. the zoom animation) can arrive while syncing; rerun afterwards so the final frame isn't lost.
@@ -387,12 +478,7 @@ final class WindowSession {
         var correction = 0
         var rejectedGrid = false
         while true {
-            let minima = windows.reduce(into: [Int: CGSize]()) { result, window in
-                guard let size = minimumSizes[window.id] else { return }
-                let cell = assignments[window.id] ?? 0
-                let previous = result[cell] ?? .zero
-                result[cell] = CGSize(width: max(previous.width, size.width), height: max(previous.height, size.height))
-            }
+            let minima = minimums(for: assignments)
             if fitMinimumSizes?(minima) == false, isSplit {
                 collapseAfterConstraintFailure()
                 rejectedGrid = true
@@ -642,7 +728,7 @@ final class WindowSession {
             }
             if let id = cells[index] { assignments[id] = index }
         }
-        if windows.count <= 1 { configureGrid(.single) }
+        if windows.count <= 1, customLayout == nil { configureGrid(.single) }
         clearPresentation()
     }
 

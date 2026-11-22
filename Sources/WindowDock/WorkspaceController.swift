@@ -98,12 +98,35 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             autoHide.target = self
             autoHide.state = self?.autoHideTabs == true ? .on : .off
             menu.addItem(autoHide)
+            let pane = menu.addItem(withTitle: L("ペイン"), action: nil, keyEquivalent: "")
+            pane.submenu = self?.activePaneMenu()
             menu.addItem(.separator())
             menu.addItem(withTitle: L("ワークスペース名を変更…"), action: #selector(WorkspaceController.renameFromMenu), keyEquivalent: "").target = self
             menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(WorkspaceController.deleteFromMenu), keyEquivalent: "").target = self
             return menu
         }
         workspace.onGridChange = { [weak self] in self?.session.setGrid($0) }
+        workspace.canSplitPane = { [weak self] index, axis in
+            guard let self else { return false }
+            return self.session.canSplitPane(at: index, axis: axis, currentLayout: self.workspace.stage.paneLayout)
+        }
+        workspace.onSplitPane = { [weak self] index, axis in
+            guard let self else { return }
+            self.session.splitPane(at: index, axis: axis, currentLayout: self.workspace.stage.paneLayout)
+        }
+        workspace.onClosePane = { [weak self] index in
+            guard let self else { return }
+            self.session.closePane(at: index, currentLayout: self.workspace.stage.paneLayout)
+        }
+        workspace.paneForTab = { [weak self] tab in
+            guard let self, self.tabIDs.indices.contains(tab) else { return nil }
+            return self.session.cellIndex(for: self.tabIDs[tab])
+        }
+        workspace.stage.onCustomLayoutChange = { [weak self] layout in
+            guard let self else { return }
+            self.session.updatePaneProportions(layout)
+            self.onSessionChange?(self)
+        }
         workspace.onActivateCell = { [weak self] index in
             guard let self else { return }
             self.session.activateCell(index)
@@ -218,7 +241,11 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     private func renderTabs() {
-        workspace.setGrid(session.gridSize, activeCell: session.activeCell)
+        if let layout = session.customLayout {
+            workspace.setCustomLayout(layout, activeCell: session.activeCell)
+        } else {
+            workspace.setGrid(session.gridSize, activeCell: session.activeCell)
+        }
         workspace.clearTabs()
         tabIDs = session.windows.map(\.id)
         var selectedTab: NSView?
@@ -227,7 +254,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             let cell = session.cellIndex(for: managed.id)
             let displayed = session.isSplit && cell != nil
             let side = session.isSplit ? cell.map {
-                L("%d行%d列 · ", $0 / session.gridSize.columns + 1, $0 % session.gridSize.columns + 1)
+                session.customLayout == nil ?
+                    L("%d行%d列 · ", $0 / session.gridSize.columns + 1, $0 % session.gridSize.columns + 1) :
+                    L("ペイン %d", $0 + 1) + " · "
             } ?? "" : ""
             let candidate = managed.candidate
             let title = candidate.title.isEmpty ? candidate.application.localizedName ?? "App" : candidate.title
@@ -283,6 +312,17 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     func toggleStackedSplit() {
         session.setGrid(WorkspaceGridSize(columns: session.gridSize.columns, rows: session.gridSize.rows == 2 ? 1 : 2))
+    }
+
+    func activePaneMenu() -> NSMenu { workspace.paneMenu(for: session.activeCell) }
+
+    func restoreLayout(_ saved: SavedWorkspace) {
+        setAutoHideTabs(saved.autoHideTabs ?? false)
+        if let layout = saved.paneLayout {
+            session.setCustomLayout(layout)
+        } else if let grid = saved.gridSize {
+            session.setGrid(grid)
+        }
     }
 
     @objc private func toggleAutoHideTabs() {

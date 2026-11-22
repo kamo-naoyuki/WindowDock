@@ -5,23 +5,30 @@ struct WorkspaceGridSize: Equatable {
     let columns: Int
     let rows: Int
     var cellCount: Int { columns * rows }
-    var isValid: Bool { (1...4).contains(columns) && (1...4).contains(rows) }
+    var isValid: Bool {
+        (1...PaneLayout.maximumDivisions).contains(columns) && (1...PaneLayout.maximumDivisions).contains(rows)
+    }
     static let single = WorkspaceGridSize(columns: 1, rows: 1)
 }
 
 private final class WorkspaceGridCell: NSView {
     var onClick: (() -> Void)?
+    var makeMenu: (() -> NSMenu?)?
     // The click that activates WindowDock must already hand focus to the pane's window.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) { onClick?() }
+    override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
 }
 
 final class WorkspaceGridView: NSView {
     private(set) var gridSize = WorkspaceGridSize.single
+    private(set) var customLayout: PaneLayout?
     private(set) var areas: [NSView] = []
     var onActivate: ((Int) -> Void)?
     var onGeometryChange: (() -> Void)?
-    let dividerThickness: CGFloat = 8
+    var onCustomLayoutChange: ((PaneLayout) -> Void)?
+    var menuForPane: ((Int) -> NSMenu?)?
+    let dividerThickness = PaneLayout.dividerThickness
     private var columnWeights: [CGFloat] = [1]
     private var rowWeights: [CGFloat] = [1]
     private var columnMinimums: [CGFloat] = [0]
@@ -29,6 +36,12 @@ final class WorkspaceGridView: NSView {
     private var activeCell = 0
     private var lastBoundsSize = NSSize.zero
     private var layingOut = false
+    private var paneMinimums: [Int: CGSize] = [:]
+    private var nestedDividers: [PaneLayout.Divider] = []
+
+    var paneLayout: PaneLayout {
+        customLayout ?? .grid(columnWeights: columnWeights, rowWeights: rowWeights)
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -41,12 +54,27 @@ final class WorkspaceGridView: NSView {
 
     func setGrid(_ size: WorkspaceGridSize, activeCell: Int) {
         guard size.isValid else { return }
-        if size != gridSize {
+        if size != gridSize || customLayout != nil {
             gridSize = size
+            customLayout = nil
+            paneMinimums = [:]
+            nestedDividers = []
             columnWeights = Array(repeating: 1 / CGFloat(size.columns), count: size.columns)
             rowWeights = Array(repeating: 1 / CGFloat(size.rows), count: size.rows)
             columnMinimums = Array(repeating: 0, count: size.columns)
             rowMinimums = Array(repeating: 0, count: size.rows)
+            rebuild()
+        }
+        setActiveCell(activeCell)
+        layoutCells()
+    }
+
+    func setCustomLayout(_ layout: PaneLayout, activeCell: Int) {
+        precondition(layout.isValid)
+        let rebuildNeeded = customLayout == nil || layout.paneCount != areas.count
+        customLayout = layout
+        if rebuildNeeded {
+            paneMinimums = [:]
             rebuild()
         }
         setActiveCell(activeCell)
@@ -63,11 +91,12 @@ final class WorkspaceGridView: NSView {
 
     private func rebuild() {
         areas.forEach { $0.removeFromSuperview() }
-        areas = (0..<gridSize.cellCount).map { index in
+        areas = (0..<(customLayout?.paneCount ?? gridSize.cellCount)).map { index in
             let cell = WorkspaceGridCell()
             cell.wantsLayer = true
             cell.translatesAutoresizingMaskIntoConstraints = false
             cell.onClick = { [weak self] in self?.onActivate?(index) }
+            cell.makeMenu = { [weak self] in self?.menuForPane?(index) }
             addSubview(cell)
             return cell
         }
@@ -81,6 +110,13 @@ final class WorkspaceGridView: NSView {
 
     @discardableResult
     func fitMinimumSizes(_ sizes: [Int: CGSize]) -> Bool {
+        if let customLayout {
+            guard let minimum = customLayout.minimumSize(sizes, dividerThickness: dividerThickness),
+                  minimum.width <= bounds.width, minimum.height <= bounds.height else { return false }
+            paneMinimums = sizes
+            layoutCells()
+            return true
+        }
         guard let (columns, rows) = WindowGeometry.trackMinimums(sizes, columns: gridSize.columns, rows: gridSize.rows) else { return false }
         let width = bounds.width - CGFloat(gridSize.columns - 1) * dividerThickness
         let height = bounds.height - CGFloat(gridSize.rows - 1) * dividerThickness
@@ -97,9 +133,27 @@ final class WorkspaceGridView: NSView {
     }
 
     private func layoutCells() {
-        guard !layingOut, areas.count == gridSize.cellCount else { return }
+        guard !layingOut, areas.count == (customLayout?.paneCount ?? gridSize.cellCount) else { return }
         layingOut = true
         defer { layingOut = false }
+        if let customLayout {
+            guard let geometry = customLayout.geometry(in: bounds, minimums: paneMinimums, dividerThickness: dividerThickness) else {
+                assertionFailure("Invalid pane geometry")
+                return
+            }
+            var changed = lastBoundsSize != bounds.size
+            lastBoundsSize = bounds.size
+            nestedDividers = geometry.dividers
+            for (area, frame) in zip(areas, geometry.panes) where area.frame != frame {
+                area.frame = frame
+                changed = true
+            }
+            if changed {
+                window?.invalidateCursorRects(for: self)
+                onGeometryChange?()
+            }
+            return
+        }
         let widths = lengths(columnWeights, minimums: columnMinimums, available: max(0, bounds.width - CGFloat(gridSize.columns - 1) * dividerThickness))
         let heights = lengths(rowWeights, minimums: rowMinimums, available: max(0, bounds.height - CGFloat(gridSize.rows - 1) * dividerThickness))
         var y = bounds.maxY
@@ -124,6 +178,12 @@ final class WorkspaceGridView: NSView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
+        if customLayout != nil {
+            for divider in nestedDividers {
+                addCursorRect(divider.frame, cursor: divider.axis == .horizontal ? .resizeLeftRight : .resizeUpDown)
+            }
+            return
+        }
         for column in 0..<(gridSize.columns - 1) {
             let edge = areas[column].frame.maxX
             addCursorRect(NSRect(x: edge, y: bounds.minY, width: dividerThickness, height: bounds.height), cursor: .resizeLeftRight)
@@ -136,6 +196,20 @@ final class WorkspaceGridView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if let customLayout {
+            guard let divider = nestedDividers.first(where: { $0.frame.contains(point) }) else { return }
+            while let next = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true) {
+                let current = convert(next.locationInWindow, from: nil)
+                let delta = divider.axis == .horizontal ? current.x - point.x : point.y - current.y
+                if let resized = customLayout.resizing(divider, by: delta) {
+                    self.customLayout = resized
+                    onCustomLayoutChange?(resized)
+                    layoutCells()
+                }
+                if next.type == .leftMouseUp { break }
+            }
+            return
+        }
         let column = (0..<(gridSize.columns - 1)).first { abs(point.x - (areas[$0].frame.maxX + dividerThickness / 2)) <= dividerThickness / 2 }
         let row = (0..<(gridSize.rows - 1)).first { abs(point.y - (areas[$0 * gridSize.columns].frame.minY - dividerThickness / 2)) <= dividerThickness / 2 }
         guard column != nil || row != nil else { return }

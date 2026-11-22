@@ -157,6 +157,285 @@ enum WindowSessionSmoke {
         return (session, model)
     }
 
+    static func runNestedPaneChecks() -> [String] {
+        var failures: [String] = []
+        let (session, model) = fixture(registering: [0, 1, 2, 3])
+        session.targetFrames = { [weak session] in
+            guard let frames = session?.paneLayout.geometry(in: model.target)?.panes else { return [:] }
+            return Dictionary(uniqueKeysWithValues: frames.enumerated().map { ($0.offset, $0.element) })
+        }
+        let ids = session.windows.map(\.id)
+        session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        session.moveWindow(ids[0], toCell: 0)
+        session.moveWindow(ids[1], toCell: 1)
+        let leftFrame = model.windows[0].frame
+        session.splitPane(at: 1, axis: .vertical)
+        if session.cells != [ids[0], ids[1], ids[2]] || session.selectedID != ids[1] ||
+            session.windows.map(\.id) != ids || model.windows[0].frame != leftFrame {
+            failures.append("splitting the right pane changed the left pane, selection, or registered tabs")
+        }
+        session.closePane(at: 1)
+        if session.cells != [ids[0], ids[2]] || session.selectedID != ids[2] ||
+            session.windows.map(\.id) != ids || model.windows[1].frame == model.windows[1].originalFrame {
+            failures.append("closing a nested pane released its tab or failed to retain the sibling and other panes")
+        }
+        session.splitPane(at: 0, axis: .vertical)
+        if session.cells != [ids[0], ids[1], ids[2]] || session.activeCell != 2 {
+            failures.append("splitting before the active pane did not reindex it or reuse a hidden tab")
+        }
+        let (destination, _) = fixture(registering: [], sharedModel: model)
+        destination.splitPane(at: 0, axis: .vertical)
+        if !session.transferWindow(ids[3], to: destination, cell: 1) ||
+            destination.cells != [nil, ids[3]] || destination.customLayout == nil ||
+            session.cells != [ids[0], ids[1], ids[2]] {
+            failures.append("transferring a hidden tab to a nested pane changed the other visible panes")
+        }
+        session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        if session.customLayout != nil || session.cells.count != 2 || session.selectedID != ids[2] ||
+            session.windows.map(\.id) != [ids[0], ids[1], ids[2]] {
+            failures.append("returning to the same grid preset lost the selected tab or kept the custom tree")
+        }
+        let (empty, _) = fixture(registering: [], sharedModel: model)
+        empty.splitPane(at: 0, axis: .horizontal)
+        empty.splitPane(at: 1, axis: .vertical)
+        empty.targetFrames = { [weak empty] in
+            guard let frames = empty?.paneLayout.geometry(in: model.target)?.panes else { return [:] }
+            return Dictionary(uniqueKeysWithValues: frames.enumerated().map { ($0.offset, $0.element) })
+        }
+        empty.add(WindowCandidate(element: model.windows[0].element, application: .current, title: "Empty panes"))
+        guard let added = empty.selectedID else { return failures + ["adding a window to a nested layout failed"] }
+        if empty.cells.count != 3 || !empty.remove(added) || empty.cells != [nil, nil, nil] || empty.customLayout == nil {
+            failures.append("adding or releasing the only window collapsed intentionally empty nested panes")
+        }
+        let before = session.cells
+        model.notices.removeAll()
+        session.splitPane(at: 99, axis: .horizontal)
+        if session.cells != before || model.notices.last?.needsAttention != true {
+            failures.append("an invalid pane split mutated the session or failed without a notice")
+        }
+        return failures
+    }
+
+    static func runNestedPaneUIChecks() -> [String] {
+        var failures: [String] = []
+        let model = Model(windowCount: 3)
+        let controller = WorkspaceController(name: "Nested panes", access: access(for: model))
+        let restored = WorkspaceController(name: "Restored panes")
+        defer {
+            for controller in [controller, restored] {
+                controller.quitting = true
+                controller.setAutoHideTabs(false)
+                controller.window.orderOut(nil)
+            }
+        }
+        guard let chrome = controller.window.contentView as? WorkspaceChromeView,
+              let restoredChrome = restored.window.contentView as? WorkspaceChromeView else {
+            return ["nested pane fixture could not find its chrome"]
+        }
+        let window = controller.window
+        window.setFrame(NSRect(x: 120, y: 140, width: 900, height: 600), display: false)
+        restored.window.setFrame(window.frame, display: false)
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Nested probe")
+        })
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        chrome.layoutSubtreeIfNeeded()
+        let left = chrome.gridAreas[0].frame
+        func event(_ type: NSEvent.EventType, _ location: NSPoint = .zero) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: 0,
+                               windowNumber: window.windowNumber, context: nil,
+                               eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        func perform(_ title: String, in menu: NSMenu?) {
+            guard let item = menu?.item(withTitle: L(title)), let action = item.action,
+                  NSApp.sendAction(action, to: item.target, from: item) else {
+                failures.append("nested pane menu could not perform \(title)")
+                return
+            }
+            chrome.layoutSubtreeIfNeeded()
+        }
+        let rightTab = chrome.tabs.arrangedSubviews.compactMap {
+            ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? NSButton
+        }.first { $0.tag == 0 }
+        let menu = rightTab?.menu(for: event(.rightMouseDown))
+        perform("上下に分割", in: menu?.item(withTitle: L("ペイン"))?.submenu)
+        guard chrome.gridAreas.count == 3 else { return failures + ["tab pane menu did not create a nested split"] }
+        if chrome.gridAreas[0].frame != left ||
+            chrome.columnSelector.title != L("カスタム") || chrome.rowSelector.title != L("カスタム") {
+            failures.append("a tab's split changed another pane or did not show Custom in the preset controls")
+        }
+        let upperRight = chrome.gridAreas[1].frame
+        let start = chrome.stage.convert(NSPoint(x: upperRight.midX, y: upperRight.minY - 4), to: nil)
+        let end = NSPoint(x: start.x, y: start.y - 40)
+        NSApp.postEvent(event(.leftMouseDragged, end), atStart: false)
+        NSApp.postEvent(event(.leftMouseUp, end), atStart: false)
+        chrome.stage.mouseDown(with: event(.leftMouseDown, start))
+        if chrome.gridAreas[0].frame != left || abs(chrome.gridAreas[1].frame.height - upperRight.height - 40) > 0.5 ||
+            controller.session.customLayout != chrome.stage.customLayout {
+            failures.append("dragging a nested divider changed another pane or did not update the saved proportions")
+        }
+        controller.session.activateCell(2)
+        perform("上下に分割", in: controller.activePaneMenu())
+        guard chrome.gridAreas.count == 4, controller.session.cells[3] == nil else {
+            return failures + ["splitting without a hidden tab did not create an empty pane"]
+        }
+        perform("ペインを閉じる", in: chrome.gridAreas[3].menu(for: event(.rightMouseDown)))
+        if chrome.gridAreas.count != 3 || controller.session.windows.count != 3 {
+            failures.append("an empty pane's context menu released windows or closed the wrong pane")
+        }
+        controller.setAutoHideTabs(true)
+        chrome.layoutSubtreeIfNeeded()
+        let snapshot = SavedWorkspace(name: controller.name, windows: [], columns: 2, rows: 1,
+                                      autoHideTabs: true, paneLayout: controller.session.customLayout)
+        do {
+            let decoded = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(snapshot))
+            restored.restoreLayout(decoded)
+            restoredChrome.layoutSubtreeIfNeeded()
+            if restored.session.customLayout != snapshot.paneLayout || !restored.autoHideTabs ||
+                restoredChrome.gridAreas.map(\.frame) != chrome.gridAreas.map(\.frame) {
+                failures.append("saving and restoring a nested layout lost its shape, ratios, or auto-hide setting")
+            }
+            let legacy = try JSONDecoder().decode(
+                SavedWorkspace.self, from: Data(#"{"name":"Legacy","windows":[],"columns":2,"rows":2}"#.utf8)
+            )
+            restored.restoreLayout(legacy)
+            if restored.session.customLayout != nil || restoredChrome.gridAreas.count != 4 || restored.autoHideTabs {
+                failures.append("a legacy columns/rows save did not restore as a regular grid")
+            }
+        } catch {
+            failures.append("nested layout persistence failed: \(error)")
+        }
+        controller.setAutoHideTabs(false)
+        chrome.columnSelector.selectItem(at: 1)
+        if let action = chrome.columnSelector.action {
+            _ = NSApp.sendAction(action, to: chrome.columnSelector.target, from: chrome.columnSelector)
+        }
+        if controller.session.customLayout != nil || chrome.gridAreas.count != 2 {
+            failures.append("choosing a preset after a nested split did not restore the regular grid")
+        }
+        return failures
+    }
+
+    static func runNestedPaneLimitChecks() -> [String] {
+        var failures: [String] = []
+        let model = Model(windowCount: 16)
+        let controller = WorkspaceController(name: "Nested limits", access: access(for: model))
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        guard let chrome = controller.window.contentView as? WorkspaceChromeView else {
+            return ["nested limits fixture could not find its chrome"]
+        }
+        controller.session.onMessage = { model.notices.append($0) }
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Nested limit probe")
+        })
+        let ids = controller.session.windows.map(\.id)
+        let selected = controller.session.selectedID
+        let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                           windowNumber: controller.window.windowNumber, context: nil,
+                                           eventNumber: 1, clickCount: 1, pressure: 1)!
+        func menu(for pane: Int) -> NSMenu? {
+            guard let id = controller.session.cells[pane], let tag = ids.firstIndex(of: id),
+                  let tab = chrome.tabs.arrangedSubviews.compactMap({
+                      ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? NSButton
+                  }).first(where: { $0.tag == tag }) else { return nil }
+            let menu = tab.menu(for: rightClick)?.item(withTitle: L("ペイン"))?.submenu
+            menu?.update()
+            return menu
+        }
+        for title in ["左右に分割", "左右に分割", "上下に分割", "上下に分割"] {
+            let count = controller.session.cells.count
+            for index in (0..<count).reversed() {
+                guard let item = menu(for: index)?.item(withTitle: L(title)), item.isEnabled,
+                      let action = item.action, NSApp.sendAction(action, to: item.target, from: item) else {
+                    return failures + ["nested split menu stopped before reaching 4 by 4"]
+                }
+            }
+            if controller.session.cells.count != count * 2 {
+                return failures + ["repeated pane splitting stopped at \(controller.session.cells.count) panes"]
+            }
+            if controller.session.cells.count == 4 {
+                let horizontal = menu(for: 0)?.item(withTitle: L("左右に分割"))
+                let vertical = menu(for: 0)?.item(withTitle: L("上下に分割"))
+                if horizontal?.isEnabled != false || vertical?.isEnabled != true {
+                    failures.append("reaching four columns did not disable only horizontal splitting")
+                }
+            }
+        }
+        chrome.layoutSubtreeIfNeeded()
+        let expectedWidth = (chrome.stage.bounds.width - 3 * chrome.stage.dividerThickness) / 4
+        let expectedHeight = (chrome.stage.bounds.height - 3 * chrome.stage.dividerThickness) / 4
+        for area in chrome.gridAreas {
+            if abs(area.frame.width - expectedWidth) > 0.5 || abs(area.frame.height - expectedHeight) > 0.5 {
+                failures.append("repeated menu splits did not reach the regular 4 by 4 pane size")
+                break
+            }
+        }
+        if controller.session.windows.map(\.id) != ids || Set(controller.session.cells.compactMap { $0 }) != Set(ids) ||
+            controller.session.selectedID != selected {
+            failures.append("deep nesting lost a tab, pane assignment, or the selected window")
+        }
+        let smallest = menu(for: 15)
+        if smallest?.item(withTitle: L("左右に分割"))?.isEnabled != false ||
+            smallest?.item(withTitle: L("上下に分割"))?.isEnabled != false ||
+            smallest?.item(withTitle: L("ペインを閉じる"))?.isEnabled != true {
+            failures.append("the smallest pane did not disable splitting while keeping Close Pane enabled")
+        }
+        let before = controller.session.customLayout
+        controller.session.splitPane(at: 0, axis: .horizontal)
+        if controller.session.customLayout != before || model.notices.last?.needsAttention != true {
+            failures.append("bypassing the disabled menu exceeded the nesting limit without a notice")
+        }
+        return failures
+    }
+
+    static func runNestedPaneMinimumChecks() -> [String] {
+        var failures: [String] = []
+        let model = Model(windowCount: 2)
+        model.windows.forEach { $0.minimumSize.width = 600 }
+        let controller = WorkspaceController(name: "Pane minimum limits", access: access(for: model))
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        controller.window.setFrame(NSRect(x: 120, y: 140, width: 900, height: 600), display: false)
+        controller.session.onMessage = { model.notices.append($0) }
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Minimum size probe")
+        })
+        // The first attempted fit learns app minimum sizes, which are not exposed by every app through AX.
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        guard controller.session.cells.count == 1 else {
+            return ["minimum-size fixture did not learn the apps' width constraints"]
+        }
+        let menu = controller.activePaneMenu()
+        menu.update()
+        if menu.item(withTitle: L("左右に分割"))?.isEnabled != false ||
+            menu.item(withTitle: L("上下に分割"))?.isEnabled != true {
+            failures.append("known width minimums did not disable only the infeasible split direction")
+        }
+        let cells = controller.session.cells
+        model.operations.removeAll()
+        model.notices.removeAll()
+        controller.session.splitPane(at: 0, axis: .horizontal)
+        if controller.session.cells != cells || !model.operations.isEmpty || model.notices.last?.needsAttention != true {
+            failures.append("a blocked minimum-size split changed windows or failed without a notice")
+        }
+        controller.window.setFrame(NSRect(x: 120, y: 140, width: 1400, height: 600), display: false)
+        let expandedMenu = controller.activePaneMenu()
+        expandedMenu.update()
+        guard let item = expandedMenu.item(withTitle: L("左右に分割")), item.isEnabled,
+              let action = item.action, NSApp.sendAction(action, to: item.target, from: item) else {
+            return failures + ["enlarging the workspace did not re-enable a split that now fits"]
+        }
+        if controller.session.cells.count != 2 {
+            failures.append("a re-enabled split failed to fit the windows at their known minimum sizes")
+        }
+        return failures
+    }
+
     static func runTransferChecks() -> [String] {
         var failures: [String] = []
         let (source, model) = fixture()
@@ -1288,6 +1567,10 @@ enum WindowSessionSmoke {
 
     static func runChecks() -> [String] {
         var failures: [String] = []
+        failures += runNestedPaneChecks()
+        failures += runNestedPaneUIChecks()
+        failures += runNestedPaneLimitChecks()
+        failures += runNestedPaneMinimumChecks()
         failures += runManyTabMoveChecks()
         failures += runRemovalApertureChecks()
         failures += runDisplacedWindowChecks()

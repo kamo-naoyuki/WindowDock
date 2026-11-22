@@ -49,8 +49,14 @@ enum WorkspaceBackgroundSmoke {
             let focused = CommandLine.arguments.contains("--tab-move-only")
             let dropOnly = CommandLine.arguments.contains("--window-drop-only")
             let activationOnly = CommandLine.arguments.contains("--activation-only")
+            let nestedOnly = CommandLine.arguments.contains("--nested-split-only")
             let failures: [String]
-            if dropOnly {
+            if nestedOnly {
+                failures = WindowSessionSmoke.runNestedPaneChecks() + WindowSessionSmoke.runNestedPaneUIChecks() +
+                    WindowSessionSmoke.runNestedPaneLimitChecks() +
+                    WindowSessionSmoke.runNestedPaneMinimumChecks() +
+                    checkGridLayout() + checkTabMoveRouting()
+            } else if dropOnly {
                 failures = checkNativeWindowDrops()
             } else if focused {
                 failures = checkTabMoveRouting()
@@ -68,7 +74,8 @@ enum WorkspaceBackgroundSmoke {
                 _ = previous.activate(options: [])
             }
             if failures.isEmpty {
-                print(dropOnly ? "PASS: native WindowServer move/release sampling and nonactivating drop feedback" :
+                print(nestedOnly ? "PASS: nested pane menus, layout, resizing, persistence, tab reflow and routing" :
+                    dropOnly ? "PASS: native WindowServer move/release sampling and nonactivating drop feedback" :
                     focused ? "PASS: tab move routing, context menu and drag overlay cleanup" :
                     activationOnly ? "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus, auto-hidden tab bar click, tab drop key and activation refit" :
                     "PASS: window drop feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking and resize")
@@ -622,6 +629,40 @@ enum WorkspaceBackgroundSmoke {
         if activated != 3 { failures.append("empty cell click did not select its row-major index") }
         chrome.showManagedWindows(true)
         if chrome.acceptsWindowDrop(at: center) { failures.append("occupied stage accepted a drop") }
+        guard let nested = PaneLayout.pane.splittingPane(at: 0, axis: .horizontal)?
+            .splittingPane(at: 1, axis: .vertical) else { return failures + ["could not construct nested layout fixture"] }
+        chrome.setCustomLayout(nested, activeCell: 1)
+        chrome.layoutSubtreeIfNeeded()
+        let nestedMinimums = [0: CGSize(width: 400, height: 600), 1: CGSize(width: 200, height: 120),
+                              2: CGSize(width: 200, height: 200)]
+        if !chrome.fitPanesToMinimumSizes(nestedMinimums) {
+            failures.append("nested minimums were incorrectly shared across the unsplit left pane")
+        }
+        let nestedFrames = chrome.gridAreas.map(\.frame)
+        if nestedFrames.count != 3 || abs(nestedFrames[0].height - chrome.stage.bounds.height) > 0.5 ||
+            nestedFrames[1].minX != nestedFrames[2].minX || nestedFrames[1].maxY != nestedFrames[0].maxY ||
+            nestedFrames[2].minY != nestedFrames[0].minY {
+            failures.append("nested geometry was not one full-height left pane with two stacked right panes")
+        }
+        targets.dropFirst(3).forEach { $0.orderOut(nil) }
+        synchronize()
+        targets.prefix(3).forEach { $0.orderFrontRegardless() }
+        host.orderFrontRegardless()
+        flush()
+        for (index, area) in chrome.gridAreas.enumerated() {
+            let rect = chrome.convert(area.bounds, from: area)
+            hit(NSPoint(x: rect.midX, y: rect.midY), expected: targets[index], label: "nested aperture \(index)")
+        }
+        let dividerY = nestedFrames[1].minY - chrome.stage.dividerThickness / 2
+        hit(chrome.stage.convert(NSPoint(x: nestedFrames[0].midX, y: dividerY), to: chrome),
+            expected: targets[0], label: "no divider across the unsplit left pane")
+        hit(chrome.stage.convert(NSPoint(x: nestedFrames[1].midX, y: dividerY), to: chrome),
+            expected: host, label: "nested right divider")
+        drag(from: NSPoint(x: nestedFrames[1].midX, y: dividerY),
+             to: NSPoint(x: nestedFrames[1].midX, y: dividerY - 1000))
+        if chrome.gridAreas[0].frame != nestedFrames[0] || abs(chrome.gridAreas[2].frame.height - 200) > 0.5 {
+            failures.append("nested divider drag changed the left pane or bypassed its child's minimum size")
+        }
         return failures
     }
 
@@ -800,6 +841,32 @@ enum WorkspaceBackgroundSmoke {
         chrome.clearTabs()
         if chrome.gridAreas.contains(where: { !$0.subviews.isEmpty }) || !moves.isEmpty {
             failures.append("removing tabs during a drag did not clean up")
+        }
+        guard let nested = PaneLayout.pane.splittingPane(at: 0, axis: .horizontal)?
+            .splittingPane(at: 1, axis: .vertical) else { return failures + ["could not construct nested drop fixture"] }
+        chrome.setCustomLayout(nested, activeCell: 0)
+        let nestedTab = chrome.appendTab(title: "Nested drop", selected: true).select
+        nestedTab.tag = 99
+        chrome.layoutSubtreeIfNeeded()
+        let nestedMenu = nestedTab.menu(for: mouse(.rightMouseDown, .zero))
+        if let items = nestedMenu?.items.first?.submenu?.items, items.count == 3, let action = items[2].action {
+            _ = NSApp.sendAction(action, to: items[2].target, from: items[2])
+        } else {
+            failures.append("nested tab menu did not expose every leaf pane as a destination")
+        }
+        if moves.count != 1 || moves[0].0 != 99 || moves[0].1 != 2 {
+            failures.append("nested tab menu did not address the bottom-right pane")
+        }
+        moves.removeAll()
+        chrome.beginTabDrag(source: nestedTab, token: "nested-drop")
+        board.setString("nested-drop", forType: type)
+        let bottomRight = chrome.gridAreas[2]
+        let nestedPoint = bottomRight.convert(NSPoint(x: bottomRight.bounds.midX, y: bottomRight.bounds.midY), to: nil)
+        let nestedDrop = TabDragInfo(pasteboard: board, source: nestedTab, window: host, location: nestedPoint)
+        if bottomRight.subviews.last?.performDragOperation(nestedDrop) != true ||
+            moves.count != 1 || moves[0].0 != 99 || moves[0].1 != 2 ||
+            chrome.gridAreas.contains(where: { !$0.subviews.isEmpty }) {
+            failures.append("tab drop into a nested pane failed to route or clean up all leaf overlays")
         }
         return failures
     }

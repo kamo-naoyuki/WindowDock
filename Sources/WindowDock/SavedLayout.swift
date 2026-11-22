@@ -1,4 +1,5 @@
 import AppKit
+import WindowDockCore
 
 /// The windows that were registered when the app last quit, used only to suggest a selection.
 struct SavedWindow: Codable {
@@ -13,6 +14,7 @@ struct SavedWorkspace: Codable {
     var columns: Int?
     var rows: Int?
     var autoHideTabs: Bool?
+    var paneLayout: PaneLayout?
 
     var gridSize: WorkspaceGridSize? {
         guard let columns, let rows else { return nil }

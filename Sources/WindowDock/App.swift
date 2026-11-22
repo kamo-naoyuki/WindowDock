@@ -165,7 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Asks for every workspace's windows first and adds them all afterwards, so that activating one workspace's
     /// windows never covers the dialog of the next workspace.
     private func restore(_ workspaces: ArraySlice<SavedWorkspace>, in controller: WorkspaceController,
-                         chosen: [(WorkspaceController, [WindowCandidate], WorkspaceGridSize?)] = []) {
+                         chosen: [(WorkspaceController, [WindowCandidate], SavedWorkspace)] = []) {
         guard let workspace = workspaces.first else { return }
         var chosen = chosen
         var picked: [WindowCandidate] = []
@@ -176,13 +176,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             collect: { picked = $0 }
         ) { [weak self] in
             guard let self else { return }
-            chosen.append((controller, picked, workspace.gridSize))
+            chosen.append((controller, picked, workspace))
             if let next = workspaces.dropFirst().first {
                 self.restore(workspaces.dropFirst(), in: self.addWorkspace(name: next.name), chosen: chosen)
                 return
             }
-            for (controller, candidates, grid) in chosen.reversed() {
-                if let grid { controller.session.setGrid(grid) }
+            for (controller, candidates, saved) in chosen.reversed() {
+                controller.restoreLayout(saved)
                 if !candidates.isEmpty { controller.session.add(candidates) }
             }
             chosen.first?.0.present()
@@ -240,6 +240,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let autoHide = menu.addItem(withTitle: L("タブバーを自動的に隠す"), action: #selector(toggleAutoHideTabs), keyEquivalent: "")
         autoHide.target = self
         autoHide.state = active?.autoHideTabs == true ? .on : .off
+        if let active {
+            let pane = menu.addItem(withTitle: L("ペイン"), action: nil, keyEquivalent: "")
+            pane.submenu = active.activePaneMenu()
+        }
         menu.addItem(.separator())
         for controller in controllers {
             let item = NSMenuItem(
@@ -291,7 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let name = sender.representedObject as? String,
               let workspace = SavedLayout.load().first(where: { $0.name == name }) else { return }
         let controller = addWorkspace(name: workspace.name)
-        if let grid = workspace.gridSize { controller.session.setGrid(grid) }
+        controller.restoreLayout(workspace)
         controller.presentPicker(restoring: workspace.windows, completion: nil)
     }
 
@@ -415,7 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let id = window.candidate.application.bundleIdentifier else { return nil }
             return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
         }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows,
-            autoHideTabs: controller.autoHideTabs)
+            autoHideTabs: controller.autoHideTabs, paneLayout: controller.session.customLayout)
     }
 
     /// Restores the workspace's windows to their original positions and closes it; closing the last workspace quits.
