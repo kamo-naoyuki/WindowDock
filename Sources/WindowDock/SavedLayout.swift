@@ -12,6 +12,7 @@ struct SavedWorkspace: Codable {
     var windows: [SavedWindow]
     var columns: Int?
     var rows: Int?
+    var autoHideTabs: Bool?
 
     var gridSize: WorkspaceGridSize? {
         guard let columns, let rows else { return nil }

@@ -500,7 +500,7 @@ enum WindowSessionSmoke {
         controller.bringToFront()
         settle()
         guard NSApp.isActive, window.isKeyWindow else { return ["titlebar focus fixture did not become active and key"] }
-        guard let dragSpace = chrome.subviews.compactMap({ $0 as? NSStackView })
+        guard let dragSpace = chrome.subviews.flatMap(\.subviews).compactMap({ $0 as? NSStackView })
             .flatMap(\.arrangedSubviews).first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") })
         else { return ["titlebar focus fixture could not find the toolbar drag area"] }
         var failures: [String] = []

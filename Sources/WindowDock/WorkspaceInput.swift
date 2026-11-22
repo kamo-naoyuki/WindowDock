@@ -167,8 +167,10 @@ final class WorkspaceWindowDrop {
             at: accessibilityPoint, windows: windows.map { (id: $0.id, frame: $0.frame) }, excluding: excluded
         ) else { return nil }
         guard let target = controllers.first(where: {
-            $0.window.windowNumber > 0 && CGWindowID($0.window.windowNumber) == frontmost &&
-                $0.acceptsWindowDrop(at: point)
+            let isWorkspace = $0.window.windowNumber > 0 &&
+                CGWindowID($0.window.windowNumber) == frontmost
+            let isToolbar = $0.toolbarPanelNumber.map { $0 > 0 && CGWindowID($0) == frontmost } ?? false
+            return (isWorkspace || isToolbar) && $0.acceptsWindowDrop(at: point)
         }) else { return nil }
         let registered = controllers.flatMap { $0.session.windows.map(\.candidate) }
         guard !registration.isRegistered(drag.window, among: registered, windowID: windowID, resolve: resolve) else {

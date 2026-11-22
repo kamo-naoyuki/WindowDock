@@ -169,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let workspace = workspaces.first else { return }
         var chosen = chosen
         var picked: [WindowCandidate] = []
+        controller.setAutoHideTabs(workspace.autoHideTabs ?? false)
         controller.presentPicker(
             restoring: workspace.windows,
             excluding: chosen.flatMap { $0.1 },
@@ -236,6 +237,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(deleteWorkspace), keyEquivalent: "")
         menu.addItem(.separator())
         let active = activeController
+        let autoHide = menu.addItem(withTitle: L("タブバーを自動的に隠す"), action: #selector(toggleAutoHideTabs), keyEquivalent: "")
+        autoHide.target = self
+        autoHide.state = active?.autoHideTabs == true ? .on : .off
+        menu.addItem(.separator())
         for controller in controllers {
             let item = NSMenuItem(
                 title: "\(controller.name) — " + L("%d個のウィンドウ", controller.session.windows.count),
@@ -409,7 +414,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         SavedWorkspace(name: controller.name, windows: controller.session.windows.compactMap { window in
             guard let id = window.candidate.application.bundleIdentifier else { return nil }
             return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
-        }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows)
+        }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows,
+            autoHideTabs: controller.autoHideTabs)
     }
 
     /// Restores the workspace's windows to their original positions and closes it; closing the last workspace quits.
@@ -449,12 +455,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showPicker() { activeController?.showPicker() }
     @objc private func removeSelected() { activeController?.removeSelected() }
-    @objc private func selectNextTab() { activeController?.session.cycle(1) }
-    @objc private func selectPreviousTab() { activeController?.session.cycle(-1) }
+    @objc private func selectNextTab() { activeController?.cycleTabs(1) }
+    @objc private func selectPreviousTab() { activeController?.cycleTabs(-1) }
     @objc private func minimizeWorkspace() { activeController?.minimizeWorkspace() }
     @objc private func maximizeWorkspace() { activeController?.maximizeWorkspace() }
     @objc private func toggleSplit() { activeController?.toggleSplit() }
     @objc private func toggleStackedSplit() { activeController?.toggleStackedSplit() }
+
+    @objc private func toggleAutoHideTabs() {
+        guard let controller = activeController else { return }
+        controller.setAutoHideTabs(!controller.autoHideTabs)
+    }
 
     // MARK: Input monitoring
 
@@ -467,7 +478,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
             frontPID: frontPID, visiblePIDs: target.visiblePIDs
         ) else { return false }
-        target.session.cycle(direction)
+        target.cycleTabs(direction)
         return true
     }
 
@@ -517,6 +528,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func pollWindowDrag() {
+        let point = NSEvent.mouseLocation
+        controllers.forEach { $0.updateAutoHiddenTabBar(at: point) }
         guard !tabTransfer.isActive else { return }
         guard !quitting else { return cancelWindowDrag() }
         windowDrop.poll()

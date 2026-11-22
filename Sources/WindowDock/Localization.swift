@@ -63,6 +63,7 @@ private let translations: [String: [String]] = [
     "ウィンドウ": ["Window", "窗口", "윈도우", "Ventana"],
     "ウィンドウを追加…": ["Add Window…", "添加窗口…", "창 추가…", "Añadir ventana…"],
     "選択中のタブを解除": ["Release Selected Tab", "解除所选标签页", "선택한 탭 해제", "Liberar pestaña seleccionada"],
+    "タブバーを自動的に隠す": ["Automatically Hide Tab Bar", "自动隐藏标签栏", "탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas"],
     "タブを解除": ["Release Tab", "解除标签页", "탭 해제", "Liberar pestaña"],
     "他のタブをすべて解除": ["Release All Other Tabs", "解除其他所有标签页", "다른 탭 모두 해제", "Liberar todas las demás pestañas"],
     "右側のタブを解除": ["Release Tabs to the Right", "解除右侧标签页", "오른쪽 탭 해제", "Liberar pestañas a la derecha"],

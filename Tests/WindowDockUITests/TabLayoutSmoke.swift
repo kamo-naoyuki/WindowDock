@@ -216,6 +216,30 @@ enum TabLayoutSmoke {
                 failures.append("release item \(item.title) reported \(released), expected \(expected)")
             }
         }
+        let regularStageTop = chrome.stage.frame.maxY
+        chrome.setAutoHideTabBar(true)
+        settle()
+        if !chrome.autoHideTabBar || chrome.stage.frame.maxY < regularStageTop + 30 {
+            failures.append("auto-hide mode did not expand the managed window area")
+        }
+        if chrome.autoHiddenToolbarPanel?.isVisible == true {
+            failures.append("auto-hidden toolbar panel was visible before hover")
+        }
+        chrome.setAutoHiddenToolbarVisible(true)
+        settle()
+        if chrome.autoHiddenToolbarPanel?.isVisible != true ||
+            chrome.autoHiddenToolbarPanel?.frame.width != host.frame.width - 64 ||
+            chrome.autoHiddenToolbarPanel?.frame.minX != host.frame.minX + 64 ||
+            chrome.autoHiddenToolbarPanel?.frame.maxY != host.frame.maxY ||
+            chrome.autoHiddenToolbarPanel?.frame.height != 34 {
+            failures.append("auto-hidden toolbar panel did not cover the workspace's top edge: \(String(describing: chrome.autoHiddenToolbarPanel?.frame)) host=\(host.frame)")
+        }
+        chrome.setAutoHideTabBar(false)
+        settle()
+        if chrome.autoHideTabBar || chrome.autoHiddenToolbarPanel?.isVisible == true ||
+            abs(chrome.stage.frame.maxY - regularStageTop) > 0.5 {
+            failures.append("disabling auto-hide did not restore the embedded toolbar layout")
+        }
         chrome.clearTabs()
         settle()
         chrome.appendTab(title: "First application window", selected: true)
@@ -736,6 +760,28 @@ enum TabLayoutSmoke {
             failures.append("a tab drag whose mouse-up went to another app kept tracking after the button was released")
         }
         host.close()
+        let autoHideController = WorkspaceController(name: "Auto-hide smoke")
+        autoHideController.window.orderFrontRegardless()
+        autoHideController.setAutoHideTabs(true)
+        let revealPoint = NSPoint(x: autoHideController.autoHideHoverFrame.midX,
+                                  y: autoHideController.autoHideHoverFrame.midY)
+        let outsidePoint = NSPoint(x: autoHideController.window.frame.maxX + 80,
+                                   y: autoHideController.window.frame.maxY - 2)
+        let hoverStart = ProcessInfo.processInfo.systemUptime
+        autoHideController.updateAutoHiddenTabBar(at: revealPoint, now: hoverStart)
+        if autoHideController.isAutoHiddenToolbarVisible {
+            failures.append("auto-hidden toolbar appeared without the hover delay")
+        }
+        autoHideController.updateAutoHiddenTabBar(at: revealPoint, now: hoverStart + 0.3)
+        if !autoHideController.isAutoHiddenToolbarVisible {
+            failures.append("hovering at the top edge did not reveal the auto-hidden toolbar")
+        }
+        autoHideController.updateAutoHiddenTabBar(at: outsidePoint, now: hoverStart + 0.4)
+        autoHideController.updateAutoHiddenTabBar(at: outsidePoint, now: hoverStart + 1.3)
+        if autoHideController.isAutoHiddenToolbarVisible {
+            failures.append("auto-hidden toolbar remained visible after leaving it")
+        }
+        autoHideController.window.orderOut(nil)
         if failures.isEmpty {
             print("PASS: tab layout, cross-workspace drops, actual tab mouse release/Escape, and movement masks")
             exit(0)

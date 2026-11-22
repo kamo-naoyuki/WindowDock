@@ -3,7 +3,7 @@ import WindowDockCore
 
 /// One workspace: a workspace window together with the session that manages its registered windows.
 @MainActor
-final class WorkspaceController: NSObject, NSWindowDelegate {
+final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     let session: WindowSession
     let window: WorkspaceWindow
     private let workspace = WorkspaceChromeView(frame: .zero)
@@ -11,10 +11,15 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     private var tabIDs: [UUID] = []
     private var windowRaisePending = false
     private var windowRaiseScheduled = false
+    private var tabBarHoverStart: TimeInterval?
+    private var tabBarLastActive: TimeInterval = 0
+    private var tabBarForcedVisibleUntil: TimeInterval = 0
+    private var isToolbarMenuOpen = false
     /// When a focus handoff was requested; activation can complete well after the request.
     private var windowFocusRequest: TimeInterval?
     private var coverageGeneration = 0
     private(set) var suspended = false
+    private(set) var autoHideTabs = false
     var quitting = false
 
     var name: String {
@@ -84,6 +89,16 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         }
         workspace.workspaceMenu = { [weak self] in
             let menu = NSMenu()
+            menu.delegate = self
+            let autoHide = NSMenuItem(
+                title: L("タブバーを自動的に隠す"),
+                action: #selector(WorkspaceController.toggleAutoHideTabs),
+                keyEquivalent: ""
+            )
+            autoHide.target = self
+            autoHide.state = self?.autoHideTabs == true ? .on : .off
+            menu.addItem(autoHide)
+            menu.addItem(.separator())
             menu.addItem(withTitle: L("ワークスペース名を変更…"), action: #selector(WorkspaceController.renameFromMenu), keyEquivalent: "").target = self
             menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(WorkspaceController.deleteFromMenu), keyEquivalent: "").target = self
             return menu
@@ -131,6 +146,14 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         }
         workspace.onPaneLayoutChange = { [weak self] in
             DispatchQueue.main.async { self?.syncIfVisible() }
+        }
+        workspace.onToolbarMenuTracking = { [weak self] isOpen in
+            guard let self else { return }
+            self.isToolbarMenuOpen = isOpen
+            if !isOpen { self.tabBarLastActive = ProcessInfo.processInfo.systemUptime }
+        }
+        workspace.onAutoHiddenToolbarMouseDown = { [weak self] event in
+            self?.activateFromAutoHiddenToolbar(event)
         }
         session.onChange = { [weak self] in
             guard let self else { return }
@@ -262,6 +285,72 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
         session.setGrid(WorkspaceGridSize(columns: session.gridSize.columns, rows: session.gridSize.rows == 2 ? 1 : 2))
     }
 
+    @objc private func toggleAutoHideTabs() {
+        setAutoHideTabs(!autoHideTabs)
+    }
+
+    func setAutoHideTabs(_ enabled: Bool) {
+        guard autoHideTabs != enabled else { return }
+        autoHideTabs = enabled
+        tabBarHoverStart = nil
+        tabBarForcedVisibleUntil = 0
+        workspace.setAutoHideTabBar(enabled)
+        if !enabled { tabBarLastActive = 0 }
+        syncIfVisible()
+        onSessionChange?(self)
+    }
+
+    func updateAutoHiddenTabBar(at point: NSPoint, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard autoHideTabs, !suspended, !quitting, picker == nil,
+              window.isVisible, !window.isMiniaturized, window.isOnActiveSpace, !NSApp.isHidden else {
+            tabBarHoverStart = nil
+            workspace.hideAutoHiddenToolbar()
+            return
+        }
+        if isToolbarMenuOpen { return }
+        if workspace.toolbarHoverFrame.contains(point) {
+            if tabBarHoverStart == nil { tabBarHoverStart = now }
+            tabBarLastActive = now
+            if now - (tabBarHoverStart ?? now) >= 0.25 {
+                workspace.setAutoHiddenToolbarVisible(true)
+            }
+            return
+        }
+        tabBarHoverStart = nil
+        if workspace.autoHiddenToolbarVisible,
+           let panel = workspace.autoHiddenToolbarPanel,
+           panel.frame.contains(point) {
+            tabBarLastActive = now
+            return
+        }
+        guard workspace.autoHiddenToolbarVisible else { return }
+        guard now >= tabBarForcedVisibleUntil, now - tabBarLastActive >= 0.8 else { return }
+        workspace.hideAutoHiddenToolbar()
+    }
+
+    func revealAutoHiddenTabBarTemporarily() {
+        guard autoHideTabs else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        tabBarForcedVisibleUntil = now + 1.5
+        tabBarLastActive = now
+        tabBarHoverStart = nil
+        workspace.setAutoHiddenToolbarVisible(true)
+    }
+
+    func cycleTabs(_ offset: Int) {
+        revealAutoHiddenTabBarTemporarily()
+        session.cycle(offset)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        isToolbarMenuOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isToolbarMenuOpen = false
+        tabBarLastActive = ProcessInfo.processInfo.systemUptime
+    }
+
     @objc private func selectTab(_ sender: NSButton) {
         guard tabIDs.indices.contains(sender.tag) else { return }
         session.select(tabIDs[sender.tag], activate: true)
@@ -340,12 +429,44 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     func handlesActivatingClick(at point: CGPoint) -> Bool {
         guard let screen = NSScreen.screens.first, let frameView = window.contentView?.superview else { return false }
         let location = window.convertPoint(fromScreen: NSPoint(x: point.x, y: screen.frame.maxY - point.y))
+        return Self.handlesClick(in: frameView, at: location)
+    }
+
+    private static func handlesClick(in frameView: NSView, at location: NSPoint) -> Bool {
         var view = frameView.hitTest(location)
         while let current = view {
             if current is NSControl || current is NSScrollView || current.acceptsFirstMouse(for: nil) { return true }
             view = current.superview
         }
         return false
+    }
+
+    /// The auto-hidden tab bar is a non-activating panel, so WindowDock does not activate on its own when it is
+    /// clicked. Activate this workspace the way a click on its embedded tab bar does.
+    private func activateFromAutoHiddenToolbar(_ event: NSEvent) {
+        guard !NSApp.isActive || !window.isKeyWindow,
+              !suspended, !quitting, !window.isMiniaturized, picker == nil else { return }
+        let handlesClick = event.window?.contentView?.superview
+            .map { Self.handlesClick(in: $0, at: event.locationInWindow) } ?? false
+        if !NSApp.isActive {
+            toolbarActivationRequest = ProcessInfo.processInfo.systemUptime
+            // A click raises only the clicked window; activating normally would raise every workspace.
+            window.orderFrontRegardless()
+            if !WindowAccess.activateFrontWindowOnly(ProcessInfo.processInfo.processIdentifier) {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+        window.makeKey()
+        scheduleSelectedWindowRaise(activate: !handlesClick)
+    }
+
+    private var toolbarActivationRequest: TimeInterval?
+
+    /// Whether a click on the auto-hidden tab bar has just asked WindowDock to activate. Activation restores
+    /// the previous key window, so the caller makes this workspace key again.
+    func claimToolbarActivation() -> Bool {
+        defer { toolbarActivationRequest = nil }
+        return toolbarActivationRequest.map { ProcessInfo.processInfo.systemUptime - $0 < 2 } ?? false
     }
 
     func bringToFront() {
@@ -387,6 +508,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     }
 
     var windowDropPanelNumber: Int? { workspace.windowDropPanel?.windowNumber }
+    var toolbarPanelNumber: Int? { workspace.toolbarPanelWindowNumber }
+    var autoHideHoverFrame: NSRect { workspace.toolbarHoverFrame }
+    var isAutoHiddenToolbarVisible: Bool { workspace.autoHiddenToolbarVisible }
 
     func showTabTransferTargets() { workspace.showExternalTabTargets() }
     func hideTabTransferTargets() {
@@ -446,11 +570,13 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     // MARK: Window state
 
     func windowDidMove(_ notification: Notification) {
+        workspace.updateToolbarPanelFrame()
         if !window.isApplyingWorkspaceFrame { syncIfVisible() }
         scheduleSettledSync()
     }
 
     func windowDidResize(_ notification: Notification) {
+        workspace.updateToolbarPanelFrame()
         if !window.isApplyingWorkspaceFrame { syncIfVisible() }
         scheduleSettledSync()
     }
@@ -563,6 +689,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     func windowWillMiniaturize(_ notification: Notification) {
         onSuspend?()
         suspended = true
+        workspace.hideAutoHiddenToolbar()
         session.suspend()
     }
 
@@ -575,6 +702,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate {
     func applicationDidHide() {
         onSuspend?()
         suspended = true
+        workspace.hideAutoHiddenToolbar()
         session.suspend()
     }
 

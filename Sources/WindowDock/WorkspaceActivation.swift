@@ -40,6 +40,12 @@ final class WorkspaceActivation {
     }
 
     func applicationDidBecomeActive() {
+        // The auto-hidden tab bar is a non-activating panel, so its click activates WindowDock explicitly.
+        // Like a click on the workspace itself, it leaves the other workspaces where they are.
+        if let clicked = controllers().first(where: { $0.claimToolbarActivation() }) {
+            clicked.window.makeKey()
+            return
+        }
         // A click raises only the clicked workspace, which is not key yet; guessing the active workspace now
         // would send the clicked one behind the others until the mouse is released.
         if let (clicked, point) = activatingClick() {

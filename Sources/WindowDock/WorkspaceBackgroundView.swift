@@ -153,10 +153,20 @@ class WorkspaceBackgroundView: NSView {
 
     /// Resizes from an edge or corner and moves from anywhere else, under application control.
     func trackFrameChange(with event: NSEvent) {
-        trackFrameChange(with: event, edges: resizeEdges(at: convert(event.locationInWindow, from: nil)))
+        guard let window = window as? WorkspaceWindow else { return }
+        let startMouse = window.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
+        trackFrameChange(with: event, edges: resizeEdges(at: convert(event.locationInWindow, from: nil)),
+                         startMouse: startMouse)
     }
 
-    private func trackFrameChange(with event: NSEvent, edges: WorkspaceResizeEdges) {
+    func trackFrameChangeFromToolbar(with event: NSEvent) {
+        guard window is WorkspaceWindow,
+              let eventWindow = event.window else { return }
+        let startMouse = eventWindow.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
+        trackFrameChange(with: event, edges: [], startMouse: startMouse)
+    }
+
+    private func trackFrameChange(with event: NSEvent, edges: WorkspaceResizeEdges, startMouse: NSPoint) {
         guard let window = window as? WorkspaceWindow else { return }
         if edges.isEmpty, event.clickCount == 2 {
             window.toggleMaximize()
@@ -164,7 +174,6 @@ class WorkspaceBackgroundView: NSView {
             return
         }
         let startFrame = window.frame
-        let startMouse = window.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
         while let next = NSApp.nextEvent(
             matching: [.leftMouseDragged, .leftMouseUp],
             until: .distantFuture,
