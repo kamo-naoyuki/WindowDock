@@ -305,6 +305,7 @@ final class WindowSession {
 
     func select(_ id: UUID, activate: Bool = false) {
         guard windows.contains(where: { $0.id == id }) else { return }
+        var displaced: UUID?
         if let index = cellIndex(for: id) {
             activeCell = index
             if !pinnedCells.contains(index) { lastUnpinnedCell = index }
@@ -313,13 +314,14 @@ final class WindowSession {
                 onChange?()
                 return
             }
+            displaced = cells[cell]
             cells[cell] = id
             assignments[id] = cell
             activeCell = cell
             lastUnpinnedCell = cell
         }
+        replacePresentation(of: displaced, with: id)
         if activate { focus(id) }
-        clearPresentation()
         presentVisibleWindows()
         onChange?()
     }
@@ -327,12 +329,13 @@ final class WindowSession {
     private func select(_ id: UUID, inCell cell: Int, activate: Bool) {
         guard windows.contains(where: { $0.id == id }), cells.indices.contains(cell),
               !pinnedCells.contains(cell), cellIndex(for: id) == nil || cellIndex(for: id) == cell else { return }
+        let displaced = cells[cell]
         cells[cell] = id
         assignments[id] = cell
         activeCell = cell
         lastUnpinnedCell = cell
+        replacePresentation(of: displaced, with: id)
         if activate { focus(id) }
-        clearPresentation()
         presentVisibleWindows()
         onChange?()
     }
@@ -685,6 +688,12 @@ final class WindowSession {
         presentedFrames = [:]
         onPresentedFrame?(nil)
         onPresentedFrames?([:])
+    }
+
+    /// Swaps what a pane shows while the other panes keep showing through, so they don't flash the workspace background.
+    private func replacePresentation(of displaced: UUID?, with id: UUID) {
+        requestedFrames.removeValue(forKey: id)
+        if let displaced, displaced != id { withdrawPresentation(of: displaced) }
     }
 
     /// Stops showing a window through the workspace before it leaves its pane, while the other panes stay shown.

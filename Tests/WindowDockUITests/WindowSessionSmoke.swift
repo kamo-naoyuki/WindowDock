@@ -256,6 +256,23 @@ enum WindowSessionSmoke {
             failures.append("cycling changed a pane when every pane was pinned")
         }
 
+        let (flash, _) = fixture(registering: [0, 1, 2])
+        flash.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        flash.setPanePinned(true, at: 0)
+        guard let flashPinned = flash.cells[0], let hiddenTab = flash.windows.first(where: { flash.cellIndex(for: $0.id) == nil }) else {
+            return failures + ["the pinned-pane flash fixture had no hidden tab"]
+        }
+        var emissions: [[UUID: CGRect]] = []
+        let previousHandler = flash.onPresentedFrames
+        flash.onPresentedFrames = { frames in
+            emissions.append(frames)
+            previousHandler?(frames)
+        }
+        flash.select(hiddenTab.id)
+        if emissions.contains(where: { $0[flashPinned] == nil }) {
+            failures.append("selecting a tab briefly stopped showing the pinned pane")
+        }
+
         let (reflow, _) = fixture(registering: [0, 1])
         reflow.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
         reflow.setPanePinned(true, at: 1)
