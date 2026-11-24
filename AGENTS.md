@@ -10,6 +10,21 @@ macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a
 - If `xcode-select -p` points at the Command Line Tools and `swift` fails, prefix commands with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.
 - `dist/` is build output; don't edit it.
 
+## Formatting
+
+Use the official `swift-format` via `swift format` (requires a Swift 6+ toolchain).
+Install the commit hook once per clone:
+
+```sh
+uv tool install pre-commit
+pre-commit install
+```
+
+The hook formats staged Swift files using `.swift-format` (4-space indentation, 120-column line length).
+If formatting changes a file, the commit stops: review the changes, stage them, and commit again.
+Unstaged changes are temporarily stashed by `pre-commit`; if they conflict with formatting, the formatting changes are rolled back.
+To format a file manually, run `swift format format --in-place <file.swift>`.
+
 ## Fixing bugs
 
 When you find or are asked to fix a bug, follow this order:
