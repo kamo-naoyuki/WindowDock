@@ -65,7 +65,7 @@ public struct WorkspaceWindowDragTracker {
         if !buttonDown {
             let completed =
                 isTrackingPress && !suppressed && !workspaceMoved(in: windows)
-                ? movedWindow(at: point, windows: windows) : nil
+                    ? movedWindow(at: point, windows: windows) : nil
             idleWindows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
             startWindows.removeAll()
             resizedWindows.removeAll()
@@ -95,7 +95,7 @@ public struct WorkspaceWindowDragTracker {
 
     private func workspaceMoved(in windows: [WindowServerWindow]) -> Bool {
         guard let workspace = pressedWorkspace,
-            let current = windows.first(where: { $0.id == workspace.id })
+              let current = windows.first(where: { $0.id == workspace.id })
         else { return false }
         return current.frame != workspace.frame
     }

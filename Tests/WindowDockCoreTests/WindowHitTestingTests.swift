@@ -9,7 +9,8 @@ final class WindowHitTestingTests: XCTestCase {
         XCTAssertEqual(
             WindowHitTesting.frontmostWindow(
                 at: CGPoint(x: 50, y: 50), windows: windows, excluding: [1, 2]
-            ), 3)
+            ), 3
+        )
     }
 
     func testOtherWindowsBlockWorkspaceOnlyWhereTheyOverlap() {
@@ -21,15 +22,18 @@ final class WindowHitTestingTests: XCTestCase {
         XCTAssertEqual(
             WindowHitTesting.frontmostWindow(
                 at: CGPoint(x: 20, y: 50), windows: windows, excluding: [1]
-            ), 2)
+            ), 2
+        )
         XCTAssertEqual(
             WindowHitTesting.frontmostWindow(
                 at: CGPoint(x: 80, y: 50), windows: windows, excluding: [1]
-            ), 3)
+            ), 3
+        )
         XCTAssertNil(
             WindowHitTesting.frontmostWindow(
                 at: CGPoint(x: 150, y: 50), windows: windows, excluding: [1]
-            ))
+            )
+        )
     }
 
     func testActivationByClickingOwnWindowIsRecognized() {
@@ -59,11 +63,13 @@ final class WindowHitTestingTests: XCTestCase {
         XCTAssertNil(
             WindowHitTesting.activatingClick(
                 at: CGPoint(x: 20, y: 50), windows: windows, ownPID: 7, buttonDown: true, secondsSinceMouseDown: 0
-            ))
+            )
+        )
         XCTAssertEqual(
             WindowHitTesting.activatingClick(
                 at: CGPoint(x: 80, y: 50), windows: windows, ownPID: 7, buttonDown: true, secondsSinceMouseDown: 0
-            ), 2)
+            ), 2
+        )
     }
 
     func testOverlappingWorkspacesUseFrontmost() {
@@ -72,6 +78,7 @@ final class WindowHitTestingTests: XCTestCase {
         XCTAssertEqual(
             WindowHitTesting.frontmostWindow(
                 at: CGPoint(x: 50, y: 50), windows: windows, excluding: [1]
-            ), 2)
+            ), 2
+        )
     }
 }

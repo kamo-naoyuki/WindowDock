@@ -20,7 +20,7 @@ final class PaneLayoutTests: XCTestCase {
     func testRepeatedNestingCanCreateSixteenPanes() throws {
         var layout = PaneLayout.pane
         for axis in [PaneLayout.Axis.horizontal, .horizontal, .vertical, .vertical] {
-            for index in (0..<layout.paneCount).reversed() {
+            for index in (0 ..< layout.paneCount).reversed() {
                 layout = try XCTUnwrap(layout.splittingPane(at: index, axis: axis))
             }
         }
@@ -48,7 +48,8 @@ final class PaneLayoutTests: XCTestCase {
                 CGRect(x: 20, y: 30, width: 400, height: 608),
                 CGRect(x: 428, y: 338, width: 400, height: 300),
                 CGRect(x: 428, y: 30, width: 400, height: 300),
-            ])
+            ]
+        )
         let divider = try XCTUnwrap(geometry.dividers.first { $0.axis == .vertical })
         let resized = try XCTUnwrap(layout.resizing(divider, by: 80))
         let frames = try XCTUnwrap(resized.geometry(in: bounds)).panes
@@ -82,7 +83,8 @@ final class PaneLayoutTests: XCTestCase {
             PaneReflow.split(
                 cells: ["left", "right"], activeCell: 1, at: 1,
                 windowIDs: ["left", "right", "hidden"], assignments: ["left": 0, "right": 1, "hidden": 1]
-            ))
+            )
+        )
         XCTAssertEqual(split.cells, ["left", "right", "hidden"])
         XCTAssertEqual(split.activeCell, 1)
         let layout = try XCTUnwrap(
@@ -95,7 +97,8 @@ final class PaneLayoutTests: XCTestCase {
             PaneReflow.close(
                 cells: split.cells, activeCell: split.activeCell, at: 1,
                 destination: removal.destination, assignments: split.assignments
-            ))
+            )
+        )
         XCTAssertEqual(closed.cells, ["left", "hidden"])
         XCTAssertEqual(closed.assignments, ["left": 0, "right": 1, "hidden": 1])
         XCTAssertEqual(closed.activeCell, 1)
@@ -107,7 +110,8 @@ final class PaneLayoutTests: XCTestCase {
             PaneReflow.split(
                 cells: ["first", "second"], activeCell: 1, at: 0,
                 windowIDs: ["first", "second"], assignments: ["first": 0, "second": 1]
-            ))
+            )
+        )
         XCTAssertEqual(result.cells, ["first", nil, "second"])
         XCTAssertEqual(result.activeCell, 2)
         XCTAssertEqual(result.assignments["second"], 2)
@@ -115,7 +119,8 @@ final class PaneLayoutTests: XCTestCase {
             PaneReflow.close(
                 cells: result.cells, activeCell: result.activeCell, at: 0, destination: 0,
                 assignments: result.assignments
-            ))
+            )
+        )
         XCTAssertEqual(empty.cells, [nil, "second"])
         XCTAssertEqual(empty.assignments["first"], 0)
     }

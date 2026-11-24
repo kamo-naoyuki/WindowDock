@@ -34,10 +34,11 @@ public indirect enum PaneLayout: Codable, Equatable {
     public static func grid(columnWeights: [CGFloat], rowWeights: [CGFloat]) -> PaneLayout {
         let row: PaneLayout =
             columnWeights.count == 1
-            ? .pane
-            : .split(
-                axis: .horizontal, weights: columnWeights,
-                children: columnWeights.map { _ in .pane })
+                ? .pane
+                : .split(
+                    axis: .horizontal, weights: columnWeights,
+                    children: columnWeights.map { _ in .pane }
+                )
         return rowWeights.count == 1
             ? row : .split(axis: .vertical, weights: rowWeights, children: rowWeights.map { _ in row })
     }
@@ -92,7 +93,7 @@ public indirect enum PaneLayout: Codable, Equatable {
 
     public func removingPane(at index: Int) -> Removal? {
         guard index >= 0 && index < paneCount,
-            case .split(let axis, var weights, var children) = self
+              case .split(let axis, var weights, var children) = self
         else { return nil }
         var offset = 0
         for child in children.indices {
@@ -133,9 +134,9 @@ public indirect enum PaneLayout: Codable, Equatable {
 
     public func minimumSize(_ sizes: [Int: CGSize], dividerThickness: CGFloat) -> CGSize? {
         guard isValid, dividerThickness.isFinite, dividerThickness >= 0,
-            sizes.values.allSatisfy({
-                $0.width.isFinite && $0.height.isFinite && $0.width >= 0 && $0.height >= 0
-            })
+              sizes.values.allSatisfy({
+                  $0.width.isFinite && $0.height.isFinite && $0.width >= 0 && $0.height >= 0
+              })
         else { return nil }
         return minimumSize(sizes, offset: 0, dividerThickness: dividerThickness)
     }
@@ -154,11 +155,13 @@ public indirect enum PaneLayout: Codable, Equatable {
             case .horizontal:
                 return CGSize(
                     width: minimums.reduce(dividers) { $0 + $1.width },
-                    height: minimums.map(\.height).max() ?? 0)
+                    height: minimums.map(\.height).max() ?? 0
+                )
             case .vertical:
                 return CGSize(
                     width: minimums.map(\.width).max() ?? 0,
-                    height: minimums.reduce(dividers) { $0 + $1.height })
+                    height: minimums.reduce(dividers) { $0 + $1.height }
+                )
             }
         }
     }
@@ -167,8 +170,8 @@ public indirect enum PaneLayout: Codable, Equatable {
         in bounds: CGRect, minimums: [Int: CGSize] = [:], dividerThickness: CGFloat = PaneLayout.dividerThickness
     ) -> Geometry? {
         guard bounds.origin.x.isFinite, bounds.origin.y.isFinite,
-            bounds.width.isFinite, bounds.height.isFinite, bounds.width >= 0, bounds.height >= 0,
-            minimumSize(minimums, dividerThickness: dividerThickness) != nil
+              bounds.width.isFinite, bounds.height.isFinite, bounds.width >= 0, bounds.height >= 0,
+              minimumSize(minimums, dividerThickness: dividerThickness) != nil
         else { return nil }
         var result = Geometry(panes: [], dividers: [])
         appendGeometry(in: bounds, minimums: minimums, dividerThickness: dividerThickness, path: [], result: &result)
@@ -212,12 +215,13 @@ public indirect enum PaneLayout: Codable, Equatable {
             if index < children.count - 1 {
                 let divider =
                     axis == .horizontal
-                    ? CGRect(x: position, y: bounds.minY, width: thickness, height: bounds.height)
-                    : CGRect(x: bounds.minX, y: position - thickness, width: bounds.width, height: thickness)
+                        ? CGRect(x: position, y: bounds.minY, width: thickness, height: bounds.height)
+                        : CGRect(x: bounds.minX, y: position - thickness, width: bounds.width, height: thickness)
                 result.dividers.append(
                     Divider(
                         path: path, index: index, axis: axis, frame: divider, lengths: lengths, minimums: childMinimums
-                    ))
+                    )
+                )
                 position += axis == .horizontal ? thickness : -thickness
             }
         }
@@ -226,7 +230,7 @@ public indirect enum PaneLayout: Codable, Equatable {
     public func resizing(_ divider: Divider, by delta: CGFloat) -> PaneLayout? {
         let index = divider.index
         guard delta.isFinite, index >= 0, index + 1 < divider.lengths.count,
-            divider.minimums.count == divider.lengths.count
+              divider.minimums.count == divider.lengths.count
         else { return nil }
         var lengths = divider.lengths
         let total = lengths[index] + lengths[index + 1]
@@ -247,7 +251,7 @@ public indirect enum PaneLayout: Codable, Equatable {
             return .split(axis: axis, weights: replacement, children: children)
         }
         guard children.indices.contains(index),
-            let child = children[index].replacingWeights(replacement, at: Array(path.dropFirst()))
+              let child = children[index].replacingWeights(replacement, at: Array(path.dropFirst()))
         else { return nil }
         children[index] = child
         return .split(axis: axis, weights: weights, children: children)

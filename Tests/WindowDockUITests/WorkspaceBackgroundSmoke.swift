@@ -56,8 +56,8 @@ enum WorkspaceBackgroundSmoke {
             if nestedOnly {
                 failures =
                     WindowSessionSmoke.runNestedPaneChecks() + WindowSessionSmoke.runPanePinChecks()
-                    + WindowSessionSmoke.runNestedPaneUIChecks() + WindowSessionSmoke.runNestedPaneLimitChecks()
-                    + WindowSessionSmoke.runNestedPaneMinimumChecks() + checkGridLayout() + checkTabMoveRouting()
+                        + WindowSessionSmoke.runNestedPaneUIChecks() + WindowSessionSmoke.runNestedPaneLimitChecks()
+                        + WindowSessionSmoke.runNestedPaneMinimumChecks() + checkGridLayout() + checkTabMoveRouting()
             } else if dropOnly {
                 failures = checkNativeWindowDrops()
             } else if focused {
@@ -65,13 +65,14 @@ enum WorkspaceBackgroundSmoke {
             } else if activationOnly {
                 failures =
                     WindowSessionSmoke.runFrontWindowOnlyActivationChecks()
-                    + WorkspaceActivationSmoke.runDockMenuSwitchChecks() + WindowSessionSmoke.runTitlebarFocusChecks()
-                    + WorkspaceActivationSmoke.runAutoHiddenToolbarActivationChecks()
-                    + WindowSessionSmoke.runTabTransferKeyChecks() + WindowSessionSmoke.runActivationRefitChecks()
+                        + WorkspaceActivationSmoke.runDockMenuSwitchChecks() + WindowSessionSmoke
+                        .runTitlebarFocusChecks()
+                        + WorkspaceActivationSmoke.runAutoHiddenToolbarActivationChecks()
+                        + WindowSessionSmoke.runTabTransferKeyChecks() + WindowSessionSmoke.runActivationRefitChecks()
             } else {
                 failures =
                     WindowSessionSmoke.runChecks() + checkWindowPicker() + runChecks() + checkCompactLayout()
-                    + checkGridLayout() + checkTabMoveRouting() + checkNativeWindowDrops()
+                        + checkGridLayout() + checkTabMoveRouting() + checkNativeWindowDrops()
             }
             if let previous {
                 if #available(macOS 14, *) { application.yieldActivation(to: previous) }
@@ -82,13 +83,13 @@ enum WorkspaceBackgroundSmoke {
                     nestedOnly
                         ? "PASS: nested pane menus, layout, resizing, persistence, tab reflow and routing"
                         : dropOnly
-                            ? "PASS: native WindowServer move/release sampling and nonactivating drop feedback"
-                            : focused
-                                ? "PASS: tab move routing, context menu and drag overlay cleanup"
-                                : activationOnly
-                                    ? "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus, auto-hidden tab bar click, tab drop key and activation refit"
-                                    : "PASS: window drop feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking and resize"
-                )
+                        ? "PASS: native WindowServer move/release sampling and nonactivating drop feedback"
+                        : focused
+                        ? "PASS: tab move routing, context menu and drag overlay cleanup"
+                        : activationOnly
+                        ? "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus, auto-hidden tab bar click, tab drop key and activation refit"
+                        :
+                        "PASS: window drop feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking and resize")
                 exit(0)
             }
             for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
@@ -153,8 +154,7 @@ enum WorkspaceBackgroundSmoke {
                 }
             } else {
                 failures.append(
-                    "actual WindowServer geometry changes were not detected without NSEvent delivery (\(initial.frame) -> \(moved.frame))"
-                )
+                    "actual WindowServer geometry changes were not detected without NSEvent delivery (\(initial.frame) -> \(moved.frame))")
             }
             if case .released = tracker.update(buttonDown: false, point: end, windows: after, ownPID: -1) {
             } else {
@@ -163,8 +163,7 @@ enum WorkspaceBackgroundSmoke {
             let previousKey = NSApp.keyWindow
             let dropPoint = host.convertPoint(
                 toScreen: chrome.addButton.convert(
-                    NSPoint(x: chrome.addButton.bounds.midX, y: chrome.addButton.bounds.midY), to: nil
-                ))
+                    NSPoint(x: chrome.addButton.bounds.midX, y: chrome.addButton.bounds.midY), to: nil))
             chrome.showWindowDropTarget(at: dropPoint, requiresPermission: false)
             guard let panel = chrome.windowDropPanel else { return failures + ["drop target panel was not created"] }
             flush()
@@ -196,21 +195,19 @@ enum WorkspaceBackgroundSmoke {
     @MainActor
     private static func checkWindowPicker() -> [String] {
         var failures: [String] = []
-        let candidates = (0..<3).map {
+        let candidates = (0 ..< 3).map {
             WindowCandidate(
                 element: AXUIElementCreateApplication(pid_t(910_000 + $0)),
                 application: .current,
-                title: "Picker \($0)"
-            )
+                title: "Picker \($0)")
         }
         func descendants(of view: NSView) -> [NSView] {
             view.subviews.flatMap { [$0] + descendants(of: $0) }
         }
-        for scenario in 0..<4 {
+        for scenario in 0 ..< 4 {
             let host = NSWindow(
                 contentRect: NSRect(x: 120, y: 120, width: 720, height: 480),
-                styleMask: .titled, backing: .buffered, defer: false
-            )
+                styleMask: .titled, backing: .buffered, defer: false)
             host.isReleasedWhenClosed = false
             var received: [[WindowCandidate]] = []
             let available = scenario == 3 ? [] : candidates
@@ -228,17 +225,16 @@ enum WorkspaceBackgroundSmoke {
             content.layoutSubtreeIfNeeded()
             let views = descendants(of: content)
             guard let table = views.compactMap({ $0 as? NSTableView }).first,
-                let add = views.compactMap({ $0 as? NSButton }).first(where: {
-                    $0.action == NSSelectorFromString("add")
-                }),
-                let cancel = views.compactMap({ $0 as? NSButton }).first(where: { $0.keyEquivalent == "\u{1b}" })
+                  let add = views.compactMap({ $0 as? NSButton }).first(where: {
+                      $0.action == NSSelectorFromString("add")
+                  }),
+                  let cancel = views.compactMap({ $0 as? NSButton }).first(where: { $0.keyEquivalent == "\u{1b}" })
             else {
                 let buttons = views.compactMap { $0 as? NSButton }.map {
                     "\($0.title):\($0.keyEquivalent.debugDescription)"
                 }
                 failures.append(
-                    "picker controls were not found: tables=\(views.compactMap { $0 as? NSTableView }.count), buttons=\(buttons)"
-                )
+                    "picker controls were not found: tables=\(views.compactMap { $0 as? NSTableView }.count), buttons=\(buttons)")
                 continue
             }
             if scenario == 3 {
@@ -286,8 +282,7 @@ enum WorkspaceBackgroundSmoke {
             contentRect: NSRect(x: 120, y: 120, width: 420, height: 360),
             styleMask: [.borderless, .closable, .miniaturizable, .resizable],
             backing: .buffered,
-            defer: false
-        )
+            defer: false)
         host.title = "WindowDock rendering test"
         host.isReleasedWhenClosed = false
         host.isOpaque = false
@@ -303,16 +298,14 @@ enum WorkspaceBackgroundSmoke {
             contentRect: host.convertToScreen(stage.frame),
             styleMask: .titled,
             backing: .buffered,
-            defer: false
-        )
+            defer: false)
         target.isReleasedWhenClosed = false
         target.backgroundColor = .systemGreen
         let backgroundTarget = NSWindow(
             contentRect: host.convertToScreen(stage.frame),
             styleMask: .titled,
             backing: .buffered,
-            defer: false
-        )
+            defer: false)
         backgroundTarget.isReleasedWhenClosed = false
         backgroundTarget.backgroundColor = .systemBlue
         // Keep unrelated desktop windows from occluding the fixture's native hit tests.
@@ -391,7 +384,7 @@ enum WorkspaceBackgroundSmoke {
         checkHit(NSPoint(x: 4, y: 100), expected: host, label: "resize border")
         checkHit(NSPoint(x: workspace.bounds.maxX - 12, y: 12), expected: host, label: "resize grip")
 
-        for iteration in 1...20 {
+        for iteration in 1 ... 20 {
             let selected = iteration.isMultiple(of: 2) ? backgroundTarget : target
             selected.makeKeyAndOrderFront(nil)
             selected.orderFrontRegardless()
@@ -459,8 +452,7 @@ enum WorkspaceBackgroundSmoke {
             from: movedFrame,
             delta: NSSize(width: 80, height: -40),
             edges: [.right, .bottom],
-            minimumSize: minimum
-        )
+            minimumSize: minimum)
         host.setWorkspaceFrame(expanded)
         flush()
         if host.frame.size != NSSize(width: movedFrame.width + 80, height: movedFrame.height + 40)
@@ -499,7 +491,7 @@ enum WorkspaceBackgroundSmoke {
         host.level = .floating
         let chrome = WorkspaceChromeView(frame: .zero)
         host.contentView = chrome
-        let targets = (0..<16).map { _ -> NSWindow in
+        let targets = (0 ..< 16).map { _ -> NSWindow in
             let target = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
             target.isReleasedWhenClosed = false
             target.level = .floating
@@ -554,7 +546,7 @@ enum WorkspaceBackgroundSmoke {
             let divider = chrome.stage.dividerThickness
             let expectedArea =
                 (chrome.stage.bounds.width - CGFloat(size.columns - 1) * divider)
-                * (chrome.stage.bounds.height - CGFloat(size.rows - 1) * divider)
+                    * (chrome.stage.bounds.height - CGFloat(size.rows - 1) * divider)
             if abs(areas.reduce(CGFloat(0), { $0 + $1.width * $1.height }) - expectedArea) > 0.1 {
                 failures.append("grid \(size): areas do not exactly partition stage")
             }
@@ -805,7 +797,7 @@ enum WorkspaceBackgroundSmoke {
         chrome.onMoveTab = { moves.append(($0, $1)) }
         let menu = tab.select.menu(for: mouse(.rightMouseDown, location))
         if let root = menu?.items.first, root.title == "配置を入れ替え",
-            let items = root.submenu?.items, items.count == 2, let action = items[1].action
+           let items = root.submenu?.items, items.count == 2, let action = items[1].action
         {
             _ = NSApp.sendAction(action, to: items[1].target, from: items[1])
         } else {
@@ -871,8 +863,7 @@ enum WorkspaceBackgroundSmoke {
             || !chrome.tabs.arrangedSubviews.contains(paneSourceGroup) || paneSourceGroup.frame != paneSourceFrame
         {
             failures.append(
-                "dragging below the tab row did not pin the source and show the floating preview (alpha=\(paneSourceGroup.alphaValue), preview=\(String(describing: chrome.tabDragPreviewPanel?.isVisible)), inTabs=\(chrome.tabs.arrangedSubviews.contains(paneSourceGroup)), frame=\(paneSourceGroup.frame) vs \(paneSourceFrame))"
-            )
+                "dragging below the tab row did not pin the source and show the floating preview (alpha=\(paneSourceGroup.alphaValue), preview=\(String(describing: chrome.tabDragPreviewPanel?.isVisible)), inTabs=\(chrome.tabs.arrangedSubviews.contains(paneSourceGroup)), frame=\(paneSourceGroup.frame) vs \(paneSourceFrame))")
         }
         hover(location)
         checkHighlight(nil, "returning to the tab bar")
@@ -898,8 +889,7 @@ enum WorkspaceBackgroundSmoke {
         chrome.beginTabDrag(source: tab.select, token: "swap-token")
         board.setString("swap-token", forType: type)
         let targetPoint = targetTab.select.convert(
-            NSPoint(x: targetTab.select.bounds.maxX - 1, y: targetTab.select.bounds.midY), to: nil
-        )
+            NSPoint(x: targetTab.select.bounds.maxX - 1, y: targetTab.select.bounds.midY), to: nil)
         let swap = TabDragInfo(pasteboard: board, source: tab.select, window: host, location: targetPoint)
         if targetTab.select.draggingEntered(swap) != .move || targetTab.select.draggingUpdated(swap) != .move
             || floatingGroup.frame.minX == initialX || reordered.count != 0
@@ -915,7 +905,7 @@ enum WorkspaceBackgroundSmoke {
             failures.append("tab drop did not persist the reordered tab position")
         }
         flush()
-        for index in 0..<2 {
+        for index in 0 ..< 2 {
             if !chrome.gridAreas[index].subviews.isEmpty { failures.append("completed drag left an overlay") }
             hit(index, expected: targets[index], label: "coverage after drop \(index)")
         }
@@ -926,7 +916,7 @@ enum WorkspaceBackgroundSmoke {
         if !moves.isEmpty || chrome.gridAreas.contains(where: { !$0.subviews.isEmpty }) {
             failures.append("cancelled drag did not clean up without moving")
         }
-        for index in 0..<2 { hit(index, expected: targets[index], label: "coverage after cancellation \(index)") }
+        for index in 0 ..< 2 { hit(index, expected: targets[index], label: "coverage after cancellation \(index)") }
         chrome.beginTabDrag(source: tab.select, token: "removed")
         chrome.clearTabs()
         if chrome.gridAreas.contains(where: { !$0.subviews.isEmpty }) || !moves.isEmpty {
@@ -971,8 +961,7 @@ enum WorkspaceBackgroundSmoke {
             contentRect: NSRect(x: 120, y: 120, width: 1120, height: 760),
             styleMask: [.borderless, .closable, .miniaturizable, .resizable],
             backing: .buffered,
-            defer: false
-        )
+            defer: false)
         host.isReleasedWhenClosed = false
         host.isOpaque = false
         host.backgroundColor = .clear
@@ -988,7 +977,7 @@ enum WorkspaceBackgroundSmoke {
             failures.append(
                 "empty tabs: add button is not beside the workspace name after the traffic lights, gap=\(initialGap)")
         }
-        for index in 1...3 {
+        for index in 1 ... 3 {
             let tab = chrome.appendTab(title: "Application \(index) — A longer window title", selected: index == 1).view
             chrome.layoutSubtreeIfNeeded()
             let lastFrame = chrome.convert(tab.bounds, from: tab)
@@ -1015,7 +1004,7 @@ enum WorkspaceBackgroundSmoke {
         }
         chrome.clearTabs()
         var lastTab: NSView?
-        for index in 1...12 {
+        for index in 1 ... 12 {
             lastTab =
                 chrome.appendTab(title: "Application \(index) — A longer window title", selected: index == 12).view
         }
@@ -1096,14 +1085,13 @@ enum WorkspaceBackgroundSmoke {
                 failures.append("compact \(size): notice toggling resizes the stage (sync feedback loop)")
             }
             print(
-                "Compact \(Int(size.width))×\(Int(size.height)): viewport \(Int(stage.width))×\(Int(stage.height)), tabs \(tabTop)pt from top"
-            )
+                "Compact \(Int(size.width))×\(Int(size.height)): viewport \(Int(stage.width))×\(Int(stage.height)), tabs \(tabTop)pt from top")
         }
         chrome.clearTabs()
         chrome.layoutSubtreeIfNeeded()
         let clearedGap =
             chrome.convert(chrome.addButton.bounds, from: chrome.addButton).minX
-            - chrome.convert(chrome.workspaceButton.bounds, from: chrome.workspaceButton).maxX
+                - chrome.convert(chrome.workspaceButton.bounds, from: chrome.workspaceButton).maxX
         if clearedGap < 0 || clearedGap > 8 {
             failures.append(
                 "add button did not return beside the workspace name after all tabs were removed, gap=\(clearedGap)")

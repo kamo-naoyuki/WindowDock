@@ -39,7 +39,8 @@ enum WorkspaceActivationSmoke {
             let deadline = Date().addingTimeInterval(seconds)
             while !condition(), Date() < deadline {
                 if let event = NSApp.nextEvent(
-                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true)
+                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true
+                )
                 {
                     NSApp.sendEvent(event)
                 }
@@ -125,18 +126,21 @@ enum WorkspaceActivationSmoke {
             var failures: [String] = []
             if probe.focusCount == 0 {
                 failures.append(
-                    "\(situation): only the chosen workspace's frame came forward; its window stayed behind")
+                    "\(situation): only the chosen workspace's frame came forward; its window stayed behind"
+                )
             }
             if !NSApp.isActive {
                 failures.append("\(situation): choosing a workspace from the Dock menu did not activate WindowDock")
             }
             if stackIndex(firstNumber) > stackIndex(secondNumber) {
                 failures.append(
-                    "\(situation): the chosen workspace did not come in front of the other workspace (\(stack()))")
+                    "\(situation): the chosen workspace did not come in front of the other workspace (\(stack()))"
+                )
             }
             if stackIndex(secondNumber) < stackIndex(otherAppWindow) {
                 failures.append(
-                    "\(situation): the other workspace's frame and tab bar stayed in front of another app (\(stack()))")
+                    "\(situation): the other workspace's frame and tab bar stayed in front of another app (\(stack()))"
+                )
             }
             return failures
         }
@@ -158,7 +162,8 @@ enum WorkspaceActivationSmoke {
             failures += chooseFirst("after the Dock activated WindowDock")
         } else {
             failures.append(
-                "Dock menu switch fixture did not start with another app in front of the second workspace (\(stack()))")
+                "Dock menu switch fixture did not start with another app in front of the second workspace (\(stack()))"
+            )
         }
 
         // The menu item's action arrives before WindowDock is active.
@@ -167,7 +172,8 @@ enum WorkspaceActivationSmoke {
             failures += chooseFirst("before WindowDock was active")
         } else {
             failures.append(
-                "Dock menu switch fixture did not start with another app in front of the second workspace (\(stack()))")
+                "Dock menu switch fixture did not start with another app in front of the second workspace (\(stack()))"
+            )
         }
         return failures
     }
@@ -185,7 +191,8 @@ enum WorkspaceActivationSmoke {
             let deadline = Date().addingTimeInterval(seconds)
             while !condition(), Date() < deadline {
                 if let event = NSApp.nextEvent(
-                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true)
+                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true
+                )
                 {
                     NSApp.sendEvent(event)
                 }
@@ -230,10 +237,10 @@ enum WorkspaceActivationSmoke {
         let secondBefore = stackIndex(second.window.windowNumber)
         first.revealAutoHiddenTabBarTemporarily()
         guard let chrome = first.window.contentView as? WorkspaceChromeView,
-            let panel = chrome.autoHiddenToolbarPanel, panel.isVisible,
-            let dragSpace = panel.contentView?.subviews.compactMap({ $0 as? NSStackView }).flatMap(\.arrangedSubviews)
-                .first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") }),
-            let screen = NSScreen.screens.first
+              let panel = chrome.autoHiddenToolbarPanel, panel.isVisible,
+              let dragSpace = panel.contentView?.subviews.compactMap({ $0 as? NSStackView }).flatMap(\.arrangedSubviews)
+                  .first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") }),
+              let screen = NSScreen.screens.first
         else { return ["auto-hidden tab bar click fixture could not show the tab bar"] }
         let point = dragSpace.convert(NSPoint(x: dragSpace.bounds.midX, y: dragSpace.bounds.midY), to: nil)
         let start = panel.convertPoint(toScreen: point)
@@ -255,7 +262,8 @@ enum WorkspaceActivationSmoke {
         var failures: [String] = []
         if !NSApp.isActive {
             failures.append(
-                "a click on the auto-hidden tab bar did not activate WindowDock, so its menu bar did not appear")
+                "a click on the auto-hidden tab bar did not activate WindowDock, so its menu bar did not appear"
+            )
         }
         if !first.window.isKeyWindow {
             failures.append(
@@ -264,10 +272,11 @@ enum WorkspaceActivationSmoke {
         }
         if probe.focusCount == 0 {
             failures.append(
-                "a click on the auto-hidden tab bar's empty area did not hand focus back to the selected window")
+                "a click on the auto-hidden tab bar's empty area did not hand focus back to the selected window"
+            )
         }
         if secondBefore > stackIndex(otherAppWindow),
-            stackIndex(second.window.windowNumber) < stackIndex(otherAppWindow)
+           stackIndex(second.window.windowNumber) < stackIndex(otherAppWindow)
         {
             failures.append("a click on the auto-hidden tab bar raised another workspace above another app")
         }

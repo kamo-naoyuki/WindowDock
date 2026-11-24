@@ -77,8 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startWindowDragMonitoring()
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(frontApplicationChanged(_:)),
-            name: NSWorkspace.didActivateApplicationNotification, object: nil
-        )
+            name: NSWorkspace.didActivateApplicationNotification, object: nil)
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) {
             [weak self] _ in
@@ -116,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.refreshGlobalMonitor()
                 // While the login window / another user is in front, AX queries fail; don't mistake that for closed windows.
                 guard let self, !self.tabTransfer.isActive, !self.sessionInactive,
-                    !Self.isScreenUnavailable, Date() >= self.pruneResumeDate
+                      !Self.isScreenUnavailable, Date() >= self.pruneResumeDate
                 else { return }
                 self.controllers.forEach { $0.session.pruneClosedWindows() }
             }
@@ -133,8 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let checks = workspaces.map { workspace -> NSButton in
             let check = NSButton(
                 checkboxWithTitle: "\(workspace.name) — " + L("%d個のウィンドウ", workspace.windows.count),
-                target: nil, action: nil
-            )
+                target: nil, action: nil)
             check.state = .on
             return check
         }
@@ -183,20 +181,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.presentPicker(
             restoring: workspace.windows,
             excluding: chosen.flatMap { $0.1 },
-            collect: { picked = $0 }
-        ) { [weak self] in
-            guard let self else { return }
-            chosen.append((controller, picked, workspace))
-            if let next = workspaces.dropFirst().first {
-                self.restore(workspaces.dropFirst(), in: self.addWorkspace(name: next.name), chosen: chosen)
-                return
+            collect: { picked = $0 }) { [weak self] in
+                guard let self else { return }
+                chosen.append((controller, picked, workspace))
+                if let next = workspaces.dropFirst().first {
+                    self.restore(workspaces.dropFirst(), in: self.addWorkspace(name: next.name), chosen: chosen)
+                    return
+                }
+                for (controller, candidates, saved) in chosen.reversed() {
+                    controller.restoreLayout(saved)
+                    if !candidates.isEmpty { controller.session.add(candidates) }
+                }
+                chosen.first?.0.present()
             }
-            for (controller, candidates, saved) in chosen.reversed() {
-                controller.restoreLayout(saved)
-                if !candidates.isEmpty { controller.session.add(candidates) }
-            }
-            chosen.first?.0.present()
-        }
     }
 
     // MARK: Menu
@@ -263,8 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for controller in controllers {
             let item = NSMenuItem(
                 title: "\(controller.name) — " + L("%d個のウィンドウ", controller.session.windows.count),
-                action: #selector(showWorkspace(_:)), keyEquivalent: ""
-            )
+                action: #selector(showWorkspace(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = controller
             item.state = controller === active ? .on : .off
@@ -292,8 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for workspace in closed {
             let item = NSMenuItem(
                 title: "\(workspace.name) — " + L("%d個のウィンドウ", workspace.windows.count),
-                action: nil, keyEquivalent: ""
-            )
+                action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             let reopen = NSMenuItem(title: L("開く"), action: #selector(reopenSavedWorkspace(_:)), keyEquivalent: "")
             let delete = NSMenuItem(
@@ -310,7 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func reopenSavedWorkspace(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String,
-            let workspace = SavedLayout.load().first(where: { $0.name == name })
+              let workspace = SavedLayout.load().first(where: { $0.name == name })
         else { return }
         let controller = addWorkspace(name: workspace.name)
         controller.restoreLayout(workspace)
@@ -501,10 +496,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 $0.canHandleShortcut && frontPID.map($0.visiblePIDs.contains) == true
             } ?? controllers.first { $0.canHandleShortcut }
         guard let target,
-            let direction = shortcutContext.direction(
-                for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
-                frontPID: frontPID, visiblePIDs: target.visiblePIDs
-            )
+              let direction = shortcutContext.direction(
+                  for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
+                  frontPID: frontPID, visiblePIDs: target.visiblePIDs)
         else { return false }
         target.cycleTabs(direction)
         return true
@@ -524,8 +518,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitorTrust = trusted
         let mask: NSEvent.EventTypeMask =
             trusted
-            ? [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
-            : [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+                ? [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+                : [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else { return }
             let point = NSEvent.mouseLocation

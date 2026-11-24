@@ -12,8 +12,8 @@ macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a
 
 ## Formatting
 
-Use the official `swift-format` pre-commit hook, pinned in `.pre-commit-config.yaml`.
-The first run builds and caches the formatter (requires a Swift 6+ toolchain locally).
+Use the `nicklockwood/SwiftFormat` pre-commit hook, pinned in `.pre-commit-config.yaml`.
+The first run builds and caches the formatter using the local Swift toolchain.
 Install the commit hook once per clone:
 
 ```sh
@@ -21,14 +21,14 @@ uv tool install pre-commit
 pre-commit install
 ```
 
-On macOS, initializing or updating the hook environment also needs Xcode's XCTest support. If Command Line Tools is selected, run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer pre-commit install-hooks`.
-
-The hook formats staged Swift files using `.swift-format` (4-space indentation, 120-column line length).
+The hook formats staged Swift files using `.swiftformat` (4-space indentation, 120-column line length).
+Only whitespace and layout rules are enabled; code-refactoring rules are intentionally excluded.
 If formatting changes a file, the commit stops: review the changes, stage them, and commit again.
 Unstaged changes are temporarily stashed by `pre-commit`; if they conflict with formatting, the formatting changes are rolled back.
-To format a file manually with the same version as CI, run `pre-commit run swift-format --files <file.swift>`.
-Use `pre-commit run swift-format --all-files` to format all tracked Swift files.
+To format a file manually with the same version as CI, run `pre-commit run swiftformat --files <file.swift>`.
+Use `pre-commit run swiftformat --all-files` to format all tracked Swift files.
 The upstream hook declares `language: swift`, which lets pre-commit.ci load its Swift toolchain and run the formatter; do not replace it with `language: system` or skip it in CI.
+SwiftFormat is used instead of `swiftlang/swift-format` because the latter exceeded pre-commit.ci's 120-second environment-build limit.
 
 ## Fixing bugs
 

@@ -16,7 +16,7 @@ struct WorkspaceShortcutContext {
         if flags.contains(.command), event.keyCode == 48 || event.keyCode == 50 { reset() }
         guard event.keyCode == 48, let frontPID else { return nil }
         guard flags == [.control] || flags == [.control, .shift],
-            frontPID == ownPID || visiblePIDs.contains(frontPID) || frontPID == originPID
+              frontPID == ownPID || visiblePIDs.contains(frontPID) || frontPID == originPID
         else { return nil }
         // AXRaise need not transfer keyboard focus. Keep a shortcut sequence usable until focus or a click changes.
         originPID = frontPID == ownPID ? nil : frontPID
@@ -133,8 +133,13 @@ final class WorkspaceWindowDrop {
         case .moving(let drag):
             let target =
                 isRegularApplication(drag.window.processID)
-                ? self.target(at: point, accessibilityPoint: axPoint, drag: drag, windows: windows, among: controllers)
-                : nil
+                    ? self.target(
+                        at: point,
+                        accessibilityPoint: axPoint,
+                        drag: drag,
+                        windows: windows,
+                        among: controllers)
+                    : nil
             for controller in controllers {
                 if controller === target {
                     controller.showWindowDropTarget(at: point)
@@ -171,8 +176,7 @@ final class WorkspaceWindowDrop {
         }
         guard
             let frontmost = WindowHitTesting.frontmostWindow(
-                at: accessibilityPoint, windows: windows.map { (id: $0.id, frame: $0.frame) }, excluding: excluded
-            )
+                at: accessibilityPoint, windows: windows.map { (id: $0.id, frame: $0.frame) }, excluding: excluded)
         else { return nil }
         guard
             let target = controllers.first(where: {

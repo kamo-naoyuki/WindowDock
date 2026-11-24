@@ -231,8 +231,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
-            defer: false
-        )
+            defer: false)
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
@@ -282,8 +281,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let fixedWidth = count * fixedGroupWidth + spacing
         let widths = WindowGeometry.tabWidths(
             preferredWidths: tabSizing.map { $0.button.intrinsicContentSize.width },
-            available: max(0, availableWidth - fixedWidth)
-        )
+            available: max(0, availableWidth - fixedWidth))
         let targetWidth = min(widths.reduce(0, +) + fixedWidth, availableWidth)
         if abs(maximumTabWidth.constant - targetWidth) > 0.5 {
             maximumTabWidth.constant = targetWidth
@@ -441,7 +439,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     }
 
     private func configureSelector(_ selector: NSPopUpButton, prefix: String) {
-        selector.addItems(withTitles: (1...4).map { "\(prefix)\($0)" })
+        selector.addItems(withTitles: (1 ... 4).map { "\(prefix)\($0)" })
         selector.addItem(withTitle: L("カスタム"))
         selector.lastItem?.isEnabled = false
         selector.menu?.autoenablesItems = false
@@ -562,8 +560,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let frame = toolbarScreenFrame ?? toolbarHostScreenFrame
         let message =
             requiresPermission
-            ? L("追加にはアクセシビリティの許可が必要です")
-            : L("ここで離すとタブに追加")
+                ? L("追加にはアクセシビリティの許可が必要です")
+                : L("ここで離すとタブに追加")
         showDropFeedback(
             frame: frame,
             color: (requiresPermission ? NSColor.systemOrange : .controlAccentColor).withAlphaComponent(0.96),
@@ -612,14 +610,13 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let point = tabs.convert(toolbarWindow.convertPoint(fromScreen: screenPoint), from: nil)
         return WindowGeometry.tabInsertionIndex(
             at: point.x, tabFrames: tabs.arrangedSubviews.map(\.frame),
-            visibleMinX: tabs.visibleRect.minX, visibleMaxX: tabs.visibleRect.maxX
-        )
+            visibleMinX: tabs.visibleRect.minX, visibleMaxX: tabs.visibleRect.maxX)
     }
 
     func tabRowContains(_ screenPoint: NSPoint) -> Bool {
         guard let toolbarWindow = toolbar.window,
-            autoHideTabBar ? autoHiddenToolbarVisible : true,
-            toolbarWindow.frame.contains(screenPoint)
+              autoHideTabBar ? autoHiddenToolbarVisible : true,
+              toolbarWindow.frame.contains(screenPoint)
         else { return false }
         let point = tabScroll.convert(toolbarWindow.convertPoint(fromScreen: screenPoint), from: nil)
         return point.y >= tabScroll.bounds.minY && point.y <= tabScroll.bounds.maxY
@@ -649,14 +646,13 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let barRect = toolbar.bounds
         let stripRect =
             tabs.arrangedSubviews.isEmpty
-            ? toolbar.bounds
-            : toolbar.convert(tabScroll.contentView.bounds, from: tabScroll.contentView)
+                ? toolbar.bounds
+                : toolbar.convert(tabScroll.contentView.bounds, from: tabScroll.contentView)
         let x = WindowGeometry.tabInsertionLineX(
             index: tabInsertionIndex(at: screenPoint),
             tabFrames: tabs.arrangedSubviews.map { toolbar.convert($0.frame, from: tabs) },
             emptyX: toolbar.convert(workspaceButton.bounds, from: workspaceButton).maxX + 6,
-            visibleMinX: stripRect.minX, visibleMaxX: stripRect.maxX, lineWidth: 3
-        )
+            visibleMinX: stripRect.minX, visibleMaxX: stripRect.maxX, lineWidth: 3)
         let markerRect = NSRect(x: x, y: barRect.midY - 14, width: 3, height: 28)
         let frame = toolbarWindow.convertToScreen(toolbar.convert(markerRect, to: nil))
         showDropFeedback(frame: frame, color: color)
@@ -710,7 +706,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton),
-            let destination = sender.draggingDestinationWindow
+              let destination = sender.draggingDestinationWindow
         else { return [] }
         let point = destination.convertPoint(toScreen: sender.draggingLocation)
         _ = updateFloatingTab(
@@ -739,7 +735,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     func beginTabDrag(source: NSButton, token: String, anchor: NSPoint? = nil, previewImage: NSImage? = nil) {
         endTabDrag()
         guard let group = source.superview as? WorkspaceTabGroup,
-            let index = tabs.arrangedSubviews.firstIndex(of: group)
+              let index = tabs.arrangedSubviews.firstIndex(of: group)
         else { return }
         let frame = group.frame
         dragSource = source
@@ -778,8 +774,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         if let group = dragGroup, let placeholder = dragPlaceholder {
             let originalIndex =
                 dragInitialOrder?.firstIndex(of: dragSource?.tag ?? -1)
-                ?? tabs.arrangedSubviews.firstIndex(of: placeholder)
-                ?? tabs.arrangedSubviews.count - 1
+                    ?? tabs.arrangedSubviews.firstIndex(of: placeholder)
+                    ?? tabs.arrangedSubviews.count - 1
             let index = max(0, min(destination ?? originalIndex, tabs.arrangedSubviews.count - 1))
             tabs.removeArrangedSubview(placeholder)
             placeholder.removeFromSuperview()
@@ -835,7 +831,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     @discardableResult
     func updateFloatingTab(pasteboard: NSPasteboard, source: NSButton?, screenPoint: NSPoint) -> Bool {
         if let token = pasteboard.string(forType: workspaceTabDragType),
-            acceptsExternalTab?(token, source) == true
+           acceptsExternalTab?(token, source) == true
         {
             (source as? WorkspaceTabButton)?.chrome?.showDetachedTab(at: screenPoint)
             highlightPane(paneDropIndex(at: screenPoint))
@@ -843,7 +839,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             return true
         }
         guard acceptsTabDrag(pasteboard: pasteboard, source: source),
-            let window, let dragGroup
+              let window, let dragGroup
         else { return false }
         let pointInWindow = window.convertPoint(fromScreen: screenPoint)
         highlightPane(paneDropIndex(at: screenPoint))
@@ -860,17 +856,17 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         frame.origin.x = pointInTabs.x - dragAnchorX
         dragGroup.frame = frame
         guard let placeholder = dragPlaceholder,
-            var index = tabs.arrangedSubviews.firstIndex(of: placeholder)
+              var index = tabs.arrangedSubviews.firstIndex(of: placeholder)
         else { return true }
         let center = frame.midX
         while index + 1 < tabs.arrangedSubviews.count,
-            center > tabs.arrangedSubviews[index + 1].frame.midX
+              center > tabs.arrangedSubviews[index + 1].frame.midX
         {
             index += 1
             moveDragPlaceholder(placeholder, to: index)
         }
         while index > 0,
-            center < tabs.arrangedSubviews[index - 1].frame.midX
+              center < tabs.arrangedSubviews[index - 1].frame.midX
         {
             index -= 1
             moveDragPlaceholder(placeholder, to: index)
@@ -923,8 +919,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         tabDragPreviewPanel?.setFrameOrigin(
             NSPoint(
                 x: screenPoint.x - dragAnchorInGroup.x,
-                y: screenPoint.y - dragAnchorInGroup.y
-            ))
+                y: screenPoint.y - dragAnchorInGroup.y))
         tabDragPreviewPanel?.orderFront(nil)
     }
 
@@ -932,8 +927,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         guard !isPaneTabDrag, let group = dragGroup, let placeholder = dragPlaceholder else { return }
         let index =
             dragInitialOrder?.firstIndex(of: dragSource?.tag ?? -1)
-            ?? tabs.arrangedSubviews.firstIndex(of: placeholder)
-            ?? tabs.arrangedSubviews.count - 1
+                ?? tabs.arrangedSubviews.firstIndex(of: placeholder)
+                ?? tabs.arrangedSubviews.count - 1
         tabs.removeArrangedSubview(placeholder)
         placeholder.removeFromSuperview()
         group.translatesAutoresizingMaskIntoConstraints = false
@@ -948,7 +943,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
 
     private func enterTabReorderMode() {
         guard isPaneTabDrag, let group = dragGroup,
-            let index = tabs.arrangedSubviews.firstIndex(of: group)
+              let index = tabs.arrangedSubviews.firstIndex(of: group)
         else { return }
         let frame = group.frame
         let placeholder = NSView(frame: frame)
@@ -979,14 +974,14 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     @discardableResult
     func performTabReorder(pasteboard: NSPasteboard, source: NSButton?, screenPoint: NSPoint) -> Bool {
         if let token = pasteboard.string(forType: workspaceTabDragType),
-            acceptsExternalTab?(token, source) == true
+           acceptsExternalTab?(token, source) == true
         {
             let index = tabInsertionIndex(at: screenPoint)
             hideExternalTabTargets()
             return onExternalTabDrop?(token, source, index, nil) == true
         }
         guard acceptsTabDrag(pasteboard: pasteboard, source: source),
-            let dragSource
+              let dragSource
         else { return false }
         _ = updateFloatingTab(pasteboard: pasteboard, source: source, screenPoint: screenPoint)
         let order = orderedTabTags()
@@ -1000,13 +995,13 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     @discardableResult
     func performTabDrop(pasteboard: NSPasteboard, source: NSButton?, cell: Int) -> Bool {
         if let token = pasteboard.string(forType: workspaceTabDragType),
-            acceptsExternalTab?(token, source) == true, gridAreas.indices.contains(cell)
+           acceptsExternalTab?(token, source) == true, gridAreas.indices.contains(cell)
         {
             hideExternalTabTargets()
             return onExternalTabDrop?(token, source, nil, cell) == true
         }
         guard acceptsTabDrag(pasteboard: pasteboard, source: source),
-            gridAreas.indices.contains(cell), let dragSource
+              gridAreas.indices.contains(cell), let dragSource
         else { return false }
         let tag = dragSource.tag
         let order = orderedTabTags()
@@ -1042,12 +1037,12 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         menu.addItem(.separator())
         let count = tabs.arrangedSubviews.count
         let own = IndexSet(integer: button.tag)
-        let all = IndexSet(integersIn: 0..<count)
+        let all = IndexSet(integersIn: 0 ..< count)
         let releases: [(String, IndexSet)] = [
             ("タブを解除", all.intersection(own)),
             ("他のタブをすべて解除", all.subtracting(own)),
-            ("右側のタブを解除", IndexSet(integersIn: min(button.tag + 1, count)..<count)),
-            ("左側のタブを解除", IndexSet(integersIn: 0..<min(button.tag, count))),
+            ("右側のタブを解除", IndexSet(integersIn: min(button.tag + 1, count) ..< count)),
+            ("左側のタブを解除", IndexSet(integersIn: 0 ..< min(button.tag, count))),
             ("すべてのタブを解除", all),
         ]
         for (title, indexes) in releases {
@@ -1075,7 +1070,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
 
     @objc private func moveTabFromMenu(_ item: NSMenuItem) {
         guard let button = (item.representedObject as? WorkspaceTabMoveItem)?.button,
-            gridAreas.indices.contains(item.tag)
+              gridAreas.indices.contains(item.tag)
         else { return }
         onMoveTab?(button.tag, item.tag)
     }
@@ -1177,12 +1172,12 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         group.layer?.borderWidth = tabSwitchTarget ? 2 : (displayed ? 1 : 0)
         group.layer?.borderColor =
             (pinned ? NSColor.systemOrange : NSColor.controlAccentColor)
-            .withAlphaComponent(tabSwitchTarget ? 0.9 : 0.6).cgColor
+                .withAlphaComponent(tabSwitchTarget ? 0.9 : 0.6).cgColor
         group.layer?.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         group.layer?.backgroundColor =
             (selected
-            ? NSColor.controlBackgroundColor
-            : NSColor.unemphasizedSelectedContentBackgroundColor.withAlphaComponent(0.35)).cgColor
+                ? NSColor.controlBackgroundColor
+                : NSColor.unemphasizedSelectedContentBackgroundColor.withAlphaComponent(0.35)).cgColor
         let selectWidth = select.widthAnchor.constraint(equalToConstant: 200)
         tabSizing.append((select, selectWidth))
         NSLayoutConstraint.activate([

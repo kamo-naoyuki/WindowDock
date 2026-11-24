@@ -74,8 +74,7 @@ enum TabLayoutSmoke {
         app.setActivationPolicy(.accessory)
         let host = WorkspaceWindow(
             contentRect: NSRect(x: 100, y: 100, width: 1120, height: 760),
-            styleMask: [.borderless, .resizable], backing: .buffered, defer: false
-        )
+            styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
         host.isReleasedWhenClosed = false
         let chrome = WorkspaceChromeView(frame: .zero)
         host.contentView = chrome
@@ -83,7 +82,7 @@ enum TabLayoutSmoke {
         var failures: [String] = []
 
         func settle() {
-            for _ in 0..<4 {
+            for _ in 0 ..< 4 {
                 chrome.layoutSubtreeIfNeeded()
                 RunLoop.current.run(until: Date().addingTimeInterval(0.02))
             }
@@ -131,7 +130,7 @@ enum TabLayoutSmoke {
         {
             failures.append("short tabs did not fit their text/icon content independently of long titles")
         }
-        for _ in 0..<5 {
+        for _ in 0 ..< 5 {
             chrome.appendTab(title: String(repeating: "Another long window ", count: 4), selected: false)
         }
         checkVisible("mixed title lengths when crowded")
@@ -143,7 +142,7 @@ enum TabLayoutSmoke {
         let single = chrome.appendTab(title: "First application window", selected: true)
         checkVisible("first tab after empty layout")
         let singleWidth = single.select.bounds.width
-        for index in 1..<7 {
+        for index in 1 ..< 7 {
             chrome.appendTab(title: "Application \(index)", selected: false)
         }
         checkVisible("seven tabs")
@@ -167,7 +166,7 @@ enum TabLayoutSmoke {
         if single.select.bounds.width > wideWidth + 0.5 {
             failures.append("tabs grew when the window narrowed")
         }
-        for index in 7..<20 {
+        for index in 7 ..< 20 {
             chrome.appendTab(title: "Application \(index)", selected: false)
         }
         checkVisible("twenty tabs")
@@ -240,8 +239,7 @@ enum TabLayoutSmoke {
             || chrome.autoHiddenToolbarPanel?.frame.height != 34
         {
             failures.append(
-                "auto-hidden toolbar panel did not cover the workspace's top edge: \(String(describing: chrome.autoHiddenToolbarPanel?.frame)) host=\(host.frame)"
-            )
+                "auto-hidden toolbar panel did not cover the workspace's top edge: \(String(describing: chrome.autoHiddenToolbarPanel?.frame)) host=\(host.frame)")
         }
         chrome.setAutoHideTabBar(false)
         settle()
@@ -255,7 +253,7 @@ enum TabLayoutSmoke {
         chrome.appendTab(title: "First application window", selected: true)
         checkVisible("first tab after clear")
         if let tab = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?.arrangedSubviews.first,
-            tab.bounds.width <= wideWidth
+           tab.bounds.width <= wideWidth
         {
             failures.append("tab did not expand again after removing other tabs")
         }
@@ -335,8 +333,7 @@ enum TabLayoutSmoke {
                 let point = chrome.convert(localPoint, from: area)
                 let color = bitmap.colorAt(
                     x: Int(point.x * CGFloat(bitmap.pixelsWide) / chrome.bounds.width),
-                    y: Int((chrome.bounds.height - point.y) * CGFloat(bitmap.pixelsHigh) / chrome.bounds.height)
-                )
+                    y: Int((chrome.bounds.height - point.y) * CGFloat(bitmap.pixelsHigh) / chrome.bounds.height))
                 if let alpha = color?.alphaComponent {
                     if transparent ? alpha > 0.01 : alpha < 0.99 {
                         failures.append("moving pane blanked safe overlap or exposed its uncovered edge")
@@ -359,7 +356,7 @@ enum TabLayoutSmoke {
         probe.contentArea = probeArea
         probe.revealsWindow = true
         var preparedChanges = 0
-        for iteration in 0..<30 {
+        for iteration in 0 ..< 30 {
             let oldFrame = probeHost.frame
             let nextFrame = oldFrame.offsetBy(dx: iteration.isMultiple(of: 2) ? 100 : -100, dy: 15)
             probe.coveredScreenRect = probeHost.convertToScreen(probeArea.frame)
@@ -379,8 +376,7 @@ enum TabLayoutSmoke {
                 let y = probeArea.frame.midY
                 let color = bitmap.colorAt(
                     x: Int(x * CGFloat(bitmap.pixelsWide) / probe.bounds.width),
-                    y: Int((probe.bounds.height - y) * CGFloat(bitmap.pixelsHigh) / probe.bounds.height)
-                )
+                    y: Int((probe.bounds.height - y) * CGFloat(bitmap.pixelsHigh) / probe.bounds.height))
                 if (color?.alphaComponent ?? 0) < 0.99 {
                     failures.append("fast native move left its exposed edge transparent before moving")
                 }
@@ -402,8 +398,7 @@ enum TabLayoutSmoke {
         let titleHost = WorkspaceWindow(
             contentRect: NSRect(x: 150, y: 150, width: 500, height: 400),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered, defer: false
-        )
+            backing: .buffered, defer: false)
         titleHost.isReleasedWhenClosed = false
         titleHost.isMovable = false
         titleHost.titlebarAppearsTransparent = true
@@ -415,11 +410,10 @@ enum TabLayoutSmoke {
         let pressPoint = NSPoint(x: 250, y: titleHost.contentLayoutRect.maxY + 8)
         let pressScreen = titleHost.convertPoint(toScreen: pressPoint)
         if let screen = NSScreen.screens.first,
-            let down = NSEvent.mouseEvent(
-                with: .leftMouseDown, location: pressPoint, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: titleHost.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1
-            )
+           let down = NSEvent.mouseEvent(
+               with: .leftMouseDown, location: pressPoint, modifierFlags: [],
+               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: titleHost.windowNumber,
+               context: nil, eventNumber: 1, clickCount: 1, pressure: 1)
         {
             var queuedEvents: [NSEvent] = []
             for (offset, type) in [
@@ -430,8 +424,8 @@ enum TabLayoutSmoke {
             ] {
                 let screenPoint = CGPoint(x: pressScreen.x + offset, y: screen.frame.maxY - pressScreen.y)
                 if let cgEvent = CGEvent(
-                    mouseEventSource: nil, mouseType: type,
-                    mouseCursorPosition: screenPoint, mouseButton: .left),
+                       mouseEventSource: nil, mouseType: type,
+                       mouseCursorPosition: screenPoint, mouseButton: .left),
                     let event = NSEvent(cgEvent: cgEvent)
                 {
                     queuedEvents.append(event)
@@ -452,14 +446,12 @@ enum TabLayoutSmoke {
         }
         let control = TitlebarControlProbe(
             frame: NSRect(
-                x: 320, y: titleHost.contentLayoutRect.maxY + 1, width: 100, height: 20
-            ))
+                x: 320, y: titleHost.contentLayoutRect.maxY + 1, width: 100, height: 20))
         titleProbe.addSubview(control)
         if let event = NSEvent.mouseEvent(
             with: .leftMouseDown, location: NSPoint(x: control.frame.midX, y: control.frame.midY),
             modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: titleHost.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 1
-        ) {
+            windowNumber: titleHost.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 1) {
             titleHost.sendEvent(event)
             if control.mouseDownCount != 1 || titleProbe.finishedChanges != 3 {
                 failures.append(
@@ -475,19 +467,18 @@ enum TabLayoutSmoke {
         func dragTitleHost(from point: NSPoint, by delta: NSSize) -> NSRect? {
             resizeEventNumber += 1
             guard let screen = NSScreen.screens.first,
-                let down = NSEvent.mouseEvent(
-                    with: .leftMouseDown, location: point, modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: titleHost.windowNumber,
-                    context: nil, eventNumber: resizeEventNumber, clickCount: 1, pressure: 1
-                )
+                  let down = NSEvent.mouseEvent(
+                      with: .leftMouseDown, location: point, modifierFlags: [],
+                      timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: titleHost.windowNumber,
+                      context: nil, eventNumber: resizeEventNumber, clickCount: 1, pressure: 1)
             else { return nil }
             let start = titleHost.convertPoint(toScreen: point)
             var queued: [NSEvent] = []
             for type in [CGEventType.leftMouseDragged, .leftMouseUp] {
                 let location = CGPoint(x: start.x + delta.width, y: screen.frame.maxY - (start.y + delta.height))
                 if let cgEvent = CGEvent(
-                    mouseEventSource: nil, mouseType: type,
-                    mouseCursorPosition: location, mouseButton: .left),
+                       mouseEventSource: nil, mouseType: type,
+                       mouseCursorPosition: location, mouseButton: .left),
                     let event = NSEvent(cgEvent: cgEvent)
                 {
                     queued.append(event)
@@ -530,13 +521,11 @@ enum TabLayoutSmoke {
         if let event = NSEvent.mouseEvent(
             with: .leftMouseDown, location: NSPoint(x: titleProbe.bounds.midX, y: titleProbe.bounds.midY),
             modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: titleHost.windowNumber, context: nil, eventNumber: 30, clickCount: 1, pressure: 1
-        ) {
+            windowNumber: titleHost.windowNumber, context: nil, eventNumber: 30, clickCount: 1, pressure: 1) {
             titleHost.sendEvent(event)
             if paneCell.mouseDownCount != 1 || titleHost.frame != beforeCenterClick {
                 failures.append(
-                    "a click inside a pane was taken by workspace resizing: clicks=\(paneCell.mouseDownCount) \(beforeCenterClick) -> \(titleHost.frame)"
-                )
+                    "a click inside a pane was taken by workspace resizing: clicks=\(paneCell.mouseDownCount) \(beforeCenterClick) -> \(titleHost.frame)")
             }
         }
         titleHost.close()
@@ -546,7 +535,7 @@ enum TabLayoutSmoke {
         otherHost.isReleasedWhenClosed = false
         let otherChrome = WorkspaceChromeView(frame: .zero)
         otherHost.contentView = otherChrome
-        for index in 0..<3 {
+        for index in 0 ..< 3 {
             let tab = otherChrome.appendTab(title: "Destination \(index)", selected: index == 0)
             tab.select.tag = index
         }
@@ -607,7 +596,7 @@ enum TabLayoutSmoke {
         _ = destinationButton.draggingUpdated(tabInfo)
         if otherChrome.windowDropPanel?.frame != tabMarkerFrame
             || otherChrome.windowDropPanel?.contentView?.subviews.contains(where: { !$0.isHidden && $0 is NSTextField })
-                == true
+            == true
         {
             failures.append("switching from window addition to tab transfer retained a wide bar or visible label")
         }
@@ -663,8 +652,7 @@ enum TabLayoutSmoke {
         received = nil
         let emptyInfo = TabLayoutDragInfo(
             board: board, source: source, window: otherHost,
-            location: NSPoint(x: 150, y: otherChrome.bounds.maxY - 16)
-        )
+            location: NSPoint(x: 150, y: otherChrome.bounds.maxY - 16))
         if otherChrome.draggingEntered(emptyInfo) != .move || !otherChrome.performDragOperation(emptyInfo)
             || received?.1 != 0 || received?.2 != nil
         {
@@ -709,9 +697,10 @@ enum TabLayoutSmoke {
                 (destination, CGEventType.leftMouseDragged),
             ] {
                 if let cg = CGEvent(
-                    mouseEventSource: nil, mouseType: type,
-                    mouseCursorPosition: CGPoint(x: point.x, y: screen.frame.maxY - point.y), mouseButton: .left
-                ), let event = NSEvent(cgEvent: cg) {
+                       mouseEventSource: nil, mouseType: type,
+                       mouseCursorPosition: CGPoint(x: point.x, y: screen.frame.maxY - point.y), mouseButton: .left),
+                    let event = NSEvent(
+                        cgEvent: cg) {
                     events.append(event)
                 }
             }
@@ -721,21 +710,18 @@ enum TabLayoutSmoke {
                     with: .keyDown, location: .zero, modifierFlags: [],
                     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: host.windowNumber,
                     context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
-                    isARepeat: false, keyCode: 53
-                )
+                    isARepeat: false, keyCode: 53)
             } else {
                 completion = CGEvent(
                     mouseEventSource: nil, mouseType: .leftMouseUp,
                     mouseCursorPosition: CGPoint(x: destination.x, y: screen.frame.maxY - destination.y),
-                    mouseButton: .left
-                ).flatMap { NSEvent(cgEvent: $0) }
+                    mouseButton: .left).flatMap { NSEvent(cgEvent: $0) }
             }
             guard events.count == 2, let completion,
-                let down = NSEvent.mouseEvent(
-                    with: .leftMouseDown, location: press, modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: host.windowNumber,
-                    context: nil, eventNumber: 3, clickCount: 1, pressure: 1
-                )
+                  let down = NSEvent.mouseEvent(
+                      with: .leftMouseDown, location: press, modifierFlags: [],
+                      timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: host.windowNumber,
+                      context: nil, eventNumber: 3, clickCount: 1, pressure: 1)
             else {
                 failures.append("could not create tab mouse tracking events")
                 return
@@ -767,8 +753,7 @@ enum TabLayoutSmoke {
         let neighbor = chrome.tabs.arrangedSubviews[1]
         let neighborPoint = host.convertPoint(
             toScreen: neighbor.convert(
-                NSPoint(x: neighbor.bounds.maxX - 5, y: neighbor.bounds.midY), to: nil
-            ))
+                NSPoint(x: neighbor.bounds.maxX - 5, y: neighbor.bounds.midY), to: nil))
         replayTabDrag(to: neighborPoint, escape: false)
         if committedOrder != [1, 0] {
             failures.append("application-controlled mouse tracking no longer committed local tab reordering")
@@ -781,8 +766,7 @@ enum TabLayoutSmoke {
         replayTabDrag(
             to: host.convertPoint(
                 toScreen: ownPane.convert(
-                    NSPoint(x: ownPane.bounds.midX, y: ownPane.bounds.midY), to: nil
-                )), escape: false)
+                    NSPoint(x: ownPane.bounds.midX, y: ownPane.bounds.midY), to: nil)), escape: false)
         if movedCell != 0 {
             failures.append("application-controlled mouse tracking no longer committed local pane moves")
         }
@@ -804,12 +788,11 @@ enum TabLayoutSmoke {
         let onlyPane = chrome.gridAreas[0]
         let onlyPaneY = onlyPane.convert(NSPoint(x: 0, y: onlyPane.bounds.midY), to: nil).y
         replayTabDrag(to: host.convertPoint(toScreen: NSPoint(x: destinationX, y: onlyPaneY)), escape: false)
-        var expectedOrder = Array(0..<tabViews.count)
+        var expectedOrder = Array(0 ..< tabViews.count)
         expectedOrder.swapAt(sourceIndex, neighborIndex)
         if movedCell != nil || committedOrder != expectedOrder {
             failures.append(
-                "releasing a tab over the only pane did not reorder it like the tab bar: moved=\(String(describing: movedCell)) order=\(String(describing: committedOrder)) expected=\(expectedOrder) tag=\(source.tag)"
-            )
+                "releasing a tab over the only pane did not reorder it like the tab bar: moved=\(String(describing: movedCell)) order=\(String(describing: committedOrder)) expected=\(expectedOrder) tag=\(source.tag)")
         }
         // Another app activated during the drag may receive its mouse-up; tracking must end once the button is up.
         let completionsBeforeLostRelease = mouseCompletions.count
@@ -821,9 +804,8 @@ enum TabLayoutSmoke {
             trackingHung = true
             let point = CGPoint(x: outside.x, y: screen.frame.maxY - outside.y)
             if let up = CGEvent(
-                mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left
-            )
-            .flatMap({ NSEvent(cgEvent: $0) }) {
+                mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+                .flatMap({ NSEvent(cgEvent: $0) }) {
                 NSApp.postEvent(up, atStart: false)
             }
         }

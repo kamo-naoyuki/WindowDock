@@ -20,7 +20,8 @@ final class WorkspaceTabDragRouteTests: XCTestCase {
         XCTAssertEqual(route(CGPoint(x: 700, y: 590), inSourceTabRow: true, destinations: [overlapping]), .source)
         // A workspace in front covers that part of the tab row.
         XCTAssertEqual(
-            route(CGPoint(x: 700, y: 590), inSourceTabRow: true, destinations: [overlapping], inFront: 1), .transfer(0))
+            route(CGPoint(x: 700, y: 590), inSourceTabRow: true, destinations: [overlapping], inFront: 1), .transfer(0)
+        )
     }
 
     func testFrontmostWorkspaceReceivesTabWhereWorkspacesOverlap() {

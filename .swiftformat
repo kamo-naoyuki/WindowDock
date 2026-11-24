@@ -1,0 +1,7 @@
+--swiftversion 5.10
+--indent 4
+--maxwidth 120
+--linebreaks lf
+
+# Formatting only; do not enable code-refactoring rules.
+--rules indent,linebreaks,spaceAroundOperators,trailingSpace,linebreakAtEndOfFile,wrap

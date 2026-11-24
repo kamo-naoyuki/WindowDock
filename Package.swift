@@ -9,7 +9,8 @@ let package = Package(
     targets: [
         .target(name: "WindowDockCore"),
         .executableTarget(
-            name: "WindowDock", dependencies: ["WindowDockCore", .product(name: "Sparkle", package: "Sparkle")]),
+            name: "WindowDock", dependencies: ["WindowDockCore", .product(name: "Sparkle", package: "Sparkle")]
+        ),
         .testTarget(name: "WindowDockCoreTests", dependencies: ["WindowDockCore"]),
     ]
 )

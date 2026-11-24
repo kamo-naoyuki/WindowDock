@@ -35,9 +35,11 @@ final class WindowGeometryTests: XCTestCase {
 
     func testTabInsertionIndexIgnoresTabsScrolledOutOfView() {
         XCTAssertEqual(
-            WindowGeometry.tabInsertionIndex(at: -500, tabFrames: insertionTabs, visibleMinX: 102, visibleMaxX: 250), 1)
+            WindowGeometry.tabInsertionIndex(at: -500, tabFrames: insertionTabs, visibleMinX: 102, visibleMaxX: 250), 1
+        )
         XCTAssertEqual(
-            WindowGeometry.tabInsertionIndex(at: 1000, tabFrames: insertionTabs, visibleMinX: 102, visibleMaxX: 250), 2)
+            WindowGeometry.tabInsertionIndex(at: 1000, tabFrames: insertionTabs, visibleMinX: 102, visibleMaxX: 250), 2
+        )
     }
 
     func testTabInsertionLineMatchesInsertionIndexAndStaysVisible() {
@@ -60,7 +62,8 @@ final class WindowGeometryTests: XCTestCase {
         XCTAssertEqual(WindowGeometry.workspaceTabDropTarget(at: point, orderedFrames: [front, back]), 0)
         XCTAssertEqual(WindowGeometry.workspaceTabDropTarget(at: point, orderedFrames: [back, front]), 0)
         XCTAssertEqual(
-            WindowGeometry.workspaceTabDropTarget(at: CGPoint(x: 150, y: 200), orderedFrames: [front, back]), 1)
+            WindowGeometry.workspaceTabDropTarget(at: CGPoint(x: 150, y: 200), orderedFrames: [front, back]), 1
+        )
     }
 
     func testTabDropAcceptsNearbyWorkspaceButNotDistantWorkspace() {
@@ -73,7 +76,8 @@ final class WindowGeometryTests: XCTestCase {
         XCTAssertNil(WindowGeometry.workspaceTabDropTarget(at: CGPoint(x: 300, y: 200), orderedFrames: []))
         let covering = CGRect(x: 0, y: 100, width: 90, height: 400)
         XCTAssertEqual(
-            WindowGeometry.workspaceTabDropTarget(at: CGPoint(x: 80, y: 200), orderedFrames: [frame, covering]), 1)
+            WindowGeometry.workspaceTabDropTarget(at: CGPoint(x: 80, y: 200), orderedFrames: [frame, covering]), 1
+        )
     }
 
     func testConvertsPrimaryDisplayCoordinates() {
@@ -138,7 +142,8 @@ final class WindowGeometryTests: XCTestCase {
         XCTAssertEqual(WindowGeometry.confirmedCoverage(for: reported, renderedFrames: [reported]), reported)
         XCTAssertNil(WindowGeometry.confirmedCoverage(for: reported, renderedFrames: []))
         XCTAssertNil(
-            WindowGeometry.confirmedCoverage(for: reported, renderedFrames: [reported.offsetBy(dx: 600, dy: 0)]))
+            WindowGeometry.confirmedCoverage(for: reported, renderedFrames: [reported.offsetBy(dx: 600, dy: 0)])
+        )
     }
 
     func testTrackMinimumsTakeMaxPerColumnAndRow() {
@@ -147,7 +152,8 @@ final class WindowGeometryTests: XCTestCase {
                 0: CGSize(width: 300, height: 100), 1: CGSize(width: 200, height: 250),
                 2: CGSize(width: 400, height: 50),
             ],
-            columns: 2, rows: 2)
+            columns: 2, rows: 2
+        )
         XCTAssertEqual(result?.columns, [400, 200])
         XCTAssertEqual(result?.rows, [250, 50])
     }
@@ -157,6 +163,7 @@ final class WindowGeometryTests: XCTestCase {
         XCTAssertEqual(ignored?.columns, [0, 0])
         XCTAssertNil(WindowGeometry.trackMinimums([0: CGSize(width: -1, height: 10)], columns: 1, rows: 1))
         XCTAssertNil(
-            WindowGeometry.trackMinimums([0: CGSize(width: CGFloat.infinity, height: 10)], columns: 1, rows: 1))
+            WindowGeometry.trackMinimums([0: CGSize(width: CGFloat.infinity, height: 10)], columns: 1, rows: 1)
+        )
     }
 }

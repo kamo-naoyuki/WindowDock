@@ -88,7 +88,7 @@ final class WorkspaceActivation {
             MainActor.assumeIsolated {
                 guard let self, let active = active ?? self.activeController else { return }
                 for controller in self.controllers()
-                where controller !== active && controller.window.isVisible && !controller.window.isMiniaturized {
+                    where controller !== active && controller.window.isVisible && !controller.window.isMiniaturized {
                     controller.window.orderBack(nil)
                 }
             }

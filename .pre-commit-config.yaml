@@ -1,6 +1,6 @@
 repos:
-  - repo: https://github.com/swiftlang/swift-format
-    rev: 604.0.0
+  - repo: https://github.com/nicklockwood/SwiftFormat
+    rev: 0.64.7
     hooks:
-      - id: swift-format
+      - id: swiftformat
         name: Format Swift sources

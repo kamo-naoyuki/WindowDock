@@ -11,7 +11,7 @@ final class WorkspaceWindow: NSWindow {
 
     override func sendEvent(_ event: NSEvent) {
         if !isMovable, event.type == .leftMouseDown,
-            let workspace = contentView as? WorkspaceBackgroundView
+           let workspace = contentView as? WorkspaceBackgroundView
         {
             let point = workspace.convert(event.locationInWindow, from: nil)
             let inTitlebar = event.locationInWindow.y >= contentLayoutRect.maxY
@@ -46,7 +46,7 @@ final class WorkspaceWindow: NSWindow {
 
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
         guard !preparingFrameChange, !isApplyingWorkspaceFrame,
-            frameRect != frame, let workspace = contentView as? WorkspaceBackgroundView
+              frameRect != frame, let workspace = contentView as? WorkspaceBackgroundView
         else {
             super.setFrame(frameRect, display: flag)
             return
@@ -62,7 +62,7 @@ final class WorkspaceWindow: NSWindow {
 
     override func setFrameOrigin(_ point: NSPoint) {
         guard !preparingFrameChange, !isApplyingWorkspaceFrame,
-            point != frame.origin, let workspace = contentView as? WorkspaceBackgroundView
+              point != frame.origin, let workspace = contentView as? WorkspaceBackgroundView
         else {
             super.setFrameOrigin(point)
             return
@@ -115,8 +115,8 @@ class WorkspaceBackgroundView: NSView {
         guard revealsWindow, let window else { return [] }
         let pairs: [(NSView?, NSRect?)] =
             gridContentAreas.isEmpty
-            ? [(contentArea, coveredScreenRect), (secondaryContentArea, secondaryCoveredScreenRect)]
-            : gridContentAreas.enumerated().map { ($0.element, gridCoveredScreenRects[$0.offset]) }
+                ? [(contentArea, coveredScreenRect), (secondaryContentArea, secondaryCoveredScreenRect)]
+                : gridContentAreas.enumerated().map { ($0.element, gridCoveredScreenRects[$0.offset]) }
         let candidates = pairs.flatMap { area, coverage -> [NSRect] in
             guard let area, let coverage else { return [] }
             let contentRect = convert(area.bounds, from: area)
@@ -161,12 +161,13 @@ class WorkspaceBackgroundView: NSView {
         let startMouse = window.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
         trackFrameChange(
             with: event, edges: resizeEdges(at: convert(event.locationInWindow, from: nil)),
-            startMouse: startMouse)
+            startMouse: startMouse
+        )
     }
 
     func trackFrameChangeFromToolbar(with event: NSEvent) {
         guard window is WorkspaceWindow,
-            let eventWindow = event.window
+              let eventWindow = event.window
         else { return }
         let startMouse = eventWindow.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
         trackFrameChange(with: event, edges: [], startMouse: startMouse)
@@ -188,7 +189,7 @@ class WorkspaceBackgroundView: NSView {
         ) {
             var mouse = NSEvent.mouseLocation
             if let location = next.cgEvent?.location,
-                let primaryScreen = NSScreen.screens.first
+               let primaryScreen = NSScreen.screens.first
             {
                 mouse = NSPoint(x: location.x, y: primaryScreen.frame.maxY - location.y)
             }
@@ -240,7 +241,8 @@ class WorkspaceBackgroundView: NSView {
                 visible.offsetBy(
                     dx: window.frame.minX - frame.minX,
                     dy: window.frame.minY - frame.minY
-                ))
+                )
+            )
         }
         refreshCoverage()
     }

@@ -51,14 +51,14 @@ enum WindowAccess {
         let position = try value(element, kAXPositionAttribute)
         let size = try value(element, kAXSizeAttribute)
         guard CFGetTypeID(position) == AXValueGetTypeID(),
-            CFGetTypeID(size) == AXValueGetTypeID()
+              CFGetTypeID(size) == AXValueGetTypeID()
         else {
             throw WindowAccessError(operation: L("ウィンドウ位置の取得"), code: .illegalArgument)
         }
         var point = CGPoint.zero
         var dimensions = CGSize.zero
         guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
-            AXValueGetValue(size as! AXValue, .cgSize, &dimensions)
+              AXValueGetValue(size as! AXValue, .cgSize, &dimensions)
         else {
             throw WindowAccessError(operation: L("ウィンドウ位置の変換"), code: .illegalArgument)
         }
@@ -149,8 +149,8 @@ enum WindowAccess {
     // These Process Manager functions still ship in ApplicationServices but are unavailable to Swift.
     private static let processManager: (GetProcessForPIDFunction, SetFrontProcessWithOptionsFunction)? = {
         guard let handle = dlopen(nil, RTLD_LAZY),
-            let getProcess = dlsym(handle, "GetProcessForPID"),
-            let setFront = dlsym(handle, "SetFrontProcessWithOptions")
+              let getProcess = dlsym(handle, "GetProcessForPID"),
+              let setFront = dlsym(handle, "SetFrontProcessWithOptions")
         else { return nil }
         return (
             unsafeBitCast(getProcess, to: GetProcessForPIDFunction.self),
@@ -229,19 +229,18 @@ extension WindowAccess {
     static func windowServerWindows() throws -> [WindowServerWindow] {
         guard
             let entries = CGWindowListCopyWindowInfo(
-                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-            ) as? [[String: Any]]
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         else {
             throw WindowAccessError(operation: L("移動中ウィンドウの検出"), code: .cannotComplete)
         }
         return entries.compactMap { entry in
             guard let layer = entry[kCGWindowLayer as String] as? Int,
-                (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
-                let id = entry[kCGWindowNumber as String] as? CGWindowID,
-                let pid = entry[kCGWindowOwnerPID as String] as? pid_t,
-                let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
-                let frame = CGRect(dictionaryRepresentation: bounds),
-                !frame.isEmpty, !frame.isInfinite
+                  (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let id = entry[kCGWindowNumber as String] as? CGWindowID,
+                  let pid = entry[kCGWindowOwnerPID as String] as? pid_t,
+                  let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds),
+                  !frame.isEmpty, !frame.isInfinite
             else { return nil }
             return WindowServerWindow(id: id, processID: pid, frame: frame, layer: layer)
         }
@@ -258,7 +257,7 @@ extension WindowAccess {
         }
         // Frames can lag behind the WindowServer, and same-sized windows of one app can share a frame.
         if let identified = windows.first(where: { windowID(of: $0) == moved.id }),
-            let candidate = try? candidate(identified, application: app)
+           let candidate = try? candidate(identified, application: app)
         {
             return candidate
         }
@@ -267,8 +266,8 @@ extension WindowAccess {
         for window in windows {
             do {
                 guard let candidate = try candidate(window, application: app),
-                    try !isMinimized(window),
-                    WindowGeometry.fits(try frame(window), requested: moved.frame)
+                      try !isMinimized(window),
+                      WindowGeometry.fits(try frame(window), requested: moved.frame)
                 else { continue }
                 matches.append(candidate)
             } catch let error as WindowAccessError {
@@ -290,8 +289,8 @@ extension WindowAccess {
         let error = AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
         let currentTitle =
             error == .success || error == .noValue || error == .attributeUnsupported
-            ? title as? String ?? ""
-            : nil
+                ? title as? String ?? ""
+                : nil
         return WindowProbeResult(error: error, title: currentTitle)
     }
 
@@ -327,7 +326,8 @@ extension WindowAccess {
     static func scan() -> WindowScan {
         var scan = WindowScan()
         for app in NSWorkspace.shared.runningApplications
-        where app.activationPolicy == .regular && app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            where app.activationPolicy == .regular && app.processIdentifier != ProcessInfo.processInfo
+            .processIdentifier {
             let application = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(application, 0.3)
             do {
