@@ -24,6 +24,7 @@ The hook formats staged Swift files using `.swift-format` (4-space indentation, 
 If formatting changes a file, the commit stops: review the changes, stage them, and commit again.
 Unstaged changes are temporarily stashed by `pre-commit`; if they conflict with formatting, the formatting changes are rolled back.
 To format a file manually, run `swift format format --in-place <file.swift>`.
+pre-commit.ci has no Swift toolchain, so `.pre-commit-config.yaml` skips this hook there (`ci.skip`).
 
 ## Fixing bugs
 
