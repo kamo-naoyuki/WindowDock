@@ -23,7 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private var pruneResumeDate = Date.distantPast
 
-    private let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    private let updater = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
     private var controllers: [WorkspaceController] = []
     private var workspaceCounter = 0
     private var skipLayoutSave = false
@@ -57,7 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp]) { [weak self] event in
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+            .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp,
+        ]) { [weak self] event in
             if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
                 self?.shortcutContext.reset()
                 self?.cancelWindowDrag()
@@ -77,12 +80,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name: NSWorkspace.didActivateApplicationNotification, object: nil
         )
         let center = NSWorkspace.shared.notificationCenter
-        center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) {
+            [weak self] _ in
             MainActor.assumeIsolated {
                 self?.sessionInactive = true
             }
         }
-        center.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        center.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) {
+            [weak self] _ in
             MainActor.assumeIsolated {
                 self?.sessionInactive = false
                 self?.pruneResumeDate = Date().addingTimeInterval(5)
@@ -91,12 +96,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         let distributed = DistributedNotificationCenter.default()
-        distributed.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+        distributed.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) {
+            [weak self] _ in
             MainActor.assumeIsolated {
                 self?.sessionInactive = true
             }
         }
-        distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+        distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) {
+            [weak self] _ in
             MainActor.assumeIsolated {
                 self?.sessionInactive = false
                 self?.pruneResumeDate = Date().addingTimeInterval(5)
@@ -109,7 +116,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.refreshGlobalMonitor()
                 // While the login window / another user is in front, AX queries fail; don't mistake that for closed windows.
                 guard let self, !self.tabTransfer.isActive, !self.sessionInactive,
-                      !Self.isScreenUnavailable, Date() >= self.pruneResumeDate else { return }
+                    !Self.isScreenUnavailable, Date() >= self.pruneResumeDate
+                else { return }
                 self.controllers.forEach { $0.session.pruneClosedWindows() }
             }
         }
@@ -164,8 +172,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Asks for every workspace's windows first and adds them all afterwards, so that activating one workspace's
     /// windows never covers the dialog of the next workspace.
-    private func restore(_ workspaces: ArraySlice<SavedWorkspace>, in controller: WorkspaceController,
-                         chosen: [(WorkspaceController, [WindowCandidate], SavedWorkspace)] = []) {
+    private func restore(
+        _ workspaces: ArraySlice<SavedWorkspace>, in controller: WorkspaceController,
+        chosen: [(WorkspaceController, [WindowCandidate], SavedWorkspace)] = []
+    ) {
         guard let workspace = workspaces.first else { return }
         var chosen = chosen
         var picked: [WindowCandidate] = []
@@ -195,11 +205,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        let updateItem = NSMenuItem(title: L("アップデートを確認…"), action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        let updateItem = NSMenuItem(
+            title: L("アップデートを確認…"), action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: "")
         updateItem.target = updater
         appMenu.addItem(updateItem)
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: L("WindowDock を終了"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(
+            withTitle: L("WindowDock を終了"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         menu.addItem(appItem)
 
@@ -215,7 +228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         windowMenu.addItem(withTitle: L("選択中のタブを解除"), action: #selector(removeSelected), keyEquivalent: "w")
         let nextTab = windowMenu.addItem(withTitle: L("次のタブ"), action: #selector(selectNextTab), keyEquivalent: "\t")
         nextTab.keyEquivalentModifierMask = [.control]
-        let previousTab = windowMenu.addItem(withTitle: L("前のタブ"), action: #selector(selectPreviousTab), keyEquivalent: "\t")
+        let previousTab = windowMenu.addItem(
+            withTitle: L("前のタブ"), action: #selector(selectPreviousTab), keyEquivalent: "\t")
         previousTab.keyEquivalentModifierMask = [.control, .shift]
         windowMenu.addItem(withTitle: L("最小化"), action: #selector(minimizeWorkspace), keyEquivalent: "m")
         windowMenu.addItem(withTitle: L("最大化 / 復元"), action: #selector(maximizeWorkspace), keyEquivalent: "")
@@ -237,7 +251,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(deleteWorkspace), keyEquivalent: "")
         menu.addItem(.separator())
         let active = activeController
-        let autoHide = menu.addItem(withTitle: L("タブバーを自動的に隠す"), action: #selector(toggleAutoHideTabs), keyEquivalent: "")
+        let autoHide = menu.addItem(
+            withTitle: L("タブバーを自動的に隠す"), action: #selector(toggleAutoHideTabs), keyEquivalent: "")
         autoHide.target = self
         autoHide.state = active?.autoHideTabs == true ? .on : .off
         if let active {
@@ -255,7 +270,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.state = controller === active ? .on : .off
             menu.addItem(item)
             for managed in controller.session.windows {
-                let windowItem = NSMenuItem(title: managed.candidate.label, action: #selector(showWorkspaceWindow(_:)), keyEquivalent: "")
+                let windowItem = NSMenuItem(
+                    title: managed.candidate.label, action: #selector(showWorkspaceWindow(_:)), keyEquivalent: "")
                 windowItem.target = self
                 windowItem.indentationLevel = 1
                 windowItem.representedObject = WorkspaceWindowRef(controller: controller, id: managed.id)
@@ -280,7 +296,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             let submenu = NSMenu()
             let reopen = NSMenuItem(title: L("開く"), action: #selector(reopenSavedWorkspace(_:)), keyEquivalent: "")
-            let delete = NSMenuItem(title: L("ワークスペースを削除…"), action: #selector(deleteSavedWorkspace(_:)), keyEquivalent: "")
+            let delete = NSMenuItem(
+                title: L("ワークスペースを削除…"), action: #selector(deleteSavedWorkspace(_:)), keyEquivalent: "")
             for entry in [reopen, delete] {
                 entry.target = self
                 entry.representedObject = workspace.name
@@ -293,7 +310,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func reopenSavedWorkspace(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String,
-              let workspace = SavedLayout.load().first(where: { $0.name == name }) else { return }
+            let workspace = SavedLayout.load().first(where: { $0.name == name })
+        else { return }
         let controller = addWorkspace(name: workspace.name)
         controller.restoreLayout(workspace)
         controller.presentPicker(restoring: workspace.windows, completion: nil)
@@ -415,10 +433,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func savedWorkspace(_ controller: WorkspaceController) -> SavedWorkspace {
-        SavedWorkspace(name: controller.name, windows: controller.session.windows.compactMap { window in
-            guard let id = window.candidate.application.bundleIdentifier else { return nil }
-            return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
-        }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows,
+        SavedWorkspace(
+            name: controller.name,
+            windows: controller.session.windows.compactMap { window in
+                guard let id = window.candidate.application.bundleIdentifier else { return nil }
+                return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
+            }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows,
             autoHideTabs: controller.autoHideTabs, paneLayout: controller.session.customLayout,
             pinnedPanes: controller.session.pinnedCells.sorted())
     }
@@ -476,19 +496,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func handleShortcut(_ event: NSEvent) -> Bool {
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let target = controllers.first { $0.canHandleShortcut && $0.window.isKeyWindow } ??
-            controllers.first { $0.canHandleShortcut && frontPID.map($0.visiblePIDs.contains) == true } ??
-            controllers.first { $0.canHandleShortcut }
-        guard let target, let direction = shortcutContext.direction(
-            for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
-            frontPID: frontPID, visiblePIDs: target.visiblePIDs
-        ) else { return false }
+        let target =
+            controllers.first { $0.canHandleShortcut && $0.window.isKeyWindow } ?? controllers.first {
+                $0.canHandleShortcut && frontPID.map($0.visiblePIDs.contains) == true
+            } ?? controllers.first { $0.canHandleShortcut }
+        guard let target,
+            let direction = shortcutContext.direction(
+                for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
+                frontPID: frontPID, visiblePIDs: target.visiblePIDs
+            )
+        else { return false }
         target.cycleTabs(direction)
         return true
     }
 
     @objc private func frontApplicationChanged(_ notification: Notification) {
-        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return
+        }
         shortcutContext.applicationDidActivate(app.processIdentifier)
     }
 
@@ -497,7 +522,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard force || monitorTrust != trusted || globalMonitor == nil else { return }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         monitorTrust = trusted
-        let mask: NSEvent.EventTypeMask = trusted
+        let mask: NSEvent.EventTypeMask =
+            trusted
             ? [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
             : [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in

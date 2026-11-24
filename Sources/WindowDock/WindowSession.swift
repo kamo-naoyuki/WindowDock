@@ -69,19 +69,21 @@ final class WindowSession {
     var selected: ManagedWindow? { windows.first { $0.id == selectedID } }
     var isSplit: Bool { cells.count > 1 }
     var paneLayout: PaneLayout {
-        customLayout ?? .grid(
-            columnWeights: Array(repeating: 1, count: gridSize.columns),
-            rowWeights: Array(repeating: 1, count: gridSize.rows)
-        )
+        customLayout
+            ?? .grid(
+                columnWeights: Array(repeating: 1, count: gridSize.columns),
+                rowWeights: Array(repeating: 1, count: gridSize.rows)
+            )
     }
     var visibleWindows: [ManagedWindow] {
         windows.filter { cells.contains($0.id) }
     }
 
     func setSplit(_ enabled: Bool, layout: WorkspaceSplitLayout = .sideBySide) {
-        setGrid(enabled
-            ? WorkspaceGridSize(columns: layout == .sideBySide ? 2 : 1, rows: layout == .stacked ? 2 : 1)
-            : .single)
+        setGrid(
+            enabled
+                ? WorkspaceGridSize(columns: layout == .sideBySide ? 2 : 1, rows: layout == .stacked ? 2 : 1)
+                : .single)
     }
 
     func setGrid(_ size: WorkspaceGridSize) {
@@ -137,14 +139,18 @@ final class WindowSession {
     ) -> (layout: PaneLayout, reflow: GridReflowResult<UUID>)? {
         let layout = currentLayout ?? paneLayout
         guard layout.isValid, layout.paneCount == cells.count,
-              let split = layout.splittingPane(at: index, axis: axis),
-              let result = PaneReflow.split(cells: cells, activeCell: activeCell, at: index,
-                                            windowIDs: windows.map(\.id), assignments: assignments) else { return nil }
+            let split = layout.splittingPane(at: index, axis: axis),
+            let result = PaneReflow.split(
+                cells: cells, activeCell: activeCell, at: index,
+                windowIDs: windows.map(\.id), assignments: assignments)
+        else { return nil }
         if !minimumSizes.isEmpty {
             let bounds = currentTargets().values.reduce(CGRect.null) { $0.union($1) }
             guard !bounds.isNull,
-                  let minimum = split.minimumSize(minimums(for: result.assignments), dividerThickness: PaneLayout.dividerThickness),
-                  minimum.width <= bounds.width, minimum.height <= bounds.height else { return nil }
+                let minimum = split.minimumSize(
+                    minimums(for: result.assignments), dividerThickness: PaneLayout.dividerThickness),
+                minimum.width <= bounds.width, minimum.height <= bounds.height
+            else { return nil }
         }
         return (split, result)
     }
@@ -162,9 +168,11 @@ final class WindowSession {
     func closePane(at index: Int, currentLayout: PaneLayout? = nil) {
         let layout = currentLayout ?? paneLayout
         guard layout.isValid, layout.paneCount == cells.count,
-              let removal = layout.removingPane(at: index),
-              let result = PaneReflow.close(cells: cells, activeCell: activeCell, at: index,
-                                            destination: removal.destination, assignments: assignments) else {
+            let removal = layout.removingPane(at: index),
+            let result = PaneReflow.close(
+                cells: cells, activeCell: activeCell, at: index,
+                destination: removal.destination, assignments: assignments)
+        else {
             onMessage?(.attention(L("ペインの配置を変更できませんでした。")))
             return
         }
@@ -328,7 +336,8 @@ final class WindowSession {
 
     private func select(_ id: UUID, inCell cell: Int, activate: Bool) {
         guard windows.contains(where: { $0.id == id }), cells.indices.contains(cell),
-              !pinnedCells.contains(cell), cellIndex(for: id) == nil || cellIndex(for: id) == cell else { return }
+            !pinnedCells.contains(cell), cellIndex(for: id) == nil || cellIndex(for: id) == cell
+        else { return }
         let displaced = cells[cell]
         cells[cell] = id
         assignments[id] = cell
@@ -383,8 +392,9 @@ final class WindowSession {
     func reorderWindows(_ orderedIDs: [UUID]) {
         let currentIDs = Set(windows.map(\.id))
         guard orderedIDs.count == windows.count,
-              Set(orderedIDs).count == windows.count,
-              Set(orderedIDs) == currentIDs else { return }
+            Set(orderedIDs).count == windows.count,
+            Set(orderedIDs) == currentIDs
+        else { return }
         let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
         let reordered = orderedIDs.compactMap { windowsByID[$0] }
         guard reordered.map(\.id) != windows.map(\.id) else { return }
@@ -393,13 +403,16 @@ final class WindowSession {
     }
 
     @discardableResult
-    func transferWindow(_ id: UUID, to destination: WindowSession, at insertionIndex: Int? = nil, cell: Int? = nil) -> Bool {
+    func transferWindow(_ id: UUID, to destination: WindowSession, at insertionIndex: Int? = nil, cell: Int? = nil)
+        -> Bool
+    {
         let insertion = insertionIndex ?? destination.windows.count
         let targetCell = cell ?? destination.activeCell
         guard self !== destination, let index = windows.firstIndex(where: { $0.id == id }),
-              !destination.contains(windows[index].candidate),
-              (0...destination.windows.count).contains(insertion),
-              destination.cells.indices.contains(targetCell) else {
+            !destination.contains(windows[index].candidate),
+            (0...destination.windows.count).contains(insertion),
+            destination.cells.indices.contains(targetCell)
+        else {
             onMessage?(.attention(L("タブを移動できませんでした。移動先と対象ウィンドウを確認してください。")))
             return false
         }
@@ -470,8 +483,9 @@ final class WindowSession {
         var displaced = false
         for window in windows {
             guard let aligned = alignedFrames[window.id],
-                  let actual = try? access.frame(window.candidate.element),
-                  !WindowGeometry.fits(actual, requested: aligned, tolerance: 1) else { continue }
+                let actual = try? access.frame(window.candidate.element),
+                !WindowGeometry.fits(actual, requested: aligned, tolerance: 1)
+            else { continue }
             requestedFrames.removeValue(forKey: window.id)
             displaced = true
         }
@@ -590,14 +604,18 @@ final class WindowSession {
                     var actual = try access.frame(window.candidate.element)
                     // Apps animate resizes (e.g. un-maximizing); wait for them to settle before treating the size as a minimum.
                     // Expect a known minimum size so constrained windows don't stall every step of a workspace drag.
-                    let expected = minimumSizes[window.id].map {
-                        CGRect(origin: requested.origin, size: CGSize(
-                            width: max(requested.width, $0.width), height: max(requested.height, $0.height)
-                        ))
-                    } ?? requested
+                    let expected =
+                        minimumSizes[window.id].map {
+                            CGRect(
+                                origin: requested.origin,
+                                size: CGSize(
+                                    width: max(requested.width, $0.width), height: max(requested.height, $0.height)
+                                ))
+                        } ?? requested
                     var attempts = 0
                     while !WindowGeometry.fits(actual, requested: requested, tolerance: 1),
-                          !WindowGeometry.fits(actual, requested: expected, tolerance: 1), attempts < 6 {
+                        !WindowGeometry.fits(actual, requested: expected, tolerance: 1), attempts < 6
+                    {
                         attempts += 1
                         Thread.sleep(forTimeInterval: 0.05)
                         actual = try access.frame(window.candidate.element)
@@ -780,8 +798,9 @@ final class WindowSession {
         // A busy app (e.g. a timed-out Electron window) still owns its element; only a stale element is looked up again.
         for window in closed where invalidIDs.contains(window.id) {
             guard let index = windows.firstIndex(where: { $0.id == window.id }),
-                  !window.candidate.application.isTerminated,
-                  let fresh = reresolve(window.candidate) else { continue }
+                !window.candidate.application.isTerminated,
+                let fresh = reresolve(window.candidate)
+            else { continue }
             titleChanged = titleChanged || windows[index].candidate.title != fresh.title
             windows[index].candidate = fresh
             WindowAccess.logger.notice("prune re-resolved \(fresh.label, privacy: .public)")

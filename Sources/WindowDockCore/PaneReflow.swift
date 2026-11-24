@@ -13,14 +13,16 @@ public enum PaneReflow {
             result[index + 1] = next
             mapped[next] = index + 1
         }
-        return GridReflowResult(cells: result, activeCell: activeCell > index ? activeCell + 1 : activeCell, assignments: mapped)
+        return GridReflowResult(
+            cells: result, activeCell: activeCell > index ? activeCell + 1 : activeCell, assignments: mapped)
     }
 
     public static func close<ID: Hashable>(
         cells: [ID?], activeCell: Int, at index: Int, destination: Int, assignments: [ID: Int]
     ) -> GridReflowResult<ID>? {
         guard cells.count > 1, cells.indices.contains(index), cells.indices.contains(activeCell),
-              destination >= 0 && destination < cells.count - 1 else { return nil }
+            destination >= 0 && destination < cells.count - 1
+        else { return nil }
         var result = cells
         result.remove(at: index)
         func mapped(_ old: Int) -> Int {

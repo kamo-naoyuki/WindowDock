@@ -14,7 +14,10 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let candidates: [WindowCandidate]
     private let onSelect: ([WindowCandidate]) -> Void
 
-    init(candidates: [WindowCandidate], failedApplications: [String], suggested: [Int] = [], onSelect: @escaping ([WindowCandidate]) -> Void) {
+    init(
+        candidates: [WindowCandidate], failedApplications: [String], suggested: [Int] = [],
+        onSelect: @escaping ([WindowCandidate]) -> Void
+    ) {
         self.candidates = candidates
         self.onSelect = onSelect
         super.init()
@@ -67,7 +70,7 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             content.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 20),
             content.bottomAnchor.constraint(equalTo: panel.contentView!.bottomAnchor, constant: -20),
             scroll.widthAnchor.constraint(equalTo: content.widthAnchor),
-            label.widthAnchor.constraint(equalTo: content.widthAnchor)
+            label.widthAnchor.constraint(equalTo: content.widthAnchor),
         ])
         if !suggested.isEmpty {
             table.selectRowIndexes(IndexSet(suggested), byExtendingSelection: false)

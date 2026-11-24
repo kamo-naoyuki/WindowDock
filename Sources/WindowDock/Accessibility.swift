@@ -42,7 +42,8 @@ enum WindowAccess {
         var writable = DarwinBoolean(false)
         let error = AXUIElementIsAttributeSettable(element, attribute as CFString, &writable)
         guard error == .success, writable.boolValue else {
-            throw WindowAccessError(operation: L("%@の操作（このウィンドウは非対応）", attribute), code: error == .success ? .attributeUnsupported : error)
+            throw WindowAccessError(
+                operation: L("%@の操作（このウィンドウは非対応）", attribute), code: error == .success ? .attributeUnsupported : error)
         }
     }
 
@@ -50,13 +51,15 @@ enum WindowAccess {
         let position = try value(element, kAXPositionAttribute)
         let size = try value(element, kAXSizeAttribute)
         guard CFGetTypeID(position) == AXValueGetTypeID(),
-              CFGetTypeID(size) == AXValueGetTypeID() else {
+            CFGetTypeID(size) == AXValueGetTypeID()
+        else {
             throw WindowAccessError(operation: L("ウィンドウ位置の取得"), code: .illegalArgument)
         }
         var point = CGPoint.zero
         var dimensions = CGSize.zero
         guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
-              AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else {
+            AXValueGetValue(size as! AXValue, .cgSize, &dimensions)
+        else {
             throw WindowAccessError(operation: L("ウィンドウ位置の変換"), code: .illegalArgument)
         }
         return CGRect(origin: point, size: dimensions)
@@ -115,9 +118,10 @@ enum WindowAccess {
     /// Makes the window the focused one of its application and brings that application to the front
     /// without bringing its other windows forward.
     static func focus(_ element: AXUIElement, application: NSRunningApplication) throws {
-        try focus(element, applicationElement: AXUIElementCreateApplication(application.processIdentifier),
-                  setAttribute: set, raiseWindow: raise,
-                  activateFrontWindowOnly: { activateFrontWindowOnly(application.processIdentifier) })
+        try focus(
+            element, applicationElement: AXUIElementCreateApplication(application.processIdentifier),
+            setAttribute: set, raiseWindow: raise,
+            activateFrontWindowOnly: { activateFrontWindowOnly(application.processIdentifier) })
     }
 
     static func focus(
@@ -137,16 +141,21 @@ enum WindowAccess {
         try raiseWindow(element)
     }
 
-    private typealias GetProcessForPIDFunction = @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
-    private typealias SetFrontProcessWithOptionsFunction = @convention(c) (UnsafePointer<ProcessSerialNumber>, OptionBits) -> OSStatus
+    private typealias GetProcessForPIDFunction =
+        @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+    private typealias SetFrontProcessWithOptionsFunction =
+        @convention(c) (UnsafePointer<ProcessSerialNumber>, OptionBits) -> OSStatus
 
     // These Process Manager functions still ship in ApplicationServices but are unavailable to Swift.
     private static let processManager: (GetProcessForPIDFunction, SetFrontProcessWithOptionsFunction)? = {
         guard let handle = dlopen(nil, RTLD_LAZY),
-              let getProcess = dlsym(handle, "GetProcessForPID"),
-              let setFront = dlsym(handle, "SetFrontProcessWithOptions") else { return nil }
-        return (unsafeBitCast(getProcess, to: GetProcessForPIDFunction.self),
-                unsafeBitCast(setFront, to: SetFrontProcessWithOptionsFunction.self))
+            let getProcess = dlsym(handle, "GetProcessForPID"),
+            let setFront = dlsym(handle, "SetFrontProcessWithOptions")
+        else { return nil }
+        return (
+            unsafeBitCast(getProcess, to: GetProcessForPIDFunction.self),
+            unsafeBitCast(setFront, to: SetFrontProcessWithOptionsFunction.self)
+        )
     }()
 
     /// Activates an application like clicking one of its windows: only its frontmost window comes forward.
@@ -154,7 +163,7 @@ enum WindowAccess {
         guard let (getProcess, setFront) = processManager else { return false }
         var process = ProcessSerialNumber()
         guard getProcess(processIdentifier, &process) == noErr else { return false }
-        let frontWindowOnly: OptionBits = 1 // kSetFrontProcessFrontWindowOnly
+        let frontWindowOnly: OptionBits = 1  // kSetFrontProcessFrontWindowOnly
         return setFront(&process, frontWindowOnly) == noErr
     }
 
@@ -162,7 +171,9 @@ enum WindowAccess {
 
     // Private but long-standing HIServices function that maps an AX window to its WindowServer number.
     private static let getWindow: GetWindowFunction? = {
-        guard let handle = dlopen(nil, RTLD_LAZY), let symbol = dlsym(handle, "_AXUIElementGetWindow") else { return nil }
+        guard let handle = dlopen(nil, RTLD_LAZY), let symbol = dlsym(handle, "_AXUIElementGetWindow") else {
+            return nil
+        }
         return unsafeBitCast(symbol, to: GetWindowFunction.self)
     }()
 
@@ -216,19 +227,22 @@ struct WindowScan {
 
 extension WindowAccess {
     static func windowServerWindows() throws -> [WindowServerWindow] {
-        guard let entries = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-        ) as? [[String: Any]] else {
+        guard
+            let entries = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+            ) as? [[String: Any]]
+        else {
             throw WindowAccessError(operation: L("移動中ウィンドウの検出"), code: .cannotComplete)
         }
         return entries.compactMap { entry in
             guard let layer = entry[kCGWindowLayer as String] as? Int,
-                  (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
-                  let id = entry[kCGWindowNumber as String] as? CGWindowID,
-                  let pid = entry[kCGWindowOwnerPID as String] as? pid_t,
-                  let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
-                  let frame = CGRect(dictionaryRepresentation: bounds),
-                  !frame.isEmpty, !frame.isInfinite else { return nil }
+                (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                let id = entry[kCGWindowNumber as String] as? CGWindowID,
+                let pid = entry[kCGWindowOwnerPID as String] as? pid_t,
+                let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
+                let frame = CGRect(dictionaryRepresentation: bounds),
+                !frame.isEmpty, !frame.isInfinite
+            else { return nil }
             return WindowServerWindow(id: id, processID: pid, frame: frame, layer: layer)
         }
     }
@@ -244,7 +258,8 @@ extension WindowAccess {
         }
         // Frames can lag behind the WindowServer, and same-sized windows of one app can share a frame.
         if let identified = windows.first(where: { windowID(of: $0) == moved.id }),
-           let candidate = try? candidate(identified, application: app) {
+            let candidate = try? candidate(identified, application: app)
+        {
             return candidate
         }
         var matches: [WindowCandidate] = []
@@ -252,8 +267,9 @@ extension WindowAccess {
         for window in windows {
             do {
                 guard let candidate = try candidate(window, application: app),
-                      try !isMinimized(window),
-                      WindowGeometry.fits(try frame(window), requested: moved.frame) else { continue }
+                    try !isMinimized(window),
+                    WindowGeometry.fits(try frame(window), requested: moved.frame)
+                else { continue }
                 matches.append(candidate)
             } catch let error as WindowAccessError {
                 logger.debug("Window drop candidate unavailable: \(error.localizedDescription, privacy: .public)")
@@ -272,7 +288,8 @@ extension WindowAccess {
     static func probe(_ element: AXUIElement) -> WindowProbeResult {
         var title: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
-        let currentTitle = error == .success || error == .noValue || error == .attributeUnsupported
+        let currentTitle =
+            error == .success || error == .noValue || error == .attributeUnsupported
             ? title as? String ?? ""
             : nil
         return WindowProbeResult(error: error, title: currentTitle)
@@ -321,7 +338,8 @@ extension WindowAccess {
                     if let candidate = try candidate(window, application: app) { scan.windows.append(candidate) }
                 }
             } catch {
-                logger.error("\(app.localizedName ?? "App", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.error(
+                    "\(app.localizedName ?? "App", privacy: .public): \(error.localizedDescription, privacy: .public)")
                 scan.failedApplications.append(app.localizedName ?? "App")
             }
         }

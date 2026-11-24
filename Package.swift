@@ -8,7 +8,8 @@ let package = Package(
     dependencies: [.package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")],
     targets: [
         .target(name: "WindowDockCore"),
-        .executableTarget(name: "WindowDock", dependencies: ["WindowDockCore", .product(name: "Sparkle", package: "Sparkle")]),
-        .testTarget(name: "WindowDockCoreTests", dependencies: ["WindowDockCore"])
+        .executableTarget(
+            name: "WindowDock", dependencies: ["WindowDockCore", .product(name: "Sparkle", package: "Sparkle")]),
+        .testTarget(name: "WindowDockCoreTests", dependencies: ["WindowDockCore"]),
     ]
 )

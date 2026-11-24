@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import WindowDockCore
 
 final class UILanguageTests: XCTestCase {

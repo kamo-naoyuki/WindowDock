@@ -69,7 +69,8 @@ enum SavedLayout {
                 var score = 0
                 if !entry.title.isEmpty, candidate.title == entry.title { score += 4 }
                 if let frame = try? WindowAccess.frame(candidate.element) {
-                    let distance = abs(frame.minX - entry.frame.minX) + abs(frame.minY - entry.frame.minY)
+                    let distance =
+                        abs(frame.minX - entry.frame.minX) + abs(frame.minY - entry.frame.minY)
                         + abs(frame.width - entry.frame.width) + abs(frame.height - entry.frame.height)
                     if distance < 40 { score += 3 } else if distance < 400 { score += 1 }
                 }

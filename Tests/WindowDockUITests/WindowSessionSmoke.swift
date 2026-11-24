@@ -123,19 +123,24 @@ enum WindowSessionSmoke {
                 return WindowProbeResult(error: .invalidUIElement, title: nil)
             }
             let error = model.probeErrors[index] ?? .success
-            let title = [.success, .noValue, .attributeUnsupported].contains(error)
+            let title =
+                [.success, .noValue, .attributeUnsupported].contains(error)
                 ? model.titles[index] ?? "Test \(index)"
                 : nil
             return WindowProbeResult(error: error, title: title)
         }
         access.applicationWindows = { _ in
-            model.listedWindows.map { WindowCandidate(element: model.windows[$0].element, application: .current, title: "Live \($0)") }
+            model.listedWindows.map {
+                WindowCandidate(element: model.windows[$0].element, application: .current, title: "Live \($0)")
+            }
         }
         return access
     }
 
-    private static func fixture(registering indexes: [Int] = [0, 1, 2], windowCount: Int = 4,
-                                sharedModel: Model? = nil) -> (WindowSession, Model) {
+    private static func fixture(
+        registering indexes: [Int] = [0, 1, 2], windowCount: Int = 4,
+        sharedModel: Model? = nil
+    ) -> (WindowSession, Model) {
         let model = sharedModel ?? Model(windowCount: windowCount)
         let session = WindowSession(access: access(for: model))
         session.targetFrame = { model.target }
@@ -146,11 +151,12 @@ enum WindowSessionSmoke {
         session.onPresentedFrames = { model.paneFrames = $0 }
         session.onChange = { model.changeCount += 1 }
         for index in indexes {
-            session.add(WindowCandidate(
-                element: model.windows[index].element,
-                application: .current,
-                title: "Test \(index)"
-            ))
+            session.add(
+                WindowCandidate(
+                    element: model.windows[index].element,
+                    application: .current,
+                    title: "Test \(index)"
+                ))
         }
         model.operations.removeAll()
         model.changeCount = 0
@@ -170,13 +176,15 @@ enum WindowSessionSmoke {
         session.moveWindow(ids[1], toCell: 1)
         let leftFrame = model.windows[0].frame
         session.splitPane(at: 1, axis: .vertical)
-        if session.cells != [ids[0], ids[1], ids[2]] || session.selectedID != ids[1] ||
-            session.windows.map(\.id) != ids || model.windows[0].frame != leftFrame {
+        if session.cells != [ids[0], ids[1], ids[2]] || session.selectedID != ids[1] || session.windows.map(\.id) != ids
+            || model.windows[0].frame != leftFrame
+        {
             failures.append("splitting the right pane changed the left pane, selection, or registered tabs")
         }
         session.closePane(at: 1)
-        if session.cells != [ids[0], ids[2]] || session.selectedID != ids[2] ||
-            session.windows.map(\.id) != ids || model.windows[1].frame == model.windows[1].originalFrame {
+        if session.cells != [ids[0], ids[2]] || session.selectedID != ids[2] || session.windows.map(\.id) != ids
+            || model.windows[1].frame == model.windows[1].originalFrame
+        {
             failures.append("closing a nested pane released its tab or failed to retain the sibling and other panes")
         }
         session.splitPane(at: 0, axis: .vertical)
@@ -185,14 +193,15 @@ enum WindowSessionSmoke {
         }
         let (destination, _) = fixture(registering: [], sharedModel: model)
         destination.splitPane(at: 0, axis: .vertical)
-        if !session.transferWindow(ids[3], to: destination, cell: 1) ||
-            destination.cells != [nil, ids[3]] || destination.customLayout == nil ||
-            session.cells != [ids[0], ids[1], ids[2]] {
+        if !session.transferWindow(ids[3], to: destination, cell: 1) || destination.cells != [nil, ids[3]]
+            || destination.customLayout == nil || session.cells != [ids[0], ids[1], ids[2]]
+        {
             failures.append("transferring a hidden tab to a nested pane changed the other visible panes")
         }
         session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
-        if session.customLayout != nil || session.cells.count != 2 || session.selectedID != ids[2] ||
-            session.windows.map(\.id) != [ids[0], ids[1], ids[2]] {
+        if session.customLayout != nil || session.cells.count != 2 || session.selectedID != ids[2]
+            || session.windows.map(\.id) != [ids[0], ids[1], ids[2]]
+        {
             failures.append("returning to the same grid preset lost the selected tab or kept the custom tree")
         }
         let (empty, _) = fixture(registering: [], sharedModel: model)
@@ -204,7 +213,8 @@ enum WindowSessionSmoke {
         }
         empty.add(WindowCandidate(element: model.windows[0].element, application: .current, title: "Empty panes"))
         guard let added = empty.selectedID else { return failures + ["adding a window to a nested layout failed"] }
-        if empty.cells.count != 3 || !empty.remove(added) || empty.cells != [nil, nil, nil] || empty.customLayout == nil {
+        if empty.cells.count != 3 || !empty.remove(added) || empty.cells != [nil, nil, nil] || empty.customLayout == nil
+        {
             failures.append("adding or releasing the only window collapsed intentionally empty nested panes")
         }
         let before = session.cells
@@ -236,17 +246,16 @@ enum WindowSessionSmoke {
         session.setPanePinned(true, at: 0)
         session.activateCell(0)
         session.cycle(1)
-        if session.cells[0] != pinnedWindow || session.cells[1] != otherWindow ||
-            session.cells[2] != firstCycleTarget || session.activeCell != 2 ||
-            session.tabSwitchCell != 2 {
+        if session.cells[0] != pinnedWindow || session.cells[1] != otherWindow || session.cells[2] != firstCycleTarget
+            || session.activeCell != 2 || session.tabSwitchCell != 2
+        {
             failures.append("cycling from a pinned pane did not replace the last unpinned pane")
         }
 
         let secondCycleTarget = nextTab(in: 1)
         session.setPanePinned(true, at: 2)
         session.cycle(1)
-        if session.cells[0] != pinnedWindow || session.cells[1] != secondCycleTarget ||
-            session.pinnedCells != [0, 2] {
+        if session.cells[0] != pinnedWindow || session.cells[1] != secondCycleTarget || session.pinnedCells != [0, 2] {
             failures.append("cycling with three panes changed a pinned pane or failed to choose an unpinned target")
         }
         session.setPanePinned(true, at: 1)
@@ -259,7 +268,9 @@ enum WindowSessionSmoke {
         let (flash, _) = fixture(registering: [0, 1, 2])
         flash.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
         flash.setPanePinned(true, at: 0)
-        guard let flashPinned = flash.cells[0], let hiddenTab = flash.windows.first(where: { flash.cellIndex(for: $0.id) == nil }) else {
+        guard let flashPinned = flash.cells[0],
+            let hiddenTab = flash.windows.first(where: { flash.cellIndex(for: $0.id) == nil })
+        else {
             return failures + ["the pinned-pane flash fixture had no hidden tab"]
         }
         var emissions: [[UUID: CGRect]] = []
@@ -300,26 +311,30 @@ enum WindowSessionSmoke {
             }
         }
         guard let chrome = controller.window.contentView as? WorkspaceChromeView,
-              let restoredChrome = restored.window.contentView as? WorkspaceChromeView else {
+            let restoredChrome = restored.window.contentView as? WorkspaceChromeView
+        else {
             return ["nested pane fixture could not find its chrome"]
         }
         let window = controller.window
         window.setFrame(NSRect(x: 120, y: 140, width: 900, height: 600), display: false)
         restored.window.setFrame(window.frame, display: false)
-        controller.session.add(model.windows.map {
-            WindowCandidate(element: $0.element, application: .current, title: "Nested probe")
-        })
+        controller.session.add(
+            model.windows.map {
+                WindowCandidate(element: $0.element, application: .current, title: "Nested probe")
+            })
         controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
         chrome.layoutSubtreeIfNeeded()
         let left = chrome.gridAreas[0].frame
         func event(_ type: NSEvent.EventType, _ location: NSPoint = .zero) -> NSEvent {
-            NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: 0,
-                               windowNumber: window.windowNumber, context: nil,
-                               eventNumber: 1, clickCount: 1, pressure: 1)!
+            NSEvent.mouseEvent(
+                with: type, location: location, modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1)!
         }
         func perform(_ title: String, in menu: NSMenu?) {
             guard let item = menu?.item(withTitle: L(title)), let action = item.action,
-                  NSApp.sendAction(action, to: item.target, from: item) else {
+                NSApp.sendAction(action, to: item.target, from: item)
+            else {
                 failures.append("nested pane menu could not perform \(title)")
                 return
             }
@@ -338,16 +353,18 @@ enum WindowSessionSmoke {
         let pinnedTab = chrome.tabs.arrangedSubviews.compactMap { $0 as? WorkspaceTabGroup }.first {
             ($0.arrangedSubviews.first as? NSButton)?.tag == pinnedTag
         }
-        if !controller.session.isPanePinned(0) ||
-            pinnedTab?.subviews.compactMap({ $0 as? NSImageView }).first?.isHidden != false {
+        if !controller.session.isPanePinned(0)
+            || pinnedTab?.subviews.compactMap({ $0 as? NSImageView }).first?.isHidden != false
+        {
             failures.append("pinning a pane did not update its pin marker")
         }
         perform("ペインを固定", in: chrome.gridAreas[0].menu(for: event(.rightMouseDown)))
         if controller.session.isPanePinned(0) {
             failures.append("the pane context menu did not unpin a pinned pane")
         }
-        if chrome.gridAreas[0].frame != left ||
-            chrome.columnSelector.title != L("カスタム") || chrome.rowSelector.title != L("カスタム") {
+        if chrome.gridAreas[0].frame != left || chrome.columnSelector.title != L("カスタム")
+            || chrome.rowSelector.title != L("カスタム")
+        {
             failures.append("a tab's split changed another pane or did not show Custom in the preset controls")
         }
         let upperRight = chrome.gridAreas[1].frame
@@ -356,8 +373,9 @@ enum WindowSessionSmoke {
         NSApp.postEvent(event(.leftMouseDragged, end), atStart: false)
         NSApp.postEvent(event(.leftMouseUp, end), atStart: false)
         chrome.stage.mouseDown(with: event(.leftMouseDown, start))
-        if chrome.gridAreas[0].frame != left || abs(chrome.gridAreas[1].frame.height - upperRight.height - 40) > 0.5 ||
-            controller.session.customLayout != chrome.stage.customLayout {
+        if chrome.gridAreas[0].frame != left || abs(chrome.gridAreas[1].frame.height - upperRight.height - 40) > 0.5
+            || controller.session.customLayout != chrome.stage.customLayout
+        {
             failures.append("dragging a nested divider changed another pane or did not update the saved proportions")
         }
         controller.session.activateCell(2)
@@ -371,17 +389,20 @@ enum WindowSessionSmoke {
         }
         controller.setAutoHideTabs(true)
         chrome.layoutSubtreeIfNeeded()
-        let snapshot = SavedWorkspace(name: controller.name, windows: [], columns: 2, rows: 1,
-                                      autoHideTabs: true, paneLayout: controller.session.customLayout,
-                                      pinnedPanes: [1])
+        let snapshot = SavedWorkspace(
+            name: controller.name, windows: [], columns: 2, rows: 1,
+            autoHideTabs: true, paneLayout: controller.session.customLayout,
+            pinnedPanes: [1])
         do {
             let decoded = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(snapshot))
             restored.restoreLayout(decoded)
             restoredChrome.layoutSubtreeIfNeeded()
-            if restored.session.customLayout != snapshot.paneLayout || !restored.autoHideTabs ||
-                restored.session.pinnedCells != [1] ||
-                restoredChrome.gridAreas.map(\.frame) != chrome.gridAreas.map(\.frame) {
-                failures.append("saving and restoring a nested layout lost its shape, ratios, pin, or auto-hide setting")
+            if restored.session.customLayout != snapshot.paneLayout || !restored.autoHideTabs
+                || restored.session.pinnedCells != [1]
+                || restoredChrome.gridAreas.map(\.frame) != chrome.gridAreas.map(\.frame)
+            {
+                failures.append(
+                    "saving and restoring a nested layout lost its shape, ratios, pin, or auto-hide setting")
             }
             let legacy = try JSONDecoder().decode(
                 SavedWorkspace.self, from: Data(#"{"name":"Legacy","windows":[],"columns":2,"rows":2}"#.utf8)
@@ -416,19 +437,22 @@ enum WindowSessionSmoke {
             return ["nested limits fixture could not find its chrome"]
         }
         controller.session.onMessage = { model.notices.append($0) }
-        controller.session.add(model.windows.map {
-            WindowCandidate(element: $0.element, application: .current, title: "Nested limit probe")
-        })
+        controller.session.add(
+            model.windows.map {
+                WindowCandidate(element: $0.element, application: .current, title: "Nested limit probe")
+            })
         let ids = controller.session.windows.map(\.id)
         let selected = controller.session.selectedID
-        let rightClick = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
-                                           windowNumber: controller.window.windowNumber, context: nil,
-                                           eventNumber: 1, clickCount: 1, pressure: 1)!
+        let rightClick = NSEvent.mouseEvent(
+            with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: controller.window.windowNumber, context: nil,
+            eventNumber: 1, clickCount: 1, pressure: 1)!
         func menu(for pane: Int) -> NSMenu? {
             guard let id = controller.session.cells[pane], let tag = ids.firstIndex(of: id),
-                  let tab = chrome.tabs.arrangedSubviews.compactMap({
-                      ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? NSButton
-                  }).first(where: { $0.tag == tag }) else { return nil }
+                let tab = chrome.tabs.arrangedSubviews.compactMap({
+                    ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? NSButton
+                }).first(where: { $0.tag == tag })
+            else { return nil }
             let menu = tab.menu(for: rightClick)?.item(withTitle: L("ペイン"))?.submenu
             menu?.update()
             return menu
@@ -437,7 +461,8 @@ enum WindowSessionSmoke {
             let count = controller.session.cells.count
             for index in (0..<count).reversed() {
                 guard let item = menu(for: index)?.item(withTitle: L(title)), item.isEnabled,
-                      let action = item.action, NSApp.sendAction(action, to: item.target, from: item) else {
+                    let action = item.action, NSApp.sendAction(action, to: item.target, from: item)
+                else {
                     return failures + ["nested split menu stopped before reaching 4 by 4"]
                 }
             }
@@ -461,14 +486,16 @@ enum WindowSessionSmoke {
                 break
             }
         }
-        if controller.session.windows.map(\.id) != ids || Set(controller.session.cells.compactMap { $0 }) != Set(ids) ||
-            controller.session.selectedID != selected {
+        if controller.session.windows.map(\.id) != ids || Set(controller.session.cells.compactMap { $0 }) != Set(ids)
+            || controller.session.selectedID != selected
+        {
             failures.append("deep nesting lost a tab, pane assignment, or the selected window")
         }
         let smallest = menu(for: 15)
-        if smallest?.item(withTitle: L("左右に分割"))?.isEnabled != false ||
-            smallest?.item(withTitle: L("上下に分割"))?.isEnabled != false ||
-            smallest?.item(withTitle: L("ペインを閉じる"))?.isEnabled != true {
+        if smallest?.item(withTitle: L("左右に分割"))?.isEnabled != false
+            || smallest?.item(withTitle: L("上下に分割"))?.isEnabled != false
+            || smallest?.item(withTitle: L("ペインを閉じる"))?.isEnabled != true
+        {
             failures.append("the smallest pane did not disable splitting while keeping Close Pane enabled")
         }
         let before = controller.session.customLayout
@@ -490,9 +517,10 @@ enum WindowSessionSmoke {
         }
         controller.window.setFrame(NSRect(x: 120, y: 140, width: 900, height: 600), display: false)
         controller.session.onMessage = { model.notices.append($0) }
-        controller.session.add(model.windows.map {
-            WindowCandidate(element: $0.element, application: .current, title: "Minimum size probe")
-        })
+        controller.session.add(
+            model.windows.map {
+                WindowCandidate(element: $0.element, application: .current, title: "Minimum size probe")
+            })
         // The first attempted fit learns app minimum sizes, which are not exposed by every app through AX.
         controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
         guard controller.session.cells.count == 1 else {
@@ -500,22 +528,23 @@ enum WindowSessionSmoke {
         }
         let menu = controller.activePaneMenu()
         menu.update()
-        if menu.item(withTitle: L("左右に分割"))?.isEnabled != false ||
-            menu.item(withTitle: L("上下に分割"))?.isEnabled != true {
+        if menu.item(withTitle: L("左右に分割"))?.isEnabled != false || menu.item(withTitle: L("上下に分割"))?.isEnabled != true {
             failures.append("known width minimums did not disable only the infeasible split direction")
         }
         let cells = controller.session.cells
         model.operations.removeAll()
         model.notices.removeAll()
         controller.session.splitPane(at: 0, axis: .horizontal)
-        if controller.session.cells != cells || !model.operations.isEmpty || model.notices.last?.needsAttention != true {
+        if controller.session.cells != cells || !model.operations.isEmpty || model.notices.last?.needsAttention != true
+        {
             failures.append("a blocked minimum-size split changed windows or failed without a notice")
         }
         controller.window.setFrame(NSRect(x: 120, y: 140, width: 1400, height: 600), display: false)
         let expandedMenu = controller.activePaneMenu()
         expandedMenu.update()
         guard let item = expandedMenu.item(withTitle: L("左右に分割")), item.isEnabled,
-              let action = item.action, NSApp.sendAction(action, to: item.target, from: item) else {
+            let action = item.action, NSApp.sendAction(action, to: item.target, from: item)
+        else {
             return failures + ["enlarging the workspace did not re-enable a split that now fits"]
         }
         if controller.session.cells.count != 2 {
@@ -537,39 +566,45 @@ enum WindowSessionSmoke {
                 observedDuplicate = true
             }
         }
-        if !source.transferWindow(transferred.id, to: destination, at: 0) ||
-            source.contains(transferred.candidate) || destination.windows.first?.id != transferred.id ||
-            destination.selectedID != transferred.id || observedDuplicate {
-            failures.append("cross-workspace transfer lost identity, insertion position, selection, or unique ownership")
+        if !source.transferWindow(transferred.id, to: destination, at: 0) || source.contains(transferred.candidate)
+            || destination.windows.first?.id != transferred.id || destination.selectedID != transferred.id
+            || observedDuplicate
+        {
+            failures.append(
+                "cross-workspace transfer lost identity, insertion position, selection, or unique ownership")
         }
-        if model.windows[2].frame != target || model.windows[2].minimized ||
-            destination.windows.first?.originalFrame != transferred.originalFrame ||
-            destination.windows.first?.originallyMinimized != transferred.originallyMinimized {
+        if model.windows[2].frame != target || model.windows[2].minimized
+            || destination.windows.first?.originalFrame != transferred.originalFrame
+            || destination.windows.first?.originallyMinimized != transferred.originallyMinimized
+        {
             failures.append("transfer did not align the window or preserve its original restoration state")
         }
         let originalSourceIDs = source.windows.map(\.id)
         let originalDestinationIDs = destination.windows.map(\.id)
-        if source.transferWindow(source.windows[0].id, to: destination, at: -1) ||
-            source.windows.map(\.id) != originalSourceIDs || destination.windows.map(\.id) != originalDestinationIDs {
+        if source.transferWindow(source.windows[0].id, to: destination, at: -1)
+            || source.windows.map(\.id) != originalSourceIDs || destination.windows.map(\.id) != originalDestinationIDs
+        {
             failures.append("invalid transfer modified window ownership")
         }
-        if !destination.remove(transferred.id) || model.windows[2].frame != transferred.originalFrame ||
-            model.windows[2].minimized != transferred.originallyMinimized {
+        if !destination.remove(transferred.id) || model.windows[2].frame != transferred.originalFrame
+            || model.windows[2].minimized != transferred.originallyMinimized
+        {
             failures.append("releasing a transferred tab did not restore its pre-registration state")
         }
         source.setSplit(true)
         destination.setSplit(true)
         destination.targetFrames = { [0: target, 1: target.offsetBy(dx: 800, dy: 0)] }
         let splitID = source.windows[0].id
-        if !source.transferWindow(splitID, to: destination, cell: 1) ||
-            source.cells.contains(splitID) || destination.cells[1] != splitID ||
-            destination.activeCell != 1 || source.windows.count != 1 {
+        if !source.transferWindow(splitID, to: destination, cell: 1) || source.cells.contains(splitID)
+            || destination.cells[1] != splitID || destination.activeCell != 1 || source.windows.count != 1
+        {
             failures.append("pane transfer failed to reconcile the source or select the destination pane")
         }
         let (empty, _) = fixture(registering: [], sharedModel: model)
         let lastID = source.windows[0].id
-        if !source.transferWindow(lastID, to: empty) || !source.windows.isEmpty ||
-            source.cells != [nil] || empty.selectedID != lastID {
+        if !source.transferWindow(lastID, to: empty) || !source.windows.isEmpty || source.cells != [nil]
+            || empty.selectedID != lastID
+        {
             failures.append("detaching the last tab did not leave an empty source and a selected destination")
         }
         return failures
@@ -601,14 +636,17 @@ enum WindowSessionSmoke {
                 failures.append("a registered window was offered for ordinary dragging into a workspace")
             }
         }
-        if !registration.isRegistered(WindowServerWindow(id: 84, processID: pid, frame: model.target),
-                                      among: registered, windowID: windowID, resolve: laggingFrame) {
+        if !registration.isRegistered(
+            WindowServerWindow(id: 84, processID: pid, frame: model.target),
+            among: registered, windowID: windowID, resolve: laggingFrame)
+        {
             failures.append("a window registered in another workspace was not suppressed")
         }
         for offset in [CGFloat(0), 100, 200] {
             let sibling = WindowServerWindow(id: 90, processID: pid, frame: model.target.offsetBy(dx: offset, dy: 40))
             if registration.isRegistered(sibling, among: registered, windowID: windowID, resolve: laggingFrame) {
-                failures.append("an unregistered window was not droppable while another window of its app was registered")
+                failures.append(
+                    "an unregistered window was not droppable while another window of its app was registered")
                 break
             }
         }
@@ -618,9 +656,12 @@ enum WindowSessionSmoke {
         if lookups != registered.count {
             failures.append("registered window numbers were looked up again during one drag: \(lookups)")
         }
-        let sibling = WindowCandidate(element: model.windows[2].element, application: .current, title: "Newly registered")
-        if !registration.isRegistered(WindowServerWindow(id: 81, processID: pid, frame: model.target),
-                                      among: registered + [sibling], windowID: windowID, resolve: laggingFrame) {
+        let sibling = WindowCandidate(
+            element: model.windows[2].element, application: .current, title: "Newly registered")
+        if !registration.isRegistered(
+            WindowServerWindow(id: 81, processID: pid, frame: model.target),
+            among: registered + [sibling], windowID: windowID, resolve: laggingFrame)
+        {
             failures.append("drag identification did not notice newly registered ownership")
         }
         let unrelated = WindowServerWindow(id: 82, processID: pid + 1, frame: model.target)
@@ -629,8 +670,9 @@ enum WindowSessionSmoke {
         }
         registration.reset()
         lookups = 0
-        _ = registration.isRegistered(WindowServerWindow(id: 90, processID: pid, frame: model.target),
-                                      among: registered, windowID: windowID, resolve: laggingFrame)
+        _ = registration.isRegistered(
+            WindowServerWindow(id: 90, processID: pid, frame: model.target),
+            among: registered, windowID: windowID, resolve: laggingFrame)
         if lookups != registered.count {
             failures.append("resetting the drag did not discard cached window numbers")
         }
@@ -677,9 +719,11 @@ enum WindowSessionSmoke {
             window.orderOut(nil)
         }
         guard let chrome = window.contentView as? WorkspaceChromeView,
-              let screen = NSScreen.screens.first else { return ["window drop fixture could not find its content or screen"] }
+            let screen = NSScreen.screens.first
+        else { return ["window drop fixture could not find its content or screen"] }
         window.setFrame(NSRect(x: 200, y: 160, width: 900, height: 600), display: true)
-        controller.session.add(WindowCandidate(element: model.windows[0].element, application: .current, title: "Registered"))
+        controller.session.add(
+            WindowCandidate(element: model.windows[0].element, application: .current, title: "Registered"))
         window.orderFrontRegardless()
         chrome.layoutSubtreeIfNeeded()
         let pid = ProcessInfo.processInfo.processIdentifier
@@ -689,17 +733,22 @@ enum WindowSessionSmoke {
             id: CGWindowID(window.windowNumber), processID: pid,
             frame: WindowGeometry.accessibilityRect(from: window.frame, primaryScreenTop: screen.frame.maxY)
         )
-        let drop = window.convertPoint(toScreen: chrome.addButton.convert(
-            NSPoint(x: chrome.addButton.bounds.midX, y: chrome.addButton.bounds.midY), to: nil
-        ))
-        guard controller.acceptsWindowDrop(at: drop) else { return ["window drop fixture's tab bar did not accept drops"] }
+        let drop = window.convertPoint(
+            toScreen: chrome.addButton.convert(
+                NSPoint(x: chrome.addButton.bounds.midX, y: chrome.addButton.bounds.midY), to: nil
+            ))
+        guard controller.acceptsWindowDrop(at: drop) else {
+            return ["window drop fixture's tab bar did not accept drops"]
+        }
         let axDrop = CGPoint(x: drop.x, y: screen.frame.maxY - drop.y)
         // The dragged window starts outside the workspace and is grabbed 40 points into its titlebar.
         let start = CGRect(x: workspace.frame.maxX + 60, y: workspace.frame.minY + 40, width: 500, height: 400)
         let grab = CGPoint(x: start.minX + 40, y: start.minY + 10)
         let moved = start.offsetBy(dx: axDrop.x - grab.x, dy: axDrop.y - grab.y)
 
-        func run(dragging number: CGWindowID, windowID: @escaping (AXUIElement) -> CGWindowID?) -> (shown: Bool, finished: Bool) {
+        func run(dragging number: CGWindowID, windowID: @escaping (AXUIElement) -> CGWindowID?) -> (
+            shown: Bool, finished: Bool
+        ) {
             let coordinator = WorkspaceWindowDrop { [controller] }
             var pointer = WorkspaceWindowDrop.Pointer(location: .zero, buttonDown: false)
             var frame = start
@@ -731,10 +780,14 @@ enum WindowSessionSmoke {
         }
         let sibling = run(dragging: draggedNumber, windowID: numbers)
         if !sibling.shown {
-            failures.append("dragging an unregistered window over the tab bar showed no drop target when another window of its app was registered")
+            failures.append(
+                "dragging an unregistered window over the tab bar showed no drop target when another window of its app was registered"
+            )
         }
         if !sibling.finished {
-            failures.append("releasing an unregistered window on the tab bar did not add it when another window of its app was registered")
+            failures.append(
+                "releasing an unregistered window on the tab bar did not add it when another window of its app was registered"
+            )
         }
         if chrome.windowDropPanel?.isVisible == true { failures.append("the drop target stayed visible after release") }
         let fallback = run(dragging: draggedNumber, windowID: { _ in nil })
@@ -765,7 +818,10 @@ enum WindowSessionSmoke {
                     model.windows[index].element, applicationElement: applications[index == 2 ? 1 : 0],
                     setAttribute: setAttribute,
                     raiseWindow: { steps.append("raise \(try model.index(of: $0))") },
-                    activateFrontWindowOnly: { steps.append("front-only"); return true }
+                    activateFrontWindowOnly: {
+                        steps.append("front-only")
+                        return true
+                    }
                 )
                 // Activating the whole app would bring its unregistered windows above other apps too.
                 if steps != ["raise \(index)", "front-only", "raise \(index)"] {
@@ -776,7 +832,10 @@ enum WindowSessionSmoke {
             try WindowAccess.focus(
                 model.windows[2].element, applicationElement: applications[1], setAttribute: setAttribute,
                 raiseWindow: { steps.append("raise \(try model.index(of: $0))") },
-                activateFrontWindowOnly: { steps.append("front-only"); return false }
+                activateFrontWindowOnly: {
+                    steps.append("front-only")
+                    return false
+                }
             )
             if steps != ["raise 2", "front-only", "all-windows 1", "raise 2"] {
                 failures.append("unavailable front-window-only activation did not fall back to AXFrontmost: \(steps)")
@@ -850,44 +909,56 @@ enum WindowSessionSmoke {
             window.orderOut(nil)
         }
         guard let chrome = window.contentView as? WorkspaceChromeView,
-              let screen = NSScreen.screens.first else { return ["titlebar focus fixture could not find its content or screen"] }
+            let screen = NSScreen.screens.first
+        else { return ["titlebar focus fixture could not find its content or screen"] }
         func settle(_ seconds: TimeInterval = 0.5, until condition: () -> Bool = { false }) {
             let deadline = Date().addingTimeInterval(seconds)
             while !condition(), Date() < deadline {
-                if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true) {
+                if let event = NSApp.nextEvent(
+                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true)
+                {
                     NSApp.sendEvent(event)
                 }
             }
         }
         window.setFrame(NSRect(x: 160, y: 180, width: 900, height: 600), display: true)
         controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
-        controller.session.add(model.windows.map {
-            WindowCandidate(element: $0.element, application: .current, title: "Focus probe")
-        })
+        controller.session.add(
+            model.windows.map {
+                WindowCandidate(element: $0.element, application: .current, title: "Focus probe")
+            })
         controller.bringToFront()
         settle()
-        guard NSApp.isActive, window.isKeyWindow else { return ["titlebar focus fixture did not become active and key"] }
-        guard let dragSpace = chrome.subviews.flatMap(\.subviews).compactMap({ $0 as? NSStackView })
-            .flatMap(\.arrangedSubviews).first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") })
+        guard NSApp.isActive, window.isKeyWindow else {
+            return ["titlebar focus fixture did not become active and key"]
+        }
+        guard
+            let dragSpace = chrome.subviews.flatMap(\.subviews).compactMap({ $0 as? NSStackView })
+                .flatMap(\.arrangedSubviews).first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") })
         else { return ["titlebar focus fixture could not find the toolbar drag area"] }
         var failures: [String] = []
         if !model.focusedWindows.isEmpty {
             failures.append("making the workspace key stole focus before any titlebar gesture")
         }
         func gesture(at point: NSPoint, delta: NSSize) -> Bool {
-            guard let down = NSEvent.mouseEvent(
-                with: .leftMouseDown, location: point, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1
-            ) else { return false }
+            guard
+                let down = NSEvent.mouseEvent(
+                    with: .leftMouseDown, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+                )
+            else { return false }
             let start = window.convertPoint(toScreen: point)
             let types: [CGEventType] = delta == .zero ? [.leftMouseUp] : [.leftMouseDragged, .leftMouseUp]
             let events = types.compactMap { type -> NSEvent? in
-                guard let event = CGEvent(
-                    mouseEventSource: nil, mouseType: type,
-                    mouseCursorPosition: CGPoint(x: start.x + delta.width, y: screen.frame.maxY - start.y - delta.height),
-                    mouseButton: .left
-                ) else { return nil }
+                guard
+                    let event = CGEvent(
+                        mouseEventSource: nil, mouseType: type,
+                        mouseCursorPosition: CGPoint(
+                            x: start.x + delta.width, y: screen.frame.maxY - start.y - delta.height),
+                        mouseButton: .left
+                    )
+                else { return nil }
                 return NSEvent(cgEvent: event)
             }
             guard events.count == types.count else { return false }
@@ -901,7 +972,7 @@ enum WindowSessionSmoke {
             ("titlebar click", barPoint, .zero),
             ("titlebar click while already key", barPoint, .zero),
             ("titlebar drag", barPoint, NSSize(width: 20, height: 10)),
-            ("resize grip", NSPoint(x: chrome.bounds.maxX - 12, y: 12), NSSize(width: 20, height: -10))
+            ("resize grip", NSPoint(x: chrome.bounds.maxX - 12, y: 12), NSSize(width: 20, height: -10)),
         ]
         for (label, point, delta) in gestures {
             model.focusedWindows.removeAll()
@@ -915,17 +986,19 @@ enum WindowSessionSmoke {
             settle()
             // Each visible pane's window comes above other apps, and the selected one keeps focus.
             if model.focusedWindows != [0, 1] {
-                failures.append("\(label): selected pane was not focused on release; another activation click is needed: " +
-                    "\(model.focusedWindows) (active \(NSApp.isActive), key \(window.isKeyWindow), " +
-                    "frontmost \(NSWorkspace.shared.frontmostApplication?.localizedName ?? "none"))")
+                failures.append(
+                    "\(label): selected pane was not focused on release; another activation click is needed: "
+                        + "\(model.focusedWindows) (active \(NSApp.isActive), key \(window.isKeyWindow), "
+                        + "frontmost \(NSWorkspace.shared.frontmostApplication?.localizedName ?? "none"))")
             }
         }
 
         // A pending handoff must not steal focus from a window opened before it runs.
         model.focusedWindows.removeAll()
         if !gesture(at: barPoint, delta: .zero) { failures.append("could not create interrupted titlebar click") }
-        let other = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 300, height: 200),
-                             styleMask: [.titled], backing: .buffered, defer: false)
+        let other = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 300, height: 200),
+            styleMask: [.titled], backing: .buffered, defer: false)
         other.isReleasedWhenClosed = false
         defer { other.close() }
         other.makeKeyAndOrderFront(nil)
@@ -966,7 +1039,9 @@ enum WindowSessionSmoke {
             settle(2) { NSApp.isActive && window.isKeyWindow && !model.focusedWindows.isEmpty }
             settle(0.2)
             if model.focusedWindows != [0, 1] {
-                failures.append("titlebar click on an inactive workspace left only the frame in front once WindowDock became active; another click is needed: \(model.focusedWindows)")
+                failures.append(
+                    "titlebar click on an inactive workspace left only the frame in front once WindowDock became active; another click is needed: \(model.focusedWindows)"
+                )
             }
         } else {
             failures.append("titlebar focus fixture could not deactivate WindowDock")
@@ -990,7 +1065,9 @@ enum WindowSessionSmoke {
                 // A pane does not track the mouse; deliver its queued mouse-up before the next click.
                 settle(0.3)
                 if model.focusedWindows != [0] {
-                    failures.append("the first click on a \(label) of an inactive workspace did not focus its window: \(model.focusedWindows)")
+                    failures.append(
+                        "the first click on a \(label) of an inactive workspace did not focus its window: \(model.focusedWindows)"
+                    )
                 }
             }
         } else {
@@ -1066,14 +1143,16 @@ enum WindowSessionSmoke {
         application.setActivationPolicy(.accessory)
         DispatchQueue.main.async { application.setActivationPolicy(.regular) }
         let windows = (0..<3).map { index in
-            let window = NSWindow(contentRect: NSRect(x: 300 + index * 40, y: 300 + index * 40, width: 300, height: 200),
-                                  styleMask: [.titled], backing: .buffered, defer: false)
+            let window = NSWindow(
+                contentRect: NSRect(x: 300 + index * 40, y: 300 + index * 40, width: 300, height: 200),
+                styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.orderFrontRegardless()
             return window
         }
-        print(([ProcessInfo.processInfo.processIdentifier] + windows.map { Int32($0.windowNumber) })
-            .map(String.init).joined(separator: " "))
+        print(
+            ([ProcessInfo.processInfo.processIdentifier] + windows.map { Int32($0.windowNumber) })
+                .map(String.init).joined(separator: " "))
         fflush(stdout)
         DispatchQueue.global().async {
             while let line = readLine() {
@@ -1108,7 +1187,9 @@ enum WindowSessionSmoke {
 
         /// Fails with a description when the helper cannot be launched.
         static func launch() -> Result<ActivationHelperProcess, SmokeFailure> {
-            guard let executable = Bundle.main.executableURL else { return .failure(.init("activation helper could not find its executable")) }
+            guard let executable = Bundle.main.executableURL else {
+                return .failure(.init("activation helper could not find its executable"))
+            }
             let process = Process()
             let output = Pipe()
             let input = Pipe()
@@ -1116,7 +1197,9 @@ enum WindowSessionSmoke {
             process.arguments = ["--activation-helper"]
             process.standardOutput = output
             process.standardInput = input
-            do { try process.run() } catch { return .failure(.init("activation helper failed to launch: \(error.localizedDescription)")) }
+            do { try process.run() } catch {
+                return .failure(.init("activation helper failed to launch: \(error.localizedDescription)"))
+            }
             let fields = (String(data: output.fileHandleForReading.availableData, encoding: .utf8) ?? "")
                 .split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
             guard fields.count == 4 else {
@@ -1124,7 +1207,9 @@ enum WindowSessionSmoke {
                 process.waitUntilExit()
                 return .failure(.init("activation helper did not report its windows"))
             }
-            return .success(ActivationHelperProcess(process: process, input: input, pid: pid_t(fields[0]), windows: Array(fields[1...])))
+            return .success(
+                ActivationHelperProcess(
+                    process: process, input: input, pid: pid_t(fields[0]), windows: Array(fields[1...])))
         }
 
         private init(process: Process, input: Pipe, pid: pid_t, windows: [Int]) {
@@ -1167,8 +1252,9 @@ enum WindowSessionSmoke {
             return list.firstIndex { $0[kCGWindowNumber as String] as? Int == number } ?? Int.max
         }
         wait(0.5)
-        let otherApplication = NSWindow(contentRect: NSRect(x: 250, y: 250, width: 500, height: 400),
-                                        styleMask: [.titled], backing: .buffered, defer: false)
+        let otherApplication = NSWindow(
+            contentRect: NSRect(x: 250, y: 250, width: 500, height: 400),
+            styleMask: [.titled], backing: .buffered, defer: false)
         otherApplication.isReleasedWhenClosed = false
         otherApplication.orderFrontRegardless()
         defer { otherApplication.close() }
@@ -1177,11 +1263,14 @@ enum WindowSessionSmoke {
         // The registered window is raised within its inactive app before the app is activated.
         helper.send("raise 2")
         wait(2) { stackIndex(helperWindows[2]) < stackIndex(other) }
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID ||
-            helperWindows[..<2].contains(where: { stackIndex($0) < stackIndex(other) }) {
-            return ["activation fixture did not start with unregistered windows behind another app " +
-                "(helper frontmost: \(NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID), " +
-                "stack: \(helperWindows.map(stackIndex)) vs \(stackIndex(other)))"]
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID
+            || helperWindows[..<2].contains(where: { stackIndex($0) < stackIndex(other) })
+        {
+            return [
+                "activation fixture did not start with unregistered windows behind another app "
+                    + "(helper frontmost: \(NSWorkspace.shared.frontmostApplication?.processIdentifier == helperPID), "
+                    + "stack: \(helperWindows.map(stackIndex)) vs \(stackIndex(other)))"
+            ]
         }
         guard WindowAccess.activateFrontWindowOnly(helperPID) else {
             return ["front-window-only app activation is unavailable, so tab focus would raise every app window"]
@@ -1277,15 +1366,18 @@ enum WindowSessionSmoke {
             }
         }
         guard let visible = NSScreen.main?.visibleFrame,
-              let chrome = source.window.contentView as? WorkspaceChromeView,
-              let destinationChrome = destination.window.contentView as? WorkspaceChromeView else {
+            let chrome = source.window.contentView as? WorkspaceChromeView,
+            let destinationChrome = destination.window.contentView as? WorkspaceChromeView
+        else {
             return ["tab reveal fixture could not find its screen or content"]
         }
-        source.window.setFrame(NSRect(x: visible.minX + 40, y: visible.minY + 40, width: 700, height: 500), display: true)
+        source.window.setFrame(
+            NSRect(x: visible.minX + 40, y: visible.minY + 40, width: 700, height: 500), display: true)
         destination.window.setFrame(source.window.frame.offsetBy(dx: 400, dy: 100), display: true)
         source.session.add(WindowCandidate(element: model.windows[0].element, application: .current, title: "Moved"))
         source.session.add(WindowCandidate(element: model.windows[1].element, application: .current, title: "Stays"))
-        destination.session.add(WindowCandidate(element: model.windows[2].element, application: .current, title: "Destination"))
+        destination.session.add(
+            WindowCandidate(element: model.windows[2].element, application: .current, title: "Destination"))
         destination.window.orderFrontRegardless()
         source.window.orderFrontRegardless()
         chrome.layoutSubtreeIfNeeded()
@@ -1296,7 +1388,8 @@ enum WindowSessionSmoke {
         let destinationOnly = NSPoint(x: destinationFrame.maxX - 60, y: destinationFrame.midY)
         let overlap = NSPoint(x: destinationFrame.minX + 60, y: destinationFrame.minY + 60)
         guard !destinationFrame.contains(sourceOnly), !sourceFrame.contains(destinationOnly),
-              sourceFrame.contains(overlap), destinationFrame.contains(overlap), !source.tabRowContains(overlap) else {
+            sourceFrame.contains(overlap), destinationFrame.contains(overlap), !source.tabRowContains(overlap)
+        else {
             return ["tab reveal fixture could not place overlapping workspaces: \(sourceFrame) \(destinationFrame)"]
         }
 
@@ -1310,7 +1403,9 @@ enum WindowSessionSmoke {
         var button: WorkspaceTabButton?
         func begin() {
             chrome.layoutSubtreeIfNeeded()
-            button = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?.arrangedSubviews.first as? WorkspaceTabButton
+            button =
+                (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?.arrangedSubviews.first
+                as? WorkspaceTabButton
             let token = UUID().uuidString
             board.clearContents()
             board.setString(token, forType: workspaceTabDragType)
@@ -1321,7 +1416,8 @@ enum WindowSessionSmoke {
         func inFront(_ front: WorkspaceController, of back: WorkspaceController) -> Bool {
             let order = NSApp.orderedWindows
             guard let first = order.firstIndex(where: { $0 === front.window }),
-                  let second = order.firstIndex(where: { $0 === back.window }) else { return false }
+                let second = order.firstIndex(where: { $0 === back.window })
+            else { return false }
             return first < second
         }
         func modelIndex(of id: UUID?, in session: WindowSession) -> Int? {
@@ -1334,32 +1430,42 @@ enum WindowSessionSmoke {
         begin()
         guard button != nil, transfer.isActive else { return ["tab reveal fixture could not start a tab drag"] }
         move(overlap)
-        if !model.focusedWindows.isEmpty || !inFront(source, of: destination) ||
-            destinationChrome.windowDropPanel?.isVisible == true {
-            failures.append("a workspace hidden behind the tab's own workspace took the tab where they overlap: " +
-                "focused \(model.focusedWindows), source front \(inFront(source, of: destination)), " +
-                "marker \(destinationChrome.windowDropPanel?.isVisible == true)")
+        if !model.focusedWindows.isEmpty || !inFront(source, of: destination)
+            || destinationChrome.windowDropPanel?.isVisible == true
+        {
+            failures.append(
+                "a workspace hidden behind the tab's own workspace took the tab where they overlap: "
+                    + "focused \(model.focusedWindows), source front \(inFront(source, of: destination)), "
+                    + "marker \(destinationChrome.windowDropPanel?.isVisible == true)")
         }
         move(destinationOnly)
-        if !inFront(destination, of: source) || model.focusedWindows != [2] ||
-            destinationChrome.windowDropPanel?.isVisible != true {
-            failures.append("a tab dragged over a workspace behind did not bring it and its windows forward: " +
-                "front \(inFront(destination, of: source)), focused \(model.focusedWindows)")
+        if !inFront(destination, of: source) || model.focusedWindows != [2]
+            || destinationChrome.windowDropPanel?.isVisible != true
+        {
+            failures.append(
+                "a tab dragged over a workspace behind did not bring it and its windows forward: "
+                    + "front \(inFront(destination, of: source)), focused \(model.focusedWindows)")
         }
         move(overlap)
-        if !inFront(destination, of: source) || model.focusedWindows != [2] ||
-            destinationChrome.windowDropPanel?.isVisible != true {
-            failures.append("the workspace brought forward lost the overlap to the one behind it: \(model.focusedWindows)")
+        if !inFront(destination, of: source) || model.focusedWindows != [2]
+            || destinationChrome.windowDropPanel?.isVisible != true
+        {
+            failures.append(
+                "the workspace brought forward lost the overlap to the one behind it: \(model.focusedWindows)")
         }
         move(sourceOnly)
-        if !inFront(source, of: destination) || model.focusedWindows.count < 2 || model.focusedWindows.last != sourceSelected {
+        if !inFront(source, of: destination) || model.focusedWindows.count < 2
+            || model.focusedWindows.last != sourceSelected
+        {
             failures.append("moving the tab back did not bring its own workspace forward: \(model.focusedWindows)")
         }
         move(destinationOnly)
         model.focusedWindows.removeAll()
         end(destinationOnly, cancelled: true)
-        if transfer.isActive || !inFront(source, of: destination) || model.focusedWindows.last != sourceSelected ||
-            !transfers.isEmpty || source.session.windows.count != 2 || destinationChrome.windowDropPanel?.isVisible == true {
+        if transfer.isActive || !inFront(source, of: destination) || model.focusedWindows.last != sourceSelected
+            || !transfers.isEmpty || source.session.windows.count != 2
+            || destinationChrome.windowDropPanel?.isVisible == true
+        {
             failures.append("a cancelled tab drag left the workspace it passed over in front: \(model.focusedWindows)")
         }
 
@@ -1367,12 +1473,17 @@ enum WindowSessionSmoke {
         begin()
         move(destinationOnly)
         end(destinationOnly, cancelled: false)
-        if transfer.isActive || transfers.count != 1 || transfers.first?.0 !== source || transfers.first?.1 !== destination ||
-            modelIndex(of: destination.session.selectedID, in: destination.session) != 0 || source.session.windows.count != 1 {
+        if transfer.isActive || transfers.count != 1 || transfers.first?.0 !== source
+            || transfers.first?.1 !== destination
+            || modelIndex(of: destination.session.selectedID, in: destination.session) != 0
+            || source.session.windows.count != 1
+        {
             failures.append("dropping a tab on another workspace did not move it there")
         }
         if !inFront(destination, of: source) || model.focusedWindows.last != 0 {
-            failures.append("the workspace that received a tab was not left in front with the moved window: \(model.focusedWindows)")
+            failures.append(
+                "the workspace that received a tab was not left in front with the moved window: \(model.focusedWindows)"
+            )
         }
 
         // Both workspaces have a pane at the overlap; moving the pointer there must not raise the source's overlay.
@@ -1416,21 +1527,27 @@ enum WindowSessionSmoke {
         func settle(_ seconds: TimeInterval = 0.5, until condition: () -> Bool = { false }) {
             let deadline = Date().addingTimeInterval(seconds)
             while !condition(), Date() < deadline {
-                if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true) {
+                if let event = NSApp.nextEvent(
+                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true)
+                {
                     NSApp.sendEvent(event)
                 }
             }
         }
         guard let visible = NSScreen.main?.visibleFrame,
-              let chrome = source.window.contentView as? WorkspaceChromeView else {
+            let chrome = source.window.contentView as? WorkspaceChromeView
+        else {
             return ["tab drop key fixture could not find its screen or content"]
         }
-        source.window.setFrame(NSRect(x: visible.minX + 40, y: visible.minY + 40, width: 500, height: 400), display: true)
+        source.window.setFrame(
+            NSRect(x: visible.minX + 40, y: visible.minY + 40, width: 500, height: 400), display: true)
         destination.window.setFrame(source.window.frame.offsetBy(dx: 560, dy: 0), display: true)
-        source.session.add((0..<3).map {
-            WindowCandidate(element: model.windows[$0].element, application: .current, title: "Moved \($0)")
-        })
-        destination.session.add(WindowCandidate(element: model.windows[3].element, application: .current, title: "Destination"))
+        source.session.add(
+            (0..<3).map {
+                WindowCandidate(element: model.windows[$0].element, application: .current, title: "Moved \($0)")
+            })
+        destination.session.add(
+            WindowCandidate(element: model.windows[3].element, application: .current, title: "Destination"))
         let dropPoint = NSPoint(x: destination.window.frame.midX, y: destination.window.frame.midY)
         let transfer = WorkspaceTabTransfer { [source, destination] }
         transfer.attach(source)
@@ -1463,7 +1580,8 @@ enum WindowSessionSmoke {
         func inFront(_ front: WorkspaceController, of back: WorkspaceController) -> Bool {
             let order = NSApp.orderedWindows
             guard let first = order.firstIndex(where: { $0 === front.window }),
-                  let second = order.firstIndex(where: { $0 === back.window }) else { return false }
+                let second = order.firstIndex(where: { $0 === back.window })
+            else { return false }
             return first < second
         }
 
@@ -1483,8 +1601,10 @@ enum WindowSessionSmoke {
             }
             settle(0.3)
             chrome.layoutSubtreeIfNeeded()
-            guard let button = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?
-                .arrangedSubviews.first as? WorkspaceTabButton else {
+            guard
+                let button = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?
+                    .arrangedSubviews.first as? WorkspaceTabButton
+            else {
                 failures.append("tab drop key fixture could not find a tab to drag")
                 continue
             }
@@ -1502,8 +1622,9 @@ enum WindowSessionSmoke {
             let operations = model.operations.count
             settle()
             if model.operations.dropFirst(operations).contains(where: { if case .raise = $0 { true } else { false } }) {
-                failures.append("a tab dropped while WindowDock was \(state) raised the workspace again after its windows " +
-                    "were handed focus, which can order the frame above them")
+                failures.append(
+                    "a tab dropped while WindowDock was \(state) raised the workspace again after its windows "
+                        + "were handed focus, which can order the frame above them")
             }
             guard setActive(false), setActive(true) else {
                 failures.append("tab drop key fixture could not switch WindowDock away and back")
@@ -1512,8 +1633,9 @@ enum WindowSessionSmoke {
             activation.applicationDidBecomeActive()
             settle()
             if activation.activeController !== destination || !inFront(destination, of: source) {
-                failures.append("after a tab was dropped while WindowDock was \(state), activating WindowDock again " +
-                    "brought back the workspace the tab came from")
+                failures.append(
+                    "after a tab was dropped while WindowDock was \(state), activating WindowDock again "
+                        + "brought back the workspace the tab came from")
             }
         }
         return failures
@@ -1524,9 +1646,11 @@ enum WindowSessionSmoke {
     private static func runRemovalApertureChecks() -> [String] {
         var failures: [String] = []
         func shownWhileRestoring(_ index: Int, in session: WindowSession, _ model: Model) -> (Bool, Set<UUID>?) {
-            guard let id = session.windows.first(where: {
-                CFEqual($0.candidate.element, model.windows[index].element)
-            })?.id else { return (false, nil) }
+            guard
+                let id = session.windows.first(where: {
+                    CFEqual($0.candidate.element, model.windows[index].element)
+                })?.id
+            else { return (false, nil) }
             var shown: Set<UUID>?
             model.onSetFrame = { moved, frame in
                 if moved == index, frame == model.windows[index].originalFrame { shown = Set(model.paneFrames.keys) }
@@ -1539,27 +1663,32 @@ enum WindowSessionSmoke {
         guard singleModel.paneFrames.count == 1 else { return ["removal aperture fixture did not show its tab"] }
         let (removedLast, shownForLast) = shownWhileRestoring(0, in: single, singleModel)
         if !removedLast || shownForLast != [] || !singleModel.paneFrames.isEmpty {
-            failures.append("removing the last tab moved its window away while the workspace still showed through to it: " +
-                "\(shownForLast.map { "\($0.count) panes" } ?? "not restored")")
+            failures.append(
+                "removing the last tab moved its window away while the workspace still showed through to it: "
+                    + "\(shownForLast.map { "\($0.count) panes" } ?? "not restored")")
         }
 
         let (split, splitModel) = fixture(registering: [0, 1, 3])
         split.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
         guard let left = split.cells[0], let right = split.cells[1], splitModel.paneFrames.count == 2,
-              let leftIndex = splitModel.windows.firstIndex(where: { window in
-                  split.windows.contains { $0.id == left && CFEqual($0.candidate.element, window.element) }
-              }) else { return failures + ["removal aperture fixture could not show two panes"] }
+            let leftIndex = splitModel.windows.firstIndex(where: { window in
+                split.windows.contains { $0.id == left && CFEqual($0.candidate.element, window.element) }
+            })
+        else { return failures + ["removal aperture fixture could not show two panes"] }
         let (removedPane, shownForPane) = shownWhileRestoring(leftIndex, in: split, splitModel)
         if !removedPane || shownForPane != [right] {
-            failures.append("removing a split pane's tab did not stop showing only that pane before moving its window: " +
-                "\(shownForPane.map { $0.contains(left) ? "still shown" : "\($0.count) panes shown" } ?? "not restored")")
+            failures.append(
+                "removing a split pane's tab did not stop showing only that pane before moving its window: "
+                    + "\(shownForPane.map { $0.contains(left) ? "still shown" : "\($0.count) panes shown" } ?? "not restored")"
+            )
         }
 
         let (failing, failingModel) = fixture(registering: [0])
         failingModel.failedMinimizations.insert(0)
         let (removedFailing, _) = shownWhileRestoring(0, in: failing, failingModel)
-        if removedFailing || failing.windows.count != 1 ||
-            failing.selectedID.map({ failingModel.paneFrames[$0] }) != .some(failingModel.target) {
+        if removedFailing || failing.windows.count != 1
+            || failing.selectedID.map({ failingModel.paneFrames[$0] }) != .some(failingModel.target)
+        {
             failures.append("a tab whose window could not be restored was not shown in its pane again")
         }
         return failures
@@ -1573,8 +1702,8 @@ enum WindowSessionSmoke {
             return model.windows.firstIndex { CFEqual($0.element, window.candidate.element) }
         }
         guard let left = modelIndex(session.cells[0]), let right = modelIndex(session.cells[1]),
-              let hidden = [0, 1, 3].first(where: { $0 != left && $0 != right }),
-              model.windows[left].frame == model.target, model.windows[right].frame == model.rightTarget
+            let hidden = [0, 1, 3].first(where: { $0 != left && $0 != right }),
+            model.windows[left].frame == model.target, model.windows[right].frame == model.rightTarget
         else { return ["displaced window fixture could not show two panes"] }
         let fitted = model.windows.map(\.frame)
         var failures: [String] = []
@@ -1589,11 +1718,16 @@ enum WindowSessionSmoke {
         model.windows[hidden].frame.origin.x += 300
         model.operations.removeAll()
         session.refitDisplacedWindows()
-        if model.windows[left].frame != fitted[left] || session.cells[0].flatMap({ model.paneFrames[$0] }) != fitted[left] {
-            failures.append("a window maximized outside WindowDock was not fitted back into its pane: \(model.windows[left].frame)")
+        if model.windows[left].frame != fitted[left]
+            || session.cells[0].flatMap({ model.paneFrames[$0] }) != fitted[left]
+        {
+            failures.append(
+                "a window maximized outside WindowDock was not fitted back into its pane: \(model.windows[left].frame)")
         }
         if model.windows[hidden].frame != fitted[hidden] {
-            failures.append("a background tab's window moved outside WindowDock was not fitted back: \(model.windows[hidden].frame)")
+            failures.append(
+                "a background tab's window moved outside WindowDock was not fitted back: \(model.windows[hidden].frame)"
+            )
         }
         if model.operations.contains(.resize(right)) || model.operations.contains(.move(right)) {
             failures.append("refitting moved a window that had stayed in its pane")
@@ -1613,19 +1747,24 @@ enum WindowSessionSmoke {
         func settle(_ seconds: TimeInterval = 0.5, until condition: () -> Bool = { false }) {
             let deadline = Date().addingTimeInterval(seconds)
             while !condition(), Date() < deadline {
-                if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true) {
+                if let event = NSApp.nextEvent(
+                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true)
+                {
                     NSApp.sendEvent(event)
                 }
             }
         }
         window.setFrame(NSRect(x: 160, y: 180, width: 900, height: 600), display: true)
         controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
-        controller.session.add(model.windows.map {
-            WindowCandidate(element: $0.element, application: .current, title: "Refit probe")
-        })
+        controller.session.add(
+            model.windows.map {
+                WindowCandidate(element: $0.element, application: .current, title: "Refit probe")
+            })
         controller.bringToFront()
         settle()
-        guard NSApp.isActive, window.isKeyWindow else { return ["activation refit fixture did not become active and key"] }
+        guard NSApp.isActive, window.isKeyWindow else {
+            return ["activation refit fixture did not become active and key"]
+        }
         let fitted = model.windows.map(\.frame)
         let grid = controller.session.gridSize
         let activation = WorkspaceActivation(controllers: { [controller] })
@@ -1643,7 +1782,9 @@ enum WindowSessionSmoke {
         activation.applicationDidBecomeActive()
         settle { raised(0) }
         if model.windows[0].frame != fitted[0] {
-            failures.append("a window maximized while another app was active stayed maximized when WindowDock became active: \(model.windows[0].frame)")
+            failures.append(
+                "a window maximized while another app was active stayed maximized when WindowDock became active: \(model.windows[0].frame)"
+            )
         }
         if model.operations.contains(.resize(1)) || model.operations.contains(.move(1)) {
             failures.append("activation moved a window that had stayed in its pane")
@@ -1665,8 +1806,10 @@ enum WindowSessionSmoke {
         model.windows[1].frame = fitted[1].offsetBy(dx: 0, dy: 40)
         settle(2) { raised(1) }
         if model.windows[1].frame != fitted[1] || controller.session.gridSize != grid {
-            failures.append("a window that left full screen was not fitted back into its pane: " +
-                "\(model.windows[1].frame), grid \(controller.session.gridSize.columns)×\(controller.session.gridSize.rows)")
+            failures.append(
+                "a window that left full screen was not fitted back into its pane: "
+                    + "\(model.windows[1].frame), grid \(controller.session.gridSize.columns)×\(controller.session.gridSize.rows)"
+            )
         }
         if !raised(1) {
             failures.append("the workspace's windows were not raised once the window had left full screen")
@@ -1696,14 +1839,16 @@ enum WindowSessionSmoke {
         let originalOrder = orderingSession.windows.map(\.id)
         let originalCells = orderingSession.cells
         orderingSession.reorderWindows([originalOrder[2], originalOrder[1], originalOrder[0]])
-        if orderingSession.windows.map(\.id) != [originalOrder[2], originalOrder[1], originalOrder[0]] ||
-            orderingSession.cells != originalCells || orderingModel.changeCount != 1 ||
-            !orderingModel.operations.isEmpty {
+        if orderingSession.windows.map(\.id) != [originalOrder[2], originalOrder[1], originalOrder[0]]
+            || orderingSession.cells != originalCells || orderingModel.changeCount != 1
+            || !orderingModel.operations.isEmpty
+        {
             failures.append("reordering tabs changed pane assignments or window state")
         }
         orderingSession.reorderWindows([originalOrder[0], originalOrder[0], originalOrder[2]])
-        if orderingSession.windows.map(\.id) != [originalOrder[2], originalOrder[1], originalOrder[0]] ||
-            orderingModel.changeCount != 1 {
+        if orderingSession.windows.map(\.id) != [originalOrder[2], originalOrder[1], originalOrder[0]]
+            || orderingModel.changeCount != 1
+        {
             failures.append("invalid tab order changed the session")
         }
 
@@ -1725,15 +1870,17 @@ enum WindowSessionSmoke {
         model.operations.removeAll()
         model.target.origin.x += 70
         session.sync()
-        if model.operations != [.move(0), .move(1), .move(2), .raise(2)] ||
-            model.windows.prefix(3).contains(where: { $0.frame != model.target }) {
+        if model.operations != [.move(0), .move(1), .move(2), .raise(2)]
+            || model.windows.prefix(3).contains(where: { $0.frame != model.target })
+        {
             failures.append("moving the workspace did not move the entire stack without resizing")
         }
         model.operations.removeAll()
         model.target.size.width -= 100
         session.sync()
-        if model.operations != [.resize(0), .resize(1), .resize(2), .raise(2)] ||
-            model.windows.prefix(3).contains(where: { $0.frame != model.target }) {
+        if model.operations != [.resize(0), .resize(1), .resize(2), .raise(2)]
+            || model.windows.prefix(3).contains(where: { $0.frame != model.target })
+        {
             failures.append("resizing the workspace left background tabs behind or above the selected tab")
         }
         model.operations.removeAll()
@@ -1749,46 +1896,54 @@ enum WindowSessionSmoke {
         model.windows[1].minimized = true
         session.suspend()
         session.suspend()
-        if model.windows.prefix(3).contains(where: { !$0.minimized }) ||
-            model.operations != [.minimize(0, true), .minimize(2, true)] {
+        if model.windows.prefix(3).contains(where: { !$0.minimized })
+            || model.operations != [.minimize(0, true), .minimize(2, true)]
+        {
             failures.append("workspace suspension did not minimize all tabs exactly once")
         }
         model.target.origin.y += 40
         session.resume()
-        if model.windows[0].minimized || model.windows[2].minimized || !model.windows[1].minimized ||
-            model.windows[0].frame != model.target || model.windows[2].frame != model.target ||
-            model.operations.last != .raise(0) {
+        if model.windows[0].minimized || model.windows[2].minimized || !model.windows[1].minimized
+            || model.windows[0].frame != model.target || model.windows[2].frame != model.target
+            || model.operations.last != .raise(0)
+        {
             failures.append("resume did not restore the stack while preserving a manually minimized inactive tab")
         }
-        if !session.remove(ids[0]) || session.selectedID != ids[1] ||
-            model.windows[0].frame != model.windows[0].originalFrame || model.windows[0].minimized {
+        if !session.remove(ids[0]) || session.selectedID != ids[1]
+            || model.windows[0].frame != model.windows[0].originalFrame || model.windows[0].minimized
+        {
             failures.append("removing the selected tab did not restore it and present the next tab")
         }
-        if !session.restoreAll().isEmpty ||
-            model.windows.prefix(3).contains(where: {
+        if !session.restoreAll().isEmpty
+            || model.windows.prefix(3).contains(where: {
                 $0.frame != $0.originalFrame || $0.minimized != $0.originallyMinimized
-            }) {
+            })
+        {
             failures.append("stacked tabs did not restore their original frames and minimized states")
         }
-        if model.windows[3].frame != model.windows[3].originalFrame ||
-            model.windows[3].minimized != model.windows[3].originallyMinimized {
+        if model.windows[3].frame != model.windows[3].originalFrame
+            || model.windows[3].minimized != model.windows[3].originallyMinimized
+        {
             failures.append("unregistered sibling window was modified")
         }
-        return failures + checkPartialFailures() + checkBatchAddition() +
-            checkSplitSelection(layout: .sideBySide) + checkSplitSelection(layout: .stacked) +
-            checkGrid() + checkGridConstraints() + checkInput()
+        return failures + checkPartialFailures() + checkBatchAddition() + checkSplitSelection(layout: .sideBySide)
+            + checkSplitSelection(layout: .stacked) + checkGrid() + checkGridConstraints() + checkInput()
     }
 
     private static func gridTargets(_ size: WorkspaceGridSize) -> [Int: CGRect] {
         let width = (1600 - CGFloat(size.columns - 1) * 32) / CGFloat(size.columns)
         let height = (1000 - CGFloat(size.rows - 1) * 32) / CGFloat(size.rows)
-        return Dictionary(uniqueKeysWithValues: (0..<size.cellCount).map { index in
-            (index, CGRect(
-                x: 200 + CGFloat(index % size.columns) * (width + 32),
-                y: 160 + CGFloat(index / size.columns) * (height + 32),
-                width: width, height: height
-            ))
-        })
+        return Dictionary(
+            uniqueKeysWithValues: (0..<size.cellCount).map { index in
+                (
+                    index,
+                    CGRect(
+                        x: 200 + CGFloat(index % size.columns) * (width + 32),
+                        y: 160 + CGFloat(index / size.columns) * (height + 32),
+                        width: width, height: height
+                    )
+                )
+            })
     }
 
     private static func configureGridFixture(_ session: WindowSession, _ model: Model) {
@@ -1805,8 +1960,9 @@ enum WindowSessionSmoke {
         let ids = session.windows.map(\.id)
         configureGridFixture(session, model)
         session.setGrid(WorkspaceGridSize(columns: 4, rows: 4))
-        if session.gridSize.cellCount != 16 || session.visibleWindows.count != 16 ||
-            Set(session.cells.compactMap { $0 }).count != 16 || model.paneFrames.count != 16 {
+        if session.gridSize.cellCount != 16 || session.visibleWindows.count != 16
+            || Set(session.cells.compactMap { $0 }).count != 16 || model.paneFrames.count != 16
+        {
             failures.append("4x4 grid did not display sixteen distinct windows")
         }
         let visibleFrames = Array(model.paneFrames.values)
@@ -1828,10 +1984,11 @@ enum WindowSessionSmoke {
         }
         if let source = session.cells[0], let destination = session.cells[15] {
             session.moveWindow(source, toCell: 15)
-            if session.cells[15] != source || session.cells[0] != destination ||
-                Array(session.cells[1..<15]) != Array(oldCells[1..<15]) ||
-                session.selectedID != source || model.paneFrames[source] != model.gridTargets?[15] ||
-                model.paneFrames[destination] != model.gridTargets?[0] {
+            if session.cells[15] != source || session.cells[0] != destination
+                || Array(session.cells[1..<15]) != Array(oldCells[1..<15]) || session.selectedID != source
+                || model.paneFrames[source] != model.gridTargets?[15]
+                || model.paneFrames[destination] != model.gridTargets?[0]
+            {
                 failures.append("pane exchange did not swap only the two displayed windows and their actual frames")
             }
         }
@@ -1841,22 +1998,26 @@ enum WindowSessionSmoke {
             failures.append("selecting a hidden tab changed a cell other than the active one")
         }
         session.setGrid(WorkspaceGridSize(columns: 3, rows: 4))
-        if session.gridSize.columns != 3 || session.gridSize.rows != 4 ||
-            session.selectedID != hidden || Set(session.cells.compactMap { $0 }).count != 12 {
+        if session.gridSize.columns != 3 || session.gridSize.rows != 4 || session.selectedID != hidden
+            || Set(session.cells.compactMap { $0 }).count != 12
+        {
             failures.append("shrinking only the column count lost the active window or duplicated cells")
         }
         session.setGrid(.single)
-        if session.selectedID != hidden || model.paneFrames.count != 1 ||
-            model.windows.prefix(17).contains(where: { $0.frame != gridTargets(.single)[0] }) {
+        if session.selectedID != hidden || model.paneFrames.count != 1
+            || model.windows.prefix(17).contains(where: { $0.frame != gridTargets(.single)[0] })
+        {
             failures.append("collapsing a grid did not reunite hidden stacks behind the active tab")
         }
         session.setGrid(WorkspaceGridSize(columns: 5, rows: 1))
         if session.gridSize != .single || model.notices.last?.needsAttention != true {
             failures.append("invalid grid dimensions were accepted or rejected silently")
         }
-        if !session.restoreAll().isEmpty || model.windows.contains(where: {
-            $0.frame != $0.originalFrame || $0.minimized != $0.originallyMinimized
-        }) {
+        if !session.restoreAll().isEmpty
+            || model.windows.contains(where: {
+                $0.frame != $0.originalFrame || $0.minimized != $0.originallyMinimized
+            })
+        {
             failures.append("sixteen-cell lifecycle changed original states or an unregistered sibling")
         }
 
@@ -1864,11 +2025,13 @@ enum WindowSessionSmoke {
         configureGridFixture(emptySession, emptyModel)
         emptySession.setGrid(WorkspaceGridSize(columns: 2, rows: 2))
         emptySession.activateCell(3)
-        emptySession.add(Array(emptyModel.windows.prefix(3)).map {
-            WindowCandidate(element: $0.element, application: .current, title: "Fill empty cells")
-        })
-        if emptySession.visibleWindows.count != 3 || Set(emptySession.cells.compactMap { $0 }).count != 3 ||
-            emptySession.cells[3] != emptySession.windows.first?.id {
+        emptySession.add(
+            Array(emptyModel.windows.prefix(3)).map {
+                WindowCandidate(element: $0.element, application: .current, title: "Fill empty cells")
+            })
+        if emptySession.visibleWindows.count != 3 || Set(emptySession.cells.compactMap { $0 }).count != 3
+            || emptySession.cells[3] != emptySession.windows.first?.id
+        {
             failures.append("batch addition did not fill distinct empty grid cells starting at the active cell")
         }
         guard let emptyCell = emptySession.cells.firstIndex(where: { $0 == nil }) else {
@@ -1877,8 +2040,9 @@ enum WindowSessionSmoke {
         let movedID = emptySession.windows.last!.id
         let previous = emptySession.cellIndex(for: movedID)!
         emptySession.moveWindow(movedID, toCell: emptyCell)
-        if emptySession.cells[emptyCell] != movedID || emptySession.cells[previous] != nil ||
-            emptySession.visibleWindows.count != 3 {
+        if emptySession.cells[emptyCell] != movedID || emptySession.cells[previous] != nil
+            || emptySession.visibleWindows.count != 3
+        {
             failures.append("moving a displayed tab into an empty cell duplicated it or lost another pane")
         }
         emptySession.activateCell(previous)
@@ -1904,14 +2068,15 @@ enum WindowSessionSmoke {
                     0: CGRect(x: 200, y: 160, width: 900, height: 484),
                     1: CGRect(x: 1132, y: 160, width: 668, height: 484),
                     2: CGRect(x: 200, y: 676, width: 900, height: 484),
-                    3: CGRect(x: 1132, y: 676, width: 668, height: 484)
+                    3: CGRect(x: 1132, y: 676, width: 668, height: 484),
                 ]
             }
             return true
         }
         session.setGrid(WorkspaceGridSize(columns: 2, rows: 2))
-        if session.gridSize.cellCount != 4 || learned[0] != CGSize(width: 900, height: 0) ||
-            model.paneFrames.count != 4 || model.windows[3].frame != model.gridTargets?[0] {
+        if session.gridSize.cellCount != 4 || learned[0] != CGSize(width: 900, height: 0) || model.paneFrames.count != 4
+            || model.windows[3].frame != model.gridTargets?[0]
+        {
             failures.append("actual minimum width was not learned and fitted without inventing a minimum height")
         }
         let frames = Array(model.paneFrames.values)
@@ -1926,9 +2091,10 @@ enum WindowSessionSmoke {
         blockedModel.windows[1].minimumSize.width = 1500
         blocked.fitMinimumSizes = { sizes in sizes.values.allSatisfy { $0.width <= 1000 } }
         blocked.setGrid(WorkspaceGridSize(columns: 2, rows: 2))
-        if blocked.gridSize != .single || blockedModel.paneFrames.count != 1 ||
-            blockedModel.notices.last?.needsAttention != true ||
-            blockedModel.notices.last?.text.contains("1×1") != true {
+        if blocked.gridSize != .single || blockedModel.paneFrames.count != 1
+            || blockedModel.notices.last?.needsAttention != true
+            || blockedModel.notices.last?.text.contains("1×1") != true
+        {
             failures.append("infeasible minimum sizes did not reject the overlapping grid explicitly")
         }
         return failures
@@ -1937,9 +2103,10 @@ enum WindowSessionSmoke {
     private static func checkInput() -> [String] {
         var failures: [String] = []
         func key(_ flags: NSEvent.ModifierFlags = .control, code: UInt16 = 48) -> NSEvent {
-            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
-                             windowNumber: 0, context: nil, characters: "\t",
-                             charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: code)!
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: 0, context: nil, characters: "\t",
+                charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: code)!
         }
         var context = WorkspaceShortcutContext()
         if context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [2]) != 1 {
@@ -1960,8 +2127,9 @@ enum WindowSessionSmoke {
         }
         _ = context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [2])
         context.applicationDidActivate(9)
-        if context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [3]) != nil ||
-            context.direction(for: key([.control, .command]), ownPID: 1, frontPID: 1, visiblePIDs: []) != nil {
+        if context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [3]) != nil
+            || context.direction(for: key([.control, .command]), ownPID: 1, frontPID: 1, visiblePIDs: []) != nil
+        {
             failures.append("shortcut context survived an unrelated app activation or accepted a different shortcut")
         }
         _ = context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [2])
@@ -1999,9 +2167,9 @@ enum WindowSessionSmoke {
         }
         configure(model, for: layout)
         session.setSplit(true, layout: layout)
-        if session.primaryID != ids[2] || session.secondaryID != ids[0] ||
-            model.windows[2].frame != model.target || model.windows[0].frame != model.rightTarget ||
-            Set(model.paneFrames.keys) != Set([ids[2], ids[0]]) {
+        if session.primaryID != ids[2] || session.secondaryID != ids[0] || model.windows[2].frame != model.target
+            || model.windows[0].frame != model.rightTarget || Set(model.paneFrames.keys) != Set([ids[2], ids[0]])
+        {
             failures.append("split did not display two distinct windows in their pane frames")
         }
         model.operations.removeAll()
@@ -2010,16 +2178,18 @@ enum WindowSessionSmoke {
             failures.append("focusing the right pane moved windows or changed pane assignments")
         }
         session.select(ids[1])
-        if session.primaryID != ids[2] || session.secondaryID != ids[1] ||
-            model.windows[1].frame != model.rightTarget || model.windows[2].frame != model.target {
+        if session.primaryID != ids[2] || session.secondaryID != ids[1] || model.windows[1].frame != model.rightTarget
+            || model.windows[2].frame != model.target
+        {
             failures.append("selecting a hidden tab did not replace only the active right pane")
         }
         let other: WorkspaceSplitLayout = layout == .sideBySide ? .stacked : .sideBySide
         configure(model, for: other)
         session.setSplit(true, layout: other)
-        if session.primaryID != ids[2] || session.secondaryID != ids[1] || session.selectedID != ids[1] ||
-            session.splitLayout != other || model.windows[2].frame != model.target ||
-            model.windows[1].frame != model.rightTarget {
+        if session.primaryID != ids[2] || session.secondaryID != ids[1] || session.selectedID != ids[1]
+            || session.splitLayout != other || model.windows[2].frame != model.target
+            || model.windows[1].frame != model.rightTarget
+        {
             failures.append("changing split orientation lost the displayed windows or the active pane")
         }
         configure(model, for: layout)
@@ -2030,15 +2200,17 @@ enum WindowSessionSmoke {
             failures.append("selecting a displayed tab resized it or swapped the visible panes")
         }
         session.cycle(1)
-        if session.primaryID != ids[0] || session.secondaryID != ids[1] ||
-            model.windows[0].frame != model.target || model.windows[1].frame != model.rightTarget {
+        if session.primaryID != ids[0] || session.secondaryID != ids[1] || model.windows[0].frame != model.target
+            || model.windows[1].frame != model.rightTarget
+        {
             failures.append("tab cycling did not replace the active left pane independently")
         }
         model.target.origin.y += 40
         model.rightTarget.origin.y += 40
         session.sync()
-        if model.windows[0].frame != model.target || model.windows[1].frame != model.rightTarget ||
-            model.windows[2].frame != model.target {
+        if model.windows[0].frame != model.target || model.windows[1].frame != model.rightTarget
+            || model.windows[2].frame != model.target
+        {
             failures.append("workspace movement did not preserve both pane stacks")
         }
         model.failedMoves.insert(1)
@@ -2055,16 +2227,18 @@ enum WindowSessionSmoke {
         }
         session.suspend()
         session.resume()
-        if model.windows.prefix(3).contains(where: { $0.minimized }) ||
-            model.windows[0].frame != model.target || model.windows[1].frame != model.rightTarget {
+        if model.windows.prefix(3).contains(where: { $0.minimized }) || model.windows[0].frame != model.target
+            || model.windows[1].frame != model.rightTarget
+        {
             failures.append("split suspension/resume lost a visible pane or its geometry")
         }
         model.target = full
         session.focusVisibleWindow(ids[1])
         session.setSplit(false)
-        if session.primaryID != ids[1] || session.isSplit ||
-            model.windows.prefix(3).contains(where: { $0.frame != full }) ||
-            Set(model.paneFrames.keys) != Set([ids[1]]) {
+        if session.primaryID != ids[1] || session.isSplit
+            || model.windows.prefix(3).contains(where: { $0.frame != full })
+            || Set(model.paneFrames.keys) != Set([ids[1]])
+        {
             failures.append("disabling split did not expand the active pane and reunite the stack")
         }
         configure(model, for: layout)
@@ -2073,20 +2247,20 @@ enum WindowSessionSmoke {
             failures.append("removing a visible pane did not fill it from a hidden tab")
         }
         model.target = full
-        if !session.remove(ids[2]) || session.isSplit || session.primaryID != ids[0] ||
-            model.windows[0].frame != full {
+        if !session.remove(ids[2]) || session.isSplit || session.primaryID != ids[0] || model.windows[0].frame != full {
             failures.append("removing down to one tab did not automatically collapse split")
         }
-        if !session.remove(ids[0]) || session.primaryID != nil || session.selectedID != nil ||
-            !model.paneFrames.isEmpty {
+        if !session.remove(ids[0]) || session.primaryID != nil || session.selectedID != nil || !model.paneFrames.isEmpty
+        {
             failures.append("removing the final split tab left a stale pane or aperture")
         }
         let (rightSession, rightModel) = fixture()
         let rightIDs = rightSession.windows.map(\.id)
         configure(rightModel, for: layout)
         rightSession.setSplit(true, layout: layout)
-        if !rightSession.remove(rightIDs[0]) || rightSession.primaryID != rightIDs[2] ||
-            rightSession.secondaryID != rightIDs[1] || rightSession.selectedID != rightIDs[2] {
+        if !rightSession.remove(rightIDs[0]) || rightSession.primaryID != rightIDs[2]
+            || rightSession.secondaryID != rightIDs[1] || rightSession.selectedID != rightIDs[2]
+        {
             failures.append("removing the inactive right pane changed the active left pane")
         }
         rightSession.focusVisibleWindow(rightIDs[1])
@@ -2094,11 +2268,11 @@ enum WindowSessionSmoke {
             element: rightModel.windows[3].element, application: .current, title: "New right tab"
         )
         rightSession.add(addedCandidate)
-        if rightSession.primaryID != rightIDs[2] ||
-            rightSession.selected?.candidate.isSameWindow(as: addedCandidate) != true ||
-            rightSession.secondaryID != rightSession.selectedID ||
-            rightModel.windows[3].frame != rightModel.rightTarget ||
-            rightModel.windows[2].frame != rightModel.target {
+        if rightSession.primaryID != rightIDs[2]
+            || rightSession.selected?.candidate.isSameWindow(as: addedCandidate) != true
+            || rightSession.secondaryID != rightSession.selectedID
+            || rightModel.windows[3].frame != rightModel.rightTarget || rightModel.windows[2].frame != rightModel.target
+        {
             failures.append("adding a tab to the active right pane displaced the left pane")
         }
         return failures.map { "\(layout): \($0)" }
@@ -2111,17 +2285,20 @@ enum WindowSessionSmoke {
             WindowCandidate(element: $0.element, application: .current, title: "Batch")
         }
         session.add([candidates[0], candidates[2], candidates[0], candidates[1]])
-        if session.windows.count != 3 || session.selected?.candidate.isSameWindow(as: candidates[1]) != true ||
-            model.changeCount != 1 || model.operations.filter({
+        if session.windows.count != 3 || session.selected?.candidate.isSameWindow(as: candidates[1]) != true
+            || model.changeCount != 1
+            || model.operations.filter({
                 if case .raise = $0 { return true }
                 return false
-            }) != [.raise(1)] ||
-            model.windows.prefix(3).contains(where: { $0.minimized || $0.frame != model.target }) {
+            }) != [.raise(1)] || model.windows.prefix(3).contains(where: { $0.minimized || $0.frame != model.target })
+        {
             failures.append("batch addition did not register unique windows and present only the final tab")
         }
-        if !session.restoreAll().isEmpty || model.windows.prefix(3).contains(where: {
-            $0.frame != $0.originalFrame || $0.minimized != $0.originallyMinimized
-        }) {
+        if !session.restoreAll().isEmpty
+            || model.windows.prefix(3).contains(where: {
+                $0.frame != $0.originalFrame || $0.minimized != $0.originallyMinimized
+            })
+        {
             failures.append("batch addition did not preserve original window states")
         }
 
@@ -2131,10 +2308,11 @@ enum WindowSessionSmoke {
             WindowCandidate(element: $0.element, application: .current, title: "Partial batch")
         }
         partial.add(Array(partialCandidates.prefix(3)))
-        if partial.windows.count != 2 || partialModel.changeCount != 1 ||
-            partial.selected?.candidate.isSameWindow(as: partialCandidates[2]) != true ||
-            partialModel.notices.last?.needsAttention != true ||
-            partialModel.windows[1].frame != partialModel.windows[1].originalFrame {
+        if partial.windows.count != 2 || partialModel.changeCount != 1
+            || partial.selected?.candidate.isSameWindow(as: partialCandidates[2]) != true
+            || partialModel.notices.last?.needsAttention != true
+            || partialModel.windows[1].frame != partialModel.windows[1].originalFrame
+        {
             failures.append("partial batch failure blocked valid windows, modified a rejected window or lost its error")
         }
         return failures
@@ -2146,9 +2324,10 @@ enum WindowSessionSmoke {
         model.failedMoves.insert(1)
         model.target.origin.x += 50
         session.sync()
-        if model.windows[0].frame != model.target || model.windows[2].frame != model.target ||
-            model.notices.last?.needsAttention != true ||
-            model.notices.last?.text.contains("Injected window operation failure") != true {
+        if model.windows[0].frame != model.target || model.windows[2].frame != model.target
+            || model.notices.last?.needsAttention != true
+            || model.notices.last?.text.contains("Injected window operation failure") != true
+        {
             failures.append("one failed background move blocked the other tabs or failed silently")
         }
         model.failedMoves.remove(1)
@@ -2169,8 +2348,7 @@ enum WindowSessionSmoke {
         }
         model.failedMinimizations.insert(0)
         session.suspend()
-        if !model.windows[1].minimized || !model.windows[2].minimized ||
-            model.notices.last?.needsAttention != true {
+        if !model.windows[1].minimized || !model.windows[2].minimized || model.notices.last?.needsAttention != true {
             failures.append("one failed minimization blocked suspension of the remaining stack")
         }
         model.failedMinimizations.remove(0)

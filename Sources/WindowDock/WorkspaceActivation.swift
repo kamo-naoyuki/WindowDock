@@ -21,8 +21,8 @@ final class WorkspaceActivation {
     /// The workspace whose window is key, falling back to the main or first one.
     var activeController: WorkspaceController? {
         let controllers = controllers()
-        return controllers.first { $0.window.isKeyWindow } ??
-            controllers.first { $0.window.isMainWindow } ?? controllers.first
+        return controllers.first { $0.window.isKeyWindow } ?? controllers.first { $0.window.isMainWindow }
+            ?? controllers.first
     }
 
     /// Brings a workspace forward on request, e.g. from the Dock menu or the Workspace menu.
@@ -72,9 +72,10 @@ final class WorkspaceActivation {
     private static func currentClick() -> Click? {
         guard let screen = NSScreen.screens.first else { return nil }
         let point = NSEvent.mouseLocation
-        let age = [CGEventType.leftMouseDown, .rightMouseDown, .otherMouseDown].map {
-            CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0)
-        }.min() ?? .infinity
+        let age =
+            [CGEventType.leftMouseDown, .rightMouseDown, .otherMouseDown].map {
+                CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0)
+            }.min() ?? .infinity
         return Click(
             point: CGPoint(x: point.x, y: screen.frame.maxY - point.y),
             buttonDown: NSEvent.pressedMouseButtons != 0, secondsSinceMouseDown: age
@@ -86,7 +87,8 @@ final class WorkspaceActivation {
         RunLoop.main.perform(inModes: [.default]) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, let active = active ?? self.activeController else { return }
-                for controller in self.controllers() where controller !== active && controller.window.isVisible && !controller.window.isMiniaturized {
+                for controller in self.controllers()
+                where controller !== active && controller.window.isVisible && !controller.window.isMiniaturized {
                     controller.window.orderBack(nil)
                 }
             }

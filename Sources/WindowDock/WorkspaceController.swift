@@ -23,7 +23,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     var quitting = false
 
     var name: String {
-        didSet { window.title = name; workspace.workspaceButton.title = name }
+        didSet {
+            window.title = name
+            workspace.workspaceButton.title = name
+        }
     }
     var onClose: ((WorkspaceController) -> Void)?
     var onRename: ((WorkspaceController) -> Void)?
@@ -103,8 +106,12 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             let pane = menu.addItem(withTitle: L("ペイン"), action: nil, keyEquivalent: "")
             pane.submenu = self?.activePaneMenu()
             menu.addItem(.separator())
-            menu.addItem(withTitle: L("ワークスペース名を変更…"), action: #selector(WorkspaceController.renameFromMenu), keyEquivalent: "").target = self
-            menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(WorkspaceController.deleteFromMenu), keyEquivalent: "").target = self
+            menu.addItem(
+                withTitle: L("ワークスペース名を変更…"), action: #selector(WorkspaceController.renameFromMenu), keyEquivalent: ""
+            ).target = self
+            menu.addItem(
+                withTitle: L("ワークスペースを削除…"), action: #selector(WorkspaceController.deleteFromMenu), keyEquivalent: ""
+            ).target = self
             return menu
         }
         workspace.onGridChange = { [weak self] in self?.session.setGrid($0) }
@@ -153,7 +160,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         workspace.onReorderTabs = { [weak self] order in
             guard let self, order.count == self.tabIDs.count,
-                  Set(order) == Set(self.tabIDs.indices) else { return }
+                Set(order) == Set(self.tabIDs.indices)
+            else { return }
             self.session.reorderWindows(order.map { self.tabIDs[$0] })
         }
         workspace.onTabDragBegin = { [weak self] index, token, button in
@@ -208,7 +216,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             var pending = false
             for (index, id) in session.cells.enumerated() {
                 guard let id, let frame = frames[id],
-                      let managed = session.windows.first(where: { $0.id == id }) else { continue }
+                    let managed = session.windows.first(where: { $0.id == id })
+                else { continue }
                 let candidates = rendered.filter {
                     $0.processID == managed.candidate.application.processIdentifier
                 }.map(\.frame)
@@ -238,10 +247,11 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private func targetFrames() -> [Int: CGRect] {
         guard let primaryScreen = NSScreen.screens.first else { return [:] }
         window.contentView?.layoutSubtreeIfNeeded()
-        return Dictionary(uniqueKeysWithValues: workspace.gridAreas.enumerated().map { index, stage in
-            let rect = window.convertToScreen(stage.convert(stage.bounds, to: nil))
-            return (index, WindowGeometry.accessibilityRect(from: rect, primaryScreenTop: primaryScreen.frame.maxY))
-        })
+        return Dictionary(
+            uniqueKeysWithValues: workspace.gridAreas.enumerated().map { index, stage in
+                let rect = window.convertToScreen(stage.convert(stage.bounds, to: nil))
+                return (index, WindowGeometry.accessibilityRect(from: rect, primaryScreenTop: primaryScreen.frame.maxY))
+            })
     }
 
     private func renderTabs() {
@@ -258,11 +268,13 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             let selected = managed.id == session.selectedID
             let cell = session.cellIndex(for: managed.id)
             let displayed = session.isSplit && cell != nil
-            let side = session.isSplit ? cell.map {
-                session.customLayout == nil ?
-                    L("%d行%d列 · ", $0 / session.gridSize.columns + 1, $0 % session.gridSize.columns + 1) :
-                    L("ペイン %d", $0 + 1) + " · "
-            } ?? "" : ""
+            let side =
+                session.isSplit
+                ? cell.map {
+                    session.customLayout == nil
+                        ? L("%d行%d列 · ", $0 / session.gridSize.columns + 1, $0 % session.gridSize.columns + 1)
+                        : L("ペイン %d", $0 + 1) + " · "
+                } ?? "" : ""
             let candidate = managed.candidate
             let title = candidate.title.isEmpty ? candidate.application.localizedName ?? "App" : candidate.title
             let pinned = cell.map { session.isPanePinned($0) } ?? false
@@ -298,12 +310,14 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     func focusPane(at point: NSPoint) {
         guard !suspended, !quitting, picker == nil,
-              window.isVisible, !window.isMiniaturized else { return }
+            window.isVisible, !window.isMiniaturized
+        else { return }
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         for (index, area) in workspace.gridAreas.enumerated() {
             guard session.cells.indices.contains(index), let id = session.cells[index],
-                  let managed = session.windows.first(where: { $0.id == id }),
-                  managed.candidate.application.processIdentifier == frontPID else { continue }
+                let managed = session.windows.first(where: { $0.id == id }),
+                managed.candidate.application.processIdentifier == frontPID
+            else { continue }
             let rect = window.convertToScreen(area.convert(area.bounds, to: nil))
             if rect.contains(point) {
                 // Clicking a managed window directly must also bring this workspace's backdrop above other workspaces'.
@@ -351,7 +365,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     func updateAutoHiddenTabBar(at point: NSPoint, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard autoHideTabs, !suspended, !quitting, picker == nil,
-              window.isVisible, !window.isMiniaturized, window.isOnActiveSpace, !NSApp.isHidden else {
+            window.isVisible, !window.isMiniaturized, window.isOnActiveSpace, !NSApp.isHidden
+        else {
             tabBarHoverStart = nil
             workspace.hideAutoHiddenToolbar()
             return
@@ -367,8 +382,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         tabBarHoverStart = nil
         if workspace.autoHiddenToolbarVisible,
-           let panel = workspace.autoHiddenToolbarPanel,
-           panel.frame.contains(point) {
+            let panel = workspace.autoHiddenToolbarPanel,
+            panel.frame.contains(point)
+        {
             tabBarLastActive = now
             return
         }
@@ -437,7 +453,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         collect: (([WindowCandidate]) -> Void)? = nil,
         completion: (() -> Void)?
     ) {
-        guard picker == nil else { completion?(); return }
+        guard picker == nil else {
+            completion?()
+            return
+        }
         guard WindowAccess.isTrusted else {
             defer { completion?() }
             WindowAccess.requestPermission()
@@ -455,7 +474,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             suggested: saved.map { SavedLayout.suggest($0, among: candidates) } ?? []
         ) { [weak self] candidates in
             // Wait until the sheet has left the screen before raising the selected window.
-            if let collect { collect(candidates); return }
+            if let collect {
+                collect(candidates)
+                return
+            }
             DispatchQueue.main.async { self?.session.add(candidates) }
         }
         picker?.present(on: window) { [weak self] in
@@ -494,8 +516,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     /// clicked. Activate this workspace the way a click on its embedded tab bar does.
     private func activateFromAutoHiddenToolbar(_ event: NSEvent) {
         guard !NSApp.isActive || !window.isKeyWindow,
-              !suspended, !quitting, !window.isMiniaturized, picker == nil else { return }
-        let handlesClick = event.window?.contentView?.superview
+            !suspended, !quitting, !window.isMiniaturized, picker == nil
+        else { return }
+        let handlesClick =
+            event.window?.contentView?.superview
             .map { Self.handlesClick(in: $0, at: event.locationInWindow) } ?? false
         if !NSApp.isActive {
             toolbarActivationRequest = ProcessInfo.processInfo.systemUptime
@@ -547,13 +571,13 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     var canHandleShortcut: Bool {
-        !session.windows.isEmpty && picker == nil && !suspended &&
-            !window.isMiniaturized && !NSApp.isHidden && !quitting
+        !session.windows.isEmpty && picker == nil && !suspended && !window.isMiniaturized && !NSApp.isHidden
+            && !quitting
     }
 
     var acceptsWindowDrag: Bool {
-        picker == nil && !suspended && !quitting && window.isVisible &&
-            window.isOnActiveSpace && !window.isMiniaturized && !NSApp.isHidden
+        picker == nil && !suspended && !quitting && window.isVisible && window.isOnActiveSpace && !window.isMiniaturized
+            && !NSApp.isHidden
     }
 
     var windowDropPanelNumber: Int? { workspace.windowDropPanel?.windowNumber }
@@ -606,7 +630,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             } else if isRegisteredElsewhere?(candidate) == true {
                 showNotice(.information(L("このウィンドウは別のワークスペースに登録されています。")))
             } else {
-                session.add(candidate, originalFrame: drag.originalFrame, at: workspace.tabInsertionIndex(at: screenPoint))
+                session.add(
+                    candidate, originalFrame: drag.originalFrame, at: workspace.tabInsertionIndex(at: screenPoint))
             }
         } catch {
             WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
@@ -637,7 +662,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         let generation = settledSyncGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self, generation == self.settledSyncGeneration,
-                  !self.suspended, self.picker == nil, !self.quitting, !self.window.isMiniaturized else { return }
+                !self.suspended, self.picker == nil, !self.quitting, !self.window.isMiniaturized
+            else { return }
             self.workspace.refreshCoverage()
             self.session.realign()
         }

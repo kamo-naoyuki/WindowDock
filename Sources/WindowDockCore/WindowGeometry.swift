@@ -1,5 +1,5 @@
-import Foundation
 import CoreGraphics
+import Foundation
 
 public enum WindowGeometry {
     // AppKit uses a bottom-left origin; Accessibility uses the primary display's top-left.
@@ -17,10 +17,8 @@ public enum WindowGeometry {
     }
 
     public static func fits(_ actual: CGRect, requested: CGRect, tolerance: CGFloat = 3) -> Bool {
-        abs(actual.minX - requested.minX) <= tolerance &&
-        abs(actual.minY - requested.minY) <= tolerance &&
-        abs(actual.width - requested.width) <= tolerance &&
-        abs(actual.height - requested.height) <= tolerance
+        abs(actual.minX - requested.minX) <= tolerance && abs(actual.minY - requested.minY) <= tolerance
+            && abs(actual.width - requested.width) <= tolerance && abs(actual.height - requested.height) <= tolerance
     }
 
     public static func confirmedCoverage(for frame: CGRect, renderedFrames: [CGRect]) -> CGRect? {
@@ -31,11 +29,11 @@ public enum WindowGeometry {
 
     /// Frames are ordered front-to-back among eligible workspaces, not all application windows.
     public static func workspaceTabDropTarget(at point: CGPoint, orderedFrames: [CGRect]) -> Int? {
-        orderedFrames.firstIndex { $0.contains(point) } ??
-            orderedFrames.firstIndex {
+        orderedFrames.firstIndex { $0.contains(point) }
+            ?? orderedFrames.firstIndex {
                 let nearby = $0.insetBy(dx: -24, dy: -24)
-                return point.x >= nearby.minX && point.x <= nearby.maxX &&
-                    point.y >= nearby.minY && point.y <= nearby.maxY
+                return point.x >= nearby.minX && point.x <= nearby.maxX && point.y >= nearby.minY
+                    && point.y <= nearby.maxY
             }
     }
 

@@ -1,5 +1,5 @@
-import Foundation
 import CoreGraphics
+import Foundation
 
 public struct WindowServerWindow: Equatable {
     public let id: CGWindowID
@@ -27,11 +27,9 @@ public struct WorkspaceWindowDrag {
     }
 
     public func canDrop(at point: CGPoint, actualFrame: CGRect, acceptsPoint: Bool) -> Bool {
-        acceptsPoint &&
-        hypot(point.x - startPoint.x, point.y - startPoint.y) >= 8 &&
-        hypot(actualFrame.minX - originalFrame.minX, actualFrame.minY - originalFrame.minY) >= 8 &&
-        abs(actualFrame.width - originalFrame.width) <= 2 &&
-        abs(actualFrame.height - originalFrame.height) <= 2
+        acceptsPoint && hypot(point.x - startPoint.x, point.y - startPoint.y) >= 8
+            && hypot(actualFrame.minX - originalFrame.minX, actualFrame.minY - originalFrame.minY) >= 8
+            && abs(actualFrame.width - originalFrame.width) <= 2 && abs(actualFrame.height - originalFrame.height) <= 2
     }
 }
 
@@ -61,9 +59,12 @@ public struct WorkspaceWindowDragTracker {
         pressedWorkspace = nil
     }
 
-    public mutating func update(buttonDown: Bool, point: CGPoint, windows: [WindowServerWindow], ownPID: pid_t) -> Update {
+    public mutating func update(buttonDown: Bool, point: CGPoint, windows: [WindowServerWindow], ownPID: pid_t)
+        -> Update
+    {
         if !buttonDown {
-            let completed = isTrackingPress && !suppressed && !workspaceMoved(in: windows)
+            let completed =
+                isTrackingPress && !suppressed && !workspaceMoved(in: windows)
                 ? movedWindow(at: point, windows: windows) : nil
             idleWindows = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
             startWindows.removeAll()
@@ -94,15 +95,17 @@ public struct WorkspaceWindowDragTracker {
 
     private func workspaceMoved(in windows: [WindowServerWindow]) -> Bool {
         guard let workspace = pressedWorkspace,
-              let current = windows.first(where: { $0.id == workspace.id }) else { return false }
+            let current = windows.first(where: { $0.id == workspace.id })
+        else { return false }
         return current.frame != workspace.frame
     }
 
     private mutating func movedWindow(at point: CGPoint, windows: [WindowServerWindow]) -> WorkspaceWindowDrag? {
         for window in windows {
             guard let original = startWindows[window.id], original.processID == window.processID else { continue }
-            if abs(window.frame.width - original.frame.width) > 2 ||
-                abs(window.frame.height - original.frame.height) > 2 {
+            if abs(window.frame.width - original.frame.width) > 2
+                || abs(window.frame.height - original.frame.height) > 2
+            {
                 resizedWindows.insert(window.id)
             }
             guard !resizedWindows.contains(window.id) else { continue }

@@ -134,12 +134,14 @@ final class WorkspaceGridView: NSView {
     func fitMinimumSizes(_ sizes: [Int: CGSize]) -> Bool {
         if let customLayout {
             guard let minimum = customLayout.minimumSize(sizes, dividerThickness: dividerThickness),
-                  minimum.width <= bounds.width, minimum.height <= bounds.height else { return false }
+                minimum.width <= bounds.width, minimum.height <= bounds.height
+            else { return false }
             paneMinimums = sizes
             layoutCells()
             return true
         }
-        guard let (columns, rows) = WindowGeometry.trackMinimums(sizes, columns: gridSize.columns, rows: gridSize.rows) else { return false }
+        guard let (columns, rows) = WindowGeometry.trackMinimums(sizes, columns: gridSize.columns, rows: gridSize.rows)
+        else { return false }
         let width = bounds.width - CGFloat(gridSize.columns - 1) * dividerThickness
         let height = bounds.height - CGFloat(gridSize.rows - 1) * dividerThickness
         guard columns.reduce(0, +) <= width, rows.reduce(0, +) <= height else { return false }
@@ -159,7 +161,10 @@ final class WorkspaceGridView: NSView {
         layingOut = true
         defer { layingOut = false }
         if let customLayout {
-            guard let geometry = customLayout.geometry(in: bounds, minimums: paneMinimums, dividerThickness: dividerThickness) else {
+            guard
+                let geometry = customLayout.geometry(
+                    in: bounds, minimums: paneMinimums, dividerThickness: dividerThickness)
+            else {
                 assertionFailure("Invalid pane geometry")
                 return
             }
@@ -176,8 +181,12 @@ final class WorkspaceGridView: NSView {
             }
             return
         }
-        let widths = lengths(columnWeights, minimums: columnMinimums, available: max(0, bounds.width - CGFloat(gridSize.columns - 1) * dividerThickness))
-        let heights = lengths(rowWeights, minimums: rowMinimums, available: max(0, bounds.height - CGFloat(gridSize.rows - 1) * dividerThickness))
+        let widths = lengths(
+            columnWeights, minimums: columnMinimums,
+            available: max(0, bounds.width - CGFloat(gridSize.columns - 1) * dividerThickness))
+        let heights = lengths(
+            rowWeights, minimums: rowMinimums,
+            available: max(0, bounds.height - CGFloat(gridSize.rows - 1) * dividerThickness))
         var y = bounds.maxY
         var changed = lastBoundsSize != bounds.size
         lastBoundsSize = bounds.size
@@ -187,7 +196,10 @@ final class WorkspaceGridView: NSView {
             for column in 0..<gridSize.columns {
                 let area = areas[row * gridSize.columns + column]
                 let frame = NSRect(x: x, y: y, width: widths[column], height: heights[row])
-                if area.frame != frame { area.frame = frame; changed = true }
+                if area.frame != frame {
+                    area.frame = frame
+                    changed = true
+                }
                 x += widths[column] + dividerThickness
             }
             y -= dividerThickness
@@ -208,11 +220,15 @@ final class WorkspaceGridView: NSView {
         }
         for column in 0..<(gridSize.columns - 1) {
             let edge = areas[column].frame.maxX
-            addCursorRect(NSRect(x: edge, y: bounds.minY, width: dividerThickness, height: bounds.height), cursor: .resizeLeftRight)
+            addCursorRect(
+                NSRect(x: edge, y: bounds.minY, width: dividerThickness, height: bounds.height),
+                cursor: .resizeLeftRight)
         }
         for row in 0..<(gridSize.rows - 1) {
             let edge = areas[row * gridSize.columns].frame.minY
-            addCursorRect(NSRect(x: bounds.minX, y: edge - dividerThickness, width: bounds.width, height: dividerThickness), cursor: .resizeUpDown)
+            addCursorRect(
+                NSRect(x: bounds.minX, y: edge - dividerThickness, width: bounds.width, height: dividerThickness),
+                cursor: .resizeUpDown)
         }
     }
 
@@ -220,7 +236,10 @@ final class WorkspaceGridView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         if let customLayout {
             guard let divider = nestedDividers.first(where: { $0.frame.contains(point) }) else { return }
-            while let next = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true) {
+            while let next = NSApp.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking,
+                dequeue: true)
+            {
                 let current = convert(next.locationInWindow, from: nil)
                 let delta = divider.axis == .horizontal ? current.x - point.x : point.y - current.y
                 if let resized = customLayout.resizing(divider, by: delta) {
@@ -232,19 +251,28 @@ final class WorkspaceGridView: NSView {
             }
             return
         }
-        let column = (0..<(gridSize.columns - 1)).first { abs(point.x - (areas[$0].frame.maxX + dividerThickness / 2)) <= dividerThickness / 2 }
-        let row = (0..<(gridSize.rows - 1)).first { abs(point.y - (areas[$0 * gridSize.columns].frame.minY - dividerThickness / 2)) <= dividerThickness / 2 }
+        let column = (0..<(gridSize.columns - 1)).first {
+            abs(point.x - (areas[$0].frame.maxX + dividerThickness / 2)) <= dividerThickness / 2
+        }
+        let row = (0..<(gridSize.rows - 1)).first {
+            abs(point.y - (areas[$0 * gridSize.columns].frame.minY - dividerThickness / 2)) <= dividerThickness / 2
+        }
         guard column != nil || row != nil else { return }
         let initialWidths = (0..<gridSize.columns).map { areas[$0].frame.width }
         let initialHeights = (0..<gridSize.rows).map { areas[$0 * gridSize.columns].frame.height }
-        while let next = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true) {
+        while let next = NSApp.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true)
+        {
             let current = convert(next.locationInWindow, from: nil)
             if let column {
                 let total = initialWidths[column] + initialWidths[column + 1]
                 if total >= columnMinimums[column] + columnMinimums[column + 1] {
-                    let first = min(max(initialWidths[column] + current.x - point.x, columnMinimums[column]), total - columnMinimums[column + 1])
+                    let first = min(
+                        max(initialWidths[column] + current.x - point.x, columnMinimums[column]),
+                        total - columnMinimums[column + 1])
                     var sizes = initialWidths
-                    sizes[column] = first; sizes[column + 1] = total - first
+                    sizes[column] = first
+                    sizes[column + 1] = total - first
                     let sum = sizes.reduce(0, +)
                     if sum > 0 { columnWeights = sizes.map { $0 / sum } }
                 }
@@ -252,9 +280,11 @@ final class WorkspaceGridView: NSView {
             if let row {
                 let total = initialHeights[row] + initialHeights[row + 1]
                 if total >= rowMinimums[row] + rowMinimums[row + 1] {
-                    let first = min(max(initialHeights[row] + point.y - current.y, rowMinimums[row]), total - rowMinimums[row + 1])
+                    let first = min(
+                        max(initialHeights[row] + point.y - current.y, rowMinimums[row]), total - rowMinimums[row + 1])
                     var sizes = initialHeights
-                    sizes[row] = first; sizes[row + 1] = total - first
+                    sizes[row] = first
+                    sizes[row + 1] = total - first
                     let sum = sizes.reduce(0, +)
                     if sum > 0 { rowWeights = sizes.map { $0 / sum } }
                 }

@@ -16,7 +16,8 @@ struct WorkspaceShortcutContext {
         if flags.contains(.command), event.keyCode == 48 || event.keyCode == 50 { reset() }
         guard event.keyCode == 48, let frontPID else { return nil }
         guard flags == [.control] || flags == [.control, .shift],
-              frontPID == ownPID || visiblePIDs.contains(frontPID) || frontPID == originPID else { return nil }
+            frontPID == ownPID || visiblePIDs.contains(frontPID) || frontPID == originPID
+        else { return nil }
         // AXRaise need not transfer keyboard focus. Keep a shortcut sequence usable until focus or a click changes.
         originPID = frontPID == ownPID ? nil : frontPID
         return flags.contains(.shift) ? -1 : 1
@@ -82,7 +83,8 @@ final class WorkspaceWindowDrop {
     }
     var windowID: (AXUIElement) -> CGWindowID? = WindowAccess.windowID(of:)
     var resolve: (WindowServerWindow) throws -> WindowCandidate = WindowAccess.candidate(matching:)
-    var finish: (WorkspaceController, WorkspaceWindowDrag, CGPoint, NSPoint) -> Void = { controller, drag, axPoint, point in
+    var finish: (WorkspaceController, WorkspaceWindowDrag, CGPoint, NSPoint) -> Void = {
+        controller, drag, axPoint, point in
         controller.finishWindowDrag(drag, accessibilityPoint: axPoint, screenPoint: point)
     }
     var onSamplingFailure: (Error) -> Void = { _ in }
@@ -121,13 +123,16 @@ final class WorkspaceWindowDrop {
             return
         }
         samplingFailed = false
-        switch tracker.update(buttonDown: pointer.buttonDown, point: axPoint,
-                              windows: windows.filter { $0.layer == 0 }, ownPID: ownPID) {
+        switch tracker.update(
+            buttonDown: pointer.buttonDown, point: axPoint,
+            windows: windows.filter { $0.layer == 0 }, ownPID: ownPID)
+        {
         case .idle:
             registration.reset()
             controllers.forEach { $0.hideWindowDropTarget() }
         case .moving(let drag):
-            let target = isRegularApplication(drag.window.processID)
+            let target =
+                isRegularApplication(drag.window.processID)
                 ? self.target(at: point, accessibilityPoint: axPoint, drag: drag, windows: windows, among: controllers)
                 : nil
             for controller in controllers {
@@ -139,7 +144,8 @@ final class WorkspaceWindowDrop {
             }
         case .released(let drag):
             defer { registration.reset() }
-            let target = self.target(at: point, accessibilityPoint: axPoint, drag: drag, windows: windows, among: controllers)
+            let target = self.target(
+                at: point, accessibilityPoint: axPoint, drag: drag, windows: windows, among: controllers)
             controllers.forEach { $0.hideWindowDropTarget() }
             if let target, isRegularApplication(drag.window.processID) {
                 finish(target, drag, axPoint, point)
@@ -163,15 +169,18 @@ final class WorkspaceWindowDrop {
                 excluded.insert(CGWindowID(number))
             }
         }
-        guard let frontmost = WindowHitTesting.frontmostWindow(
-            at: accessibilityPoint, windows: windows.map { (id: $0.id, frame: $0.frame) }, excluding: excluded
-        ) else { return nil }
-        guard let target = controllers.first(where: {
-            let isWorkspace = $0.window.windowNumber > 0 &&
-                CGWindowID($0.window.windowNumber) == frontmost
-            let isToolbar = $0.toolbarPanelNumber.map { $0 > 0 && CGWindowID($0) == frontmost } ?? false
-            return (isWorkspace || isToolbar) && $0.acceptsWindowDrop(at: point)
-        }) else { return nil }
+        guard
+            let frontmost = WindowHitTesting.frontmostWindow(
+                at: accessibilityPoint, windows: windows.map { (id: $0.id, frame: $0.frame) }, excluding: excluded
+            )
+        else { return nil }
+        guard
+            let target = controllers.first(where: {
+                let isWorkspace = $0.window.windowNumber > 0 && CGWindowID($0.window.windowNumber) == frontmost
+                let isToolbar = $0.toolbarPanelNumber.map { $0 > 0 && CGWindowID($0) == frontmost } ?? false
+                return (isWorkspace || isToolbar) && $0.acceptsWindowDrop(at: point)
+            })
+        else { return nil }
         let registered = controllers.flatMap { $0.session.windows.map(\.candidate) }
         guard !registration.isRegistered(drag.window, among: registered, windowID: windowID, resolve: resolve) else {
             return nil

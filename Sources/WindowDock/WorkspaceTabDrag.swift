@@ -3,8 +3,8 @@ import WindowDockCore
 
 let workspaceTabDragType = NSPasteboard.PasteboardType("local.windowdock.tab-move")
 
-private extension NSDraggingInfo {
-    var tabDragScreenPoint: NSPoint? {
+extension NSDraggingInfo {
+    fileprivate var tabDragScreenPoint: NSPoint? {
         draggingDestinationWindow?.convertPoint(toScreen: draggingLocation)
     }
 }
@@ -32,14 +32,16 @@ final class WorkspaceTabGroup: NSStackView {
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard acceptsTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton) == true,
-              let screenPoint = sender.tabDragScreenPoint else { return [] }
+            let screenPoint = sender.tabDragScreenPoint
+        else { return [] }
         _ = updateTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton, screenPoint)
         return .move
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard acceptsTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton) == true,
-              let screenPoint = sender.tabDragScreenPoint else { return [] }
+            let screenPoint = sender.tabDragScreenPoint
+        else { return [] }
         _ = updateTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton, screenPoint)
         return .move
     }
@@ -82,7 +84,9 @@ final class WorkspaceTabButton: NSButton {
         ) {
             let screenPoint = tabScreenPoint(for: next)
             let point = convert(window.convertPoint(fromScreen: screenPoint), from: nil)
-            if next.type == .leftMouseDragged && hypot(screenPoint.x - startScreen.x, screenPoint.y - startScreen.y) >= 4 {
+            if next.type == .leftMouseDragged
+                && hypot(screenPoint.x - startScreen.x, screenPoint.y - startScreen.y) >= 4
+            {
                 highlight(false)
                 trackTabDrag(anchor: start, initialScreenPoint: screenPoint)
                 return
@@ -118,10 +122,12 @@ final class WorkspaceTabButton: NSButton {
             image.lockFocus()
             NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
             NSBezierPath(roundedRect: dragView.bounds, xRadius: 5, yRadius: 5).fill()
-            (title as NSString).draw(in: dragView.bounds.insetBy(dx: 5, dy: 5), withAttributes: [
-                .font: NSFont.systemFont(ofSize: 12),
-                .foregroundColor: NSColor.white
-            ])
+            (title as NSString).draw(
+                in: dragView.bounds.insetBy(dx: 5, dy: 5),
+                withAttributes: [
+                    .font: NSFont.systemFont(ofSize: 12),
+                    .foregroundColor: NSColor.white,
+                ])
             image.unlockFocus()
         }
         onDragBegin?(self, token, anchor, image)
@@ -129,10 +135,12 @@ final class WorkspaceTabButton: NSButton {
         var cancelled = true
         onDragMove?(board, point)
         while true {
-            guard let event = NSApp.nextEvent(
-                matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
-                until: Date(timeIntervalSinceNow: 0.05), inMode: .eventTracking, dequeue: true
-            ) else {
+            guard
+                let event = NSApp.nextEvent(
+                    matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
+                    until: Date(timeIntervalSinceNow: 0.05), inMode: .eventTracking, dequeue: true
+                )
+            else {
                 // Bringing a workspace forward activates another app, which must not leave the drag without its
                 // mouse-up, so follow the pointer directly while no events arrive.
                 let released = NSEvent.pressedMouseButtons & 1 == 0
@@ -162,14 +170,16 @@ final class WorkspaceTabButton: NSButton {
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard acceptsTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton) == true,
-              let screenPoint = sender.tabDragScreenPoint else { return [] }
+            let screenPoint = sender.tabDragScreenPoint
+        else { return [] }
         _ = updateTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton, screenPoint)
         return .move
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard acceptsTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton) == true,
-              let screenPoint = sender.tabDragScreenPoint else { return [] }
+            let screenPoint = sender.tabDragScreenPoint
+        else { return [] }
         _ = updateTabDrop?(sender.draggingPasteboard, sender.draggingSource as? NSButton, screenPoint)
         return .move
     }
@@ -211,32 +221,42 @@ final class WorkspaceTabDropOverlay: NSView {
         let title = L("ここに移動 / 入れ替え") as NSString
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-            .foregroundColor: NSColor.labelColor
+            .foregroundColor: NSColor.labelColor,
         ]
         let size = title.size(withAttributes: attributes)
-        title.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
+        title.draw(
+            at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton) == true,
-              let screenPoint = sender.tabDragScreenPoint else { return [] }
-        _ = chrome?.updateFloatingTab(pasteboard: sender.draggingPasteboard,
-                                      source: sender.draggingSource as? NSButton,
-                                      screenPoint: screenPoint)
+        guard
+            chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton)
+                == true,
+            let screenPoint = sender.tabDragScreenPoint
+        else { return [] }
+        _ = chrome?.updateFloatingTab(
+            pasteboard: sender.draggingPasteboard,
+            source: sender.draggingSource as? NSButton,
+            screenPoint: screenPoint)
         return .move
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton) == true,
-              let screenPoint = sender.tabDragScreenPoint else { return [] }
-        _ = chrome?.updateFloatingTab(pasteboard: sender.draggingPasteboard,
-                                      source: sender.draggingSource as? NSButton,
-                                      screenPoint: screenPoint)
+        guard
+            chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton)
+                == true,
+            let screenPoint = sender.tabDragScreenPoint
+        else { return [] }
+        _ = chrome?.updateFloatingTab(
+            pasteboard: sender.draggingPasteboard,
+            source: sender.draggingSource as? NSButton,
+            screenPoint: screenPoint)
         return .move
     }
 
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton) == true
+        chrome?.acceptsTabDrag(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton)
+            == true
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
@@ -244,7 +264,8 @@ final class WorkspaceTabDropOverlay: NSView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        chrome?.performTabDrop(pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton, cell: cellIndex) == true
+        chrome?.performTabDrop(
+            pasteboard: sender.draggingPasteboard, source: sender.draggingSource as? NSButton, cell: cellIndex) == true
     }
 }
 
@@ -325,11 +346,15 @@ final class WorkspaceTabTransfer {
         return drag.source !== controller && drag.token == token && drag.button === button
     }
 
-    private func drop(on destination: WorkspaceController, token: String, button: NSButton?, index: Int?, cell: Int?) -> Bool {
+    private func drop(on destination: WorkspaceController, token: String, button: NSButton?, index: Int?, cell: Int?)
+        -> Bool
+    {
         guard let drag, accepts(destination, token: token, button: button) else { return false }
         // The source's floating tab must be gone before the transfer re-renders its tabs.
         hideTargets()
-        guard drag.source.session.transferWindow(drag.id, to: destination.session, at: index, cell: cell) else { return false }
+        guard drag.source.session.transferWindow(drag.id, to: destination.session, at: index, cell: cell) else {
+            return false
+        }
         transferred = true
         revealed = destination
         onTransfer(drag.source, destination)

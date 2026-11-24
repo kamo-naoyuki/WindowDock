@@ -14,8 +14,9 @@ public enum WindowHitTesting {
         ownPID: Int32, buttonDown: Bool, secondsSinceMouseDown: Double
     ) -> UInt32? {
         guard buttonDown || secondsSinceMouseDown < 0.5,
-              let front = windows.first(where: { $0.frame.contains(point) }),
-              front.ownerPID == ownPID else { return nil }
+            let front = windows.first(where: { $0.frame.contains(point) }),
+            front.ownerPID == ownPID
+        else { return nil }
         return front.id
     }
 }
