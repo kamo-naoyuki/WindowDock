@@ -59,7 +59,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     /// With a single pane, dropping a tab onto it cannot change the layout, so the whole workspace acts as the tab bar.
     private var hasSinglePane: Bool { gridAreas.count <= 1 }
     var onGridChange: ((WorkspaceGridSize) -> Void)?
-    var canSplitPane: ((Int, PaneLayout.Axis) -> Bool)?
+    var splitRestriction: ((Int, PaneLayout.Axis) -> PaneSplitRestriction?)?
     var onSplitPane: ((Int, PaneLayout.Axis) -> Void)?
     var onClosePane: ((Int) -> Void)?
     var isPanePinned: ((Int) -> Bool)?
@@ -69,7 +69,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     var onPaneLayoutChange: (() -> Void)?
     var onMoveTab: ((Int, Int) -> Void)?
     var onReorderTabs: (([Int]) -> Void)?
-    var onReleaseTabs: ((IndexSet) -> Void)?
+    var closesWindowsOnRelease = false
+    var onReleaseTabs: (([UUID]) -> Void)?
     var onToolbarMenuTracking: ((Bool) -> Void)?
     var onAutoHiddenToolbarMouseDown: ((NSEvent) -> Void)?
     var onTabDragBegin: ((Int, String, NSButton) -> Void)?
@@ -119,7 +120,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     private var noticeHeight: NSLayoutConstraint!
     private var maximumTabWidth: NSLayoutConstraint!
     private var preferredTabWidth: NSLayoutConstraint!
-    private var tabSizing: [(button: NSButton, constraint: NSLayoutConstraint)] = []
+    private var tabSizing: [(id: UUID, button: NSButton, constraint: NSLayoutConstraint)] = []
     private var updatingTabWidths = false
 
     override init(frame: NSRect) {
@@ -435,7 +436,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             empty.widthAnchor.constraint(lessThanOrEqualTo: stage.widthAnchor, constant: -24),
         ])
         NSLayoutConstraint.activate(toolbarConstraints)
-        showNotice(.information(L("⌃ Tab / ⌃ ⇧ Tab で切替 · タブの × で元に戻す")))
+        showNotice(.information(L("⌃ Tab / ⌃ ⇧ Tab でタブを切替")))
     }
 
     private func configureSelector(_ selector: NSPopUpButton, prefix: String) {
@@ -501,26 +502,37 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     func paneMenu(for index: Int) -> NSMenu {
         let menu = NSMenu()
         menu.delegate = self
-        let pin = menu.addItem(withTitle: L("ペインを固定"), action: #selector(togglePanePin(_:)), keyEquivalent: "")
+        let pin = menu.addItem(
+            withTitle: L("ペインを固定"),
+            action: gridAreas.count > 1 ? #selector(togglePanePin(_:)) : nil,
+            keyEquivalent: "")
         pin.target = self
         pin.tag = index
         pin.state = isPanePinned?(index) == true ? .on : .off
         pin.isEnabled = gridAreas.count > 1
         menu.addItem(.separator())
-        let horizontal =
-            canSplitPane?(index, .horizontal) ?? stage.paneLayout.canSplitPane(at: index, axis: .horizontal)
-        let vertical = canSplitPane?(index, .vertical) ?? stage.paneLayout.canSplitPane(at: index, axis: .vertical)
-        let actions: [(String, Selector?)] = [
-            ("左右に分割", horizontal ? #selector(splitPaneHorizontally(_:)) : nil),
-            ("上下に分割", vertical ? #selector(splitPaneVertically(_:)) : nil),
-            ("ペインを閉じる", gridAreas.count > 1 ? #selector(closePane(_:)) : nil),
-        ]
-        for (title, action) in actions {
-            let item = menu.addItem(withTitle: L(title), action: action, keyEquivalent: "")
+        func add(_ title: String, _ action: Selector?) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
             item.target = self
             item.tag = index
             item.isEnabled = action != nil
         }
+        func addSplit(_ title: String, _ axis: PaneLayout.Axis, _ action: Selector) {
+            let restriction: PaneSplitRestriction?
+            if let splitRestriction {
+                restriction = splitRestriction(index, axis)
+            } else {
+                restriction = stage.paneLayout.canSplitPane(at: index, axis: axis) ? nil : .layout
+            }
+            if case .minimumSize(let apps) = restriction {
+                add(L("%@（%@のウィンドウが収まりません）", title, apps), nil)
+            } else {
+                add(title, restriction == nil ? action : nil)
+            }
+        }
+        addSplit(L("左右に分割"), .horizontal, #selector(splitPaneHorizontally(_:)))
+        addSplit(L("上下に分割"), .vertical, #selector(splitPaneVertically(_:)))
+        add(L("ペインを閉じる"), gridAreas.count > 1 ? #selector(closePane(_:)) : nil)
         return menu
     }
 
@@ -1035,21 +1047,25 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             item.submenu = paneMenu(for: pane)
         }
         menu.addItem(.separator())
-        let count = tabs.arrangedSubviews.count
+        let count = tabSizing.count
         let own = IndexSet(integer: button.tag)
         let all = IndexSet(integersIn: 0 ..< count)
         let releases: [(String, IndexSet)] = [
-            ("タブを解除", all.intersection(own)),
-            ("他のタブをすべて解除", all.subtracting(own)),
-            ("右側のタブを解除", IndexSet(integersIn: min(button.tag + 1, count) ..< count)),
-            ("左側のタブを解除", IndexSet(integersIn: 0 ..< min(button.tag, count))),
-            ("すべてのタブを解除", all),
+            (closesWindowsOnRelease ? "ウィンドウを閉じる" : "タブを解除", all.intersection(own)),
+            (closesWindowsOnRelease ? "他のタブのウィンドウをすべて閉じる" : "他のタブをすべて解除", all.subtracting(own)),
+            (
+                closesWindowsOnRelease ? "右側のタブのウィンドウを閉じる" : "右側のタブを解除",
+                IndexSet(integersIn: min(button.tag + 1, count) ..< count)),
+            (
+                closesWindowsOnRelease ? "左側のタブのウィンドウを閉じる" : "左側のタブを解除",
+                IndexSet(integersIn: 0 ..< min(button.tag, count))),
+            (closesWindowsOnRelease ? "すべてのタブのウィンドウを閉じる" : "すべてのタブを解除", all),
         ]
         for (title, indexes) in releases {
             let item = NSMenuItem(
                 title: L(title), action: indexes.isEmpty ? nil : #selector(releaseTabsFromMenu(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = indexes
+            item.representedObject = indexes.map { tabSizing[$0].id }
             menu.addItem(item)
         }
         return menu
@@ -1064,8 +1080,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     }
 
     @objc private func releaseTabsFromMenu(_ item: NSMenuItem) {
-        guard let indexes = item.representedObject as? IndexSet else { return }
-        onReleaseTabs?(indexes)
+        guard let ids = item.representedObject as? [UUID] else { return }
+        onReleaseTabs?(ids)
     }
 
     @objc private func moveTabFromMenu(_ item: NSMenuItem) {
@@ -1091,7 +1107,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
 
     @discardableResult
     func appendTab(
-        title: String, toolTip: String? = nil, icon: NSImage? = nil, selected: Bool, displayed: Bool = false,
+        id: UUID = UUID(), title: String, toolTip: String? = nil, icon: NSImage? = nil, selected: Bool,
+        displayed: Bool = false,
         pinned: Bool = false, tabSwitchTarget: Bool = false) -> (view: NSView, select: NSButton, close: NSButton) {
         let select = WorkspaceTabButton(title: title, target: nil, action: nil)
         select.chrome = self
@@ -1144,7 +1161,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         pin.isHidden = !pinned
         pin.translatesAutoresizingMaskIntoConstraints = false
         pin.toolTip = L("固定中")
-        let close = Self.makeButton(symbol: "xmark", title: L("元の位置に戻してタブから解除"), width: 18)
+        let close = Self.makeButton(
+            symbol: "xmark",
+            title: closesWindowsOnRelease ? L("ウィンドウを閉じる") : L("元の位置に戻してタブから解除"),
+            width: 18)
         let group = WorkspaceTabGroup(views: [select, close])
         group.acceptsTabDrop = { [weak self] pasteboard, source in
             self?.acceptsTabDrag(pasteboard: pasteboard, source: source) == true
@@ -1178,7 +1198,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
                 ? NSColor.controlBackgroundColor
                 : NSColor.unemphasizedSelectedContentBackgroundColor.withAlphaComponent(0.35)).cgColor
         let selectWidth = select.widthAnchor.constraint(equalToConstant: 200)
-        tabSizing.append((select, selectWidth))
+        tabSizing.append((id, select, selectWidth))
         NSLayoutConstraint.activate([
             select.widthAnchor.constraint(greaterThanOrEqualToConstant: 48),
             select.widthAnchor.constraint(lessThanOrEqualToConstant: 200),
@@ -1199,7 +1219,11 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
 
     func revealTab(_ view: NSView) {
         layoutSubtreeIfNeeded()
+        tabs.window?.contentView?.layoutSubtreeIfNeeded()
         tabs.scrollToVisible(view.frame)
+        // Submit the highlight before synchronous AX calls can block the next display pass.
+        tabs.window?.displayIfNeeded()
+        CATransaction.flush()
     }
 
     func showManagedWindows(_ hasWindows: Bool) {

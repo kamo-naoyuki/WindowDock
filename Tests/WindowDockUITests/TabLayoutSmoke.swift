@@ -186,13 +186,14 @@ enum TabLayoutSmoke {
         }
         chrome.clearTabs()
         settle()
-        for title in ["Release first", "Release target", "Release third", "Release fourth"] {
-            chrome.appendTab(title: title, selected: false)
+        let releaseIDs = (0 ..< 4).map { _ in UUID() }
+        for (id, title) in zip(releaseIDs, ["Release first", "Release target", "Release third", "Release fourth"]) {
+            chrome.appendTab(id: id, title: title, selected: false)
         }
         for (tag, group) in chrome.tabs.arrangedSubviews.enumerated() {
             ((group as! WorkspaceTabGroup).arrangedSubviews.first as! NSButton).tag = tag
         }
-        var released: [IndexSet] = []
+        var released: [[UUID]] = []
         chrome.onReleaseTabs = { released.append($0) }
         let rightClick = NSEvent.mouseEvent(
             with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
@@ -200,7 +201,7 @@ enum TabLayoutSmoke {
         let releaseMenu =
             (((chrome.tabs.arrangedSubviews[1] as! WorkspaceTabGroup).arrangedSubviews.first) as! NSButton).menu(
                 for: rightClick)
-        let releaseItems = releaseMenu?.items.filter { $0.representedObject is IndexSet } ?? []
+        let releaseItems = releaseMenu?.items.filter { $0.representedObject is [UUID] } ?? []
         let expectedReleases: [(String, [Int])] = [
             (L("タブを解除"), [1]), (L("他のタブをすべて解除"), [0, 2, 3]),
             (L("右側のタブを解除"), [2, 3]), (L("左側のタブを解除"), [0]), (L("すべてのタブを解除"), [0, 1, 2, 3]),
@@ -216,10 +217,26 @@ enum TabLayoutSmoke {
             }
             released.removeAll()
             _ = NSApp.sendAction(action, to: item.target, from: item)
-            if released != [IndexSet(expected)] {
+            if released != [expected.map { releaseIDs[$0] }] {
                 failures.append("release item \(item.title) reported \(released), expected \(expected)")
             }
         }
+        chrome.closesWindowsOnRelease = true
+        let closeMenu = ((chrome.tabs.arrangedSubviews[1] as! WorkspaceTabGroup).arrangedSubviews.first as! NSButton)
+            .menu(for: rightClick)
+        if let item = closeMenu?.item(withTitle: L("他のタブのウィンドウをすべて閉じる")), let action = item.action {
+            // An already open menu must not target a different set of windows if its tabs are rebuilt.
+            chrome.clearTabs()
+            chrome.appendTab(title: "New tab", selected: true)
+            released.removeAll()
+            _ = NSApp.sendAction(action, to: item.target, from: item)
+            if released != [[releaseIDs[0], releaseIDs[2], releaseIDs[3]]] {
+                failures.append("bulk close did not target the windows named by the open menu")
+            }
+        } else {
+            failures.append("bulk release did not indicate that it would close windows")
+        }
+        chrome.closesWindowsOnRelease = false
         let regularStageTop = chrome.stage.frame.maxY
         chrome.setAutoHideTabBar(true)
         settle()

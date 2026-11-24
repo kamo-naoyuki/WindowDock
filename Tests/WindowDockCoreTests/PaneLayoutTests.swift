@@ -78,6 +78,27 @@ final class PaneLayoutTests: XCTestCase {
         XCTAssertEqual(frames[1].height, 480, accuracy: 0.001)
     }
 
+    func testSplitBlockersDistinguishSharedColumnsFromIndependentRows() {
+        let layout = PaneLayout.grid(columnWeights: [1, 1], rowWeights: [1, 1])
+        let bounds = CGRect(x: 0, y: 0, width: 900, height: 600)
+        let wide = CGSize(width: 600, height: 0), small = CGSize(width: 160, height: 0)
+        let cells = [0: wide, 3: wide]
+        let windows = ["upper left": wide, "lower right": wide, "smaller tab in same pane": small]
+        let assignments = ["upper left": 0, "lower right": 3, "smaller tab in same pane": 0]
+        XCTAssertEqual(
+            layout.minimumSizeBlockers(
+                in: bounds, paneMinimums: cells, windowMinimums: windows, assignments: assignments, sharedTracks: (
+                    2,
+                    2
+                )
+            ),
+            ["upper left", "lower right"]
+        )
+        XCTAssertTrue(layout.minimumSizeBlockers(
+            in: bounds, paneMinimums: cells, windowMinimums: windows, assignments: assignments
+        ).isEmpty)
+    }
+
     func testSplitAndClosePreserveTabsAndRemapNestedSibling() throws {
         let split = try XCTUnwrap(
             PaneReflow.split(

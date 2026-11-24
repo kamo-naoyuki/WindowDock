@@ -115,9 +115,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             return menu
         }
         workspace.onGridChange = { [weak self] in self?.session.setGrid($0) }
-        workspace.canSplitPane = { [weak self] index, axis in
-            guard let self else { return false }
-            return self.session.canSplitPane(at: index, axis: axis, currentLayout: self.workspace.stage.paneLayout)
+        workspace.splitRestriction = { [weak self] index, axis in
+            guard let self else { return .layout }
+            return self.session.splitRestriction(at: index, axis: axis, currentLayout: self.workspace.stage.paneLayout)
         }
         workspace.onSplitPane = { [weak self] index, axis in
             guard let self else { return }
@@ -149,9 +149,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
                 self.session.select(id, activate: true)
             }
         }
-        workspace.onReleaseTabs = { [weak self] indexes in
+        workspace.onReleaseTabs = { [weak self] ids in
             guard let self else { return }
-            let ids = indexes.filter { self.tabIDs.indices.contains($0) }.map { self.tabIDs[$0] }
             for id in ids { self.session.remove(id) }
         }
         workspace.onMoveTab = { [weak self] tab, cell in
@@ -256,6 +255,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     private func renderTabs() {
+        workspace.closesWindowsOnRelease = session.closesWindowsOnRelease
         if let layout = session.customLayout {
             workspace.setCustomLayout(layout, activeCell: session.activeCell)
         } else {
@@ -280,6 +280,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             let title = candidate.title.isEmpty ? candidate.application.localizedName ?? "App" : candidate.title
             let pinned = cell.map { session.isPanePinned($0) } ?? false
             let tab = workspace.appendTab(
+                id: managed.id,
                 title: side + title,
                 toolTip: side + candidate.label + (pinned ? " · " + L("固定中") : ""),
                 icon: candidate.application.icon,

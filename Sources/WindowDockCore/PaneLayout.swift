@@ -178,6 +178,30 @@ public indirect enum PaneLayout: Codable, Equatable {
         return result
     }
 
+    /// Windows whose own minimum would still be violated after distributing the available space.
+    public func minimumSizeBlockers<ID: Hashable>(
+        in bounds: CGRect, paneMinimums: [Int: CGSize], windowMinimums: [ID: CGSize], assignments: [ID: Int],
+        sharedTracks: (columns: Int, rows: Int)? = nil
+    ) -> Set<ID> {
+        var sizes = paneMinimums
+        if let (columns, rows) = sharedTracks {
+            // A regular grid shares column widths across rows, unlike an independently split tree.
+            guard columns > 0, rows > 0, columns <= paneCount, rows == paneCount / columns, paneCount % columns == 0,
+                  let tracks = WindowGeometry.trackMinimums(sizes, columns: columns, rows: rows)
+            else { return [] }
+            for cell in 0 ..< paneCount {
+                sizes[cell] = CGSize(width: tracks.columns[cell % columns], height: tracks.rows[cell / columns])
+            }
+        }
+        guard let panes = geometry(in: bounds, minimums: sizes)?.panes else { return [] }
+        return Set(windowMinimums.compactMap { id, size in
+            let cell = assignments[id] ?? 0
+            guard panes.indices.contains(cell), size.width > panes[cell].width || size.height > panes[cell].height
+            else { return nil }
+            return id
+        })
+    }
+
     private func appendGeometry(
         in bounds: CGRect, minimums: [Int: CGSize], dividerThickness: CGFloat,
         path: [Int], result: inout Geometry

@@ -10,7 +10,9 @@ struct WorkspaceShortcutContext {
         if pid != originPID { reset() }
     }
 
-    mutating func direction(for event: NSEvent, ownPID: pid_t, frontPID: pid_t?, visiblePIDs: Set<pid_t>) -> Int? {
+    mutating func direction(
+        for event: NSEvent, ownPID: pid_t, frontPID: pid_t?, visiblePIDs: Set<pid_t>, enabled: Bool = true) -> Int? {
+        guard enabled else { return nil }
         guard event.type == .keyDown else { return nil }
         let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
         if flags.contains(.command), event.keyCode == 48 || event.keyCode == 50 { reset() }
@@ -72,6 +74,9 @@ final class WorkspaceWindowDrop {
     }
 
     private let controllers: () -> [WorkspaceController]
+    var isEnabled = true {
+        didSet { if !isEnabled { cancel() } }
+    }
     var pointer: () -> Pointer = {
         Pointer(location: NSEvent.mouseLocation, buttonDown: NSEvent.pressedMouseButtons & 1 != 0)
     }
@@ -98,6 +103,10 @@ final class WorkspaceWindowDrop {
     }
 
     func poll() {
+        guard isEnabled else {
+            cancel()
+            return
+        }
         let controllers = controllers()
         guard controllers.contains(where: \.acceptsWindowDrag), let screen = NSScreen.screens.first else {
             cancel()

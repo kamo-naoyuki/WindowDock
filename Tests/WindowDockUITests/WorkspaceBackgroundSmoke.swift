@@ -50,15 +50,19 @@ enum WorkspaceBackgroundSmoke {
             let focused = CommandLine.arguments.contains("--tab-move-only")
             let dropOnly = CommandLine.arguments.contains("--window-drop-only")
             let activationOnly = CommandLine.arguments.contains("--activation-only")
+            let shortcutOnly = CommandLine.arguments.contains("--shortcut-only")
             let nestedOnly = CommandLine.arguments.contains("--nested-split-only")
             let failures: [String]
             if nestedOnly {
                 failures =
                     WindowSessionSmoke.runNestedPaneChecks() + WindowSessionSmoke.runPanePinChecks()
+                        + WindowSessionSmoke.runTabSelectionFeedbackChecks()
                         + WindowSessionSmoke.runNestedPaneUIChecks() + WindowSessionSmoke.runNestedPaneLimitChecks()
                         + WindowSessionSmoke.runNestedPaneMinimumChecks() + checkGridLayout() + checkTabMoveRouting()
             } else if dropOnly {
                 failures = checkNativeWindowDrops()
+            } else if shortcutOnly {
+                failures = WindowSessionSmoke.runShortcutChecks()
             } else if focused {
                 failures = checkTabMoveRouting() + WindowSessionSmoke.runTabTransferRevealChecks()
             } else if activationOnly {
@@ -101,6 +105,17 @@ enum WorkspaceBackgroundSmoke {
     @MainActor
     private static func checkNativeWindowDrops() -> [String] {
         var failures: [String] = []
+        let disabledDrop = WorkspaceWindowDrop { [] }
+        var sampledWhileDisabled = false
+        disabledDrop.windows = {
+            sampledWhileDisabled = true
+            return []
+        }
+        disabledDrop.isEnabled = false
+        disabledDrop.poll()
+        if sampledWhileDisabled {
+            failures.append("disabled window dragging still sampled foreign windows")
+        }
         let host = WorkspaceWindow(
             contentRect: NSRect(x: 120, y: 120, width: 900, height: 600),
             styleMask: .borderless, backing: .buffered, defer: false)

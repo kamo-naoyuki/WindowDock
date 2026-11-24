@@ -115,6 +115,17 @@ enum WindowAccess {
         }
     }
 
+    static func close(_ element: AXUIElement) throws {
+        let button = try value(element, kAXCloseButtonAttribute)
+        guard CFGetTypeID(button) == AXUIElementGetTypeID() else {
+            throw WindowAccessError(operation: L("ウィンドウを閉じる"), code: .illegalArgument)
+        }
+        let result = AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+        guard result == .success else {
+            throw WindowAccessError(operation: L("ウィンドウを閉じる"), code: result)
+        }
+    }
+
     /// Makes the window the focused one of its application and brings that application to the front
     /// without bringing its other windows forward.
     static func focus(_ element: AXUIElement, application: NSRunningApplication) throws {
@@ -193,6 +204,9 @@ struct WindowAccessClient {
     var isFullScreen: (AXUIElement) -> Bool = WindowAccess.isFullScreen
     var setFullScreen: (AXUIElement, Bool) throws -> Void = WindowAccess.setFullScreen
     var raise: (AXUIElement) throws -> Void = WindowAccess.raise
+    var close: (AXUIElement) throws -> Void = WindowAccess.close
+    var windowID: (AXUIElement) -> CGWindowID? = WindowAccess.windowID(of:)
+    var windowElements: (NSRunningApplication) -> [AXUIElement]? = WindowAccess.windowElements
     var focus: (AXUIElement, NSRunningApplication) throws -> Void = WindowAccess.focus
     /// Reads the title while checking whether the element is still available.
     var probe: (AXUIElement) -> WindowProbeResult = WindowAccess.probe
@@ -292,12 +306,15 @@ extension WindowAccess {
         return WindowProbeResult(error: error, title: currentTitle)
     }
 
-    /// The standard windows of an application, or nil when they cannot be listed.
-    static func applicationWindows(_ application: NSRunningApplication) -> [WindowCandidate]? {
+    static func windowElements(_ application: NSRunningApplication) -> [AXUIElement]? {
         let element = AXUIElementCreateApplication(application.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 0.3)
-        guard let windows = try? value(element, kAXWindowsAttribute) as? [AXUIElement] else { return nil }
-        return windows.compactMap { try? candidate($0, application: application) }
+        return try? value(element, kAXWindowsAttribute) as? [AXUIElement]
+    }
+
+    /// The standard windows of an application, or nil when they cannot be listed.
+    static func applicationWindows(_ application: NSRunningApplication) -> [WindowCandidate]? {
+        windowElements(application)?.compactMap { try? candidate($0, application: application) }
     }
 
     /// Picks the live window for a cached element that went stale (e.g. after a login-window round trip).

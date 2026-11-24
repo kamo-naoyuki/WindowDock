@@ -6,6 +6,8 @@ struct ManagedWindow {
     var candidate: WindowCandidate
     let originalFrame: CGRect
     let originallyMinimized: Bool
+    // A close can open a save sheet. Until it actually closes, only follow this exact window, never a title match.
+    var closingWindowID: CGWindowID?
 
     func restore(using access: WindowAccessClient) throws {
         guard !candidate.application.isTerminated else { return }
@@ -20,8 +22,16 @@ struct ManagedWindow {
     }
 }
 
+enum PaneSplitRestriction: Error {
+    case layout
+    case minimumSize(apps: String)
+}
+
 @MainActor
 final class WindowSession {
+    private static let frameRoundingTolerance = CGSize(width: 12, height: 20)
+    private static let framePositionTolerance: CGFloat = 1
+
     private(set) var windows: [ManagedWindow] = []
     // The last regular-grid preset; customLayout takes precedence when present.
     private(set) var gridSize = WorkspaceGridSize.single
@@ -31,6 +41,9 @@ final class WindowSession {
     private(set) var pinnedCells: Set<Int> = []
     private var lastUnpinnedCell = 0
     var onChange: (() -> Void)?
+    var closesWindowsOnRelease = false {
+        didSet { if oldValue != closesWindowsOnRelease { onChange?() } }
+    }
     var onMessage: ((WorkspaceNotice) -> Void)?
     var onPresentedFrame: ((CGRect?) -> Void)?
     var onPresentedFrames: (([UUID: CGRect]) -> Void)?
@@ -128,39 +141,51 @@ final class WindowSession {
         applyPaneLayout(layout, reflow: result)
     }
 
-    func canSplitPane(at index: Int, axis: PaneLayout.Axis, currentLayout: PaneLayout? = nil) -> Bool {
-        plannedPaneSplit(at: index, axis: axis, currentLayout: currentLayout) != nil
+    func splitRestriction(at index: Int, axis: PaneLayout.Axis, currentLayout: PaneLayout?) -> PaneSplitRestriction? {
+        if case .failure(let reason) = plannedPaneSplit(at: index, axis: axis, currentLayout: currentLayout) {
+            return reason
+        }
+        return nil
     }
 
     private func plannedPaneSplit(
         at index: Int, axis: PaneLayout.Axis,
-        currentLayout: PaneLayout?) -> (layout: PaneLayout, reflow: GridReflowResult<UUID>)? {
+        currentLayout: PaneLayout?)
+        -> Result<(layout: PaneLayout, reflow: GridReflowResult<UUID>), PaneSplitRestriction> {
         let layout = currentLayout ?? paneLayout
         guard layout.isValid, layout.paneCount == cells.count,
               let split = layout.splittingPane(at: index, axis: axis),
               let result = PaneReflow.split(
                   cells: cells, activeCell: activeCell, at: index,
                   windowIDs: windows.map(\.id), assignments: assignments)
-        else { return nil }
+        else { return .failure(.layout) }
         if !minimumSizes.isEmpty {
             let bounds = currentTargets().values.reduce(CGRect.null) { $0.union($1) }
+            let sizes = minimums(for: result.assignments)
             guard !bounds.isNull,
-                  let minimum = split.minimumSize(
-                      minimums(for: result.assignments), dividerThickness: PaneLayout.dividerThickness),
-                  minimum.width <= bounds.width, minimum.height <= bounds.height
-            else { return nil }
+                  let minimum = split.minimumSize(sizes, dividerThickness: PaneLayout.dividerThickness)
+            else { return .failure(.layout) }
+            if minimum.width > bounds.width || minimum.height > bounds.height {
+                let ids = split.minimumSizeBlockers(
+                    in: bounds, paneMinimums: sizes, windowMinimums: minimumSizes, assignments: result.assignments)
+                guard let apps = constraintAppNames(for: ids) else { return .failure(.layout) }
+                return .failure(.minimumSize(apps: apps))
+            }
         }
-        return (split, result)
+        return .success((split, result))
     }
 
     func splitPane(at index: Int, axis: PaneLayout.Axis, currentLayout: PaneLayout? = nil) {
-        guard let plan = plannedPaneSplit(at: index, axis: axis, currentLayout: currentLayout) else {
+        switch plannedPaneSplit(at: index, axis: axis, currentLayout: currentLayout) {
+        case .failure(.layout):
             onMessage?(.attention(L("ペインの配置を変更できませんでした。")))
-            return
+        case .failure(.minimumSize(let apps)):
+            onMessage?(.attention(L("%@のウィンドウがペインに収まらないため、この方向には分割できません。", apps)))
+        case .success(let plan):
+            pinnedCells = Set(pinnedCells.map { $0 > index ? $0 + 1 : $0 })
+            if lastUnpinnedCell > index { lastUnpinnedCell += 1 }
+            applyPaneLayout(plan.layout, reflow: plan.reflow)
         }
-        pinnedCells = Set(pinnedCells.map { $0 > index ? $0 + 1 : $0 })
-        if lastUnpinnedCell > index { lastUnpinnedCell += 1 }
-        applyPaneLayout(plan.layout, reflow: plan.reflow)
     }
 
     func closePane(at index: Int, currentLayout: PaneLayout? = nil) {
@@ -326,9 +351,9 @@ final class WindowSession {
             lastUnpinnedCell = cell
         }
         replacePresentation(of: displaced, with: id)
+        onChange?()
         if activate { focus(id) }
         presentVisibleWindows()
-        onChange?()
     }
 
     private func select(_ id: UUID, inCell cell: Int, activate: Bool) {
@@ -341,9 +366,9 @@ final class WindowSession {
         activeCell = cell
         lastUnpinnedCell = cell
         replacePresentation(of: displaced, with: id)
+        onChange?()
         if activate { focus(id) }
         presentVisibleWindows()
-        onChange?()
     }
 
     /// Focuses a window; if its AX element went stale, re-resolves it once and retries.
@@ -352,11 +377,12 @@ final class WindowSession {
         do {
             try access.focus(windows[index].candidate.element, windows[index].candidate.application)
         } catch let error as WindowAccessError where error.code == .invalidUIElement {
-            guard let fresh = reresolve(windows[index].candidate) else {
+            guard let fresh = reresolve(windows[index]) else {
                 report(error)
                 return
             }
             windows[index].candidate = fresh
+            onChange?()
             do {
                 try access.focus(fresh.element, fresh.application)
             } catch {
@@ -556,6 +582,18 @@ final class WindowSession {
         }
     }
 
+    private func constraintAppNames(for ids: Set<UUID>) -> String? {
+        var seen: Set<String> = []
+        let names = windows.compactMap { window -> String? in
+            guard ids.contains(window.id) else { return nil }
+            let app = window.candidate.application
+            guard let name = app.localizedName ?? app.bundleIdentifier ?? app.executableURL?.lastPathComponent,
+                  !name.isEmpty, seen.insert(name).inserted else { return nil }
+            return name
+        }
+        return names.isEmpty ? nil : ListFormatter.localizedString(byJoining: names)
+    }
+
     private func synchronize(bringToFront: Bool) {
         guard !windows.isEmpty else { return }
         // A resize event (e.g. the zoom animation) can arrive while syncing; rerun afterwards so the final frame isn't lost.
@@ -571,14 +609,17 @@ final class WindowSession {
                 DispatchQueue.main.async { [weak self] in self?.synchronize(bringToFront: false) }
             }
         }
-        var correction = 0
-        var rejectedGrid = false
+        var retryingWindows: Set<UUID> = []
+        var rejectedWindows: Set<UUID>?
         while true {
             let minima = minimums(for: assignments)
             if fitMinimumSizes?(minima) == false, isSplit {
+                let blockers = paneLayout.minimumSizeBlockers(
+                    in: currentTargets().values.reduce(.null) { $0.union($1) },
+                    paneMinimums: minima, windowMinimums: minimumSizes, assignments: assignments,
+                    sharedTracks: customLayout == nil ? (gridSize.columns, gridSize.rows) : nil)
+                rejectedWindows = blockers.isEmpty ? retryingWindows : blockers
                 collapseAfterConstraintFailure()
-                rejectedGrid = true
-                correction = 0
                 continue
             }
             let targets = currentTargets()
@@ -588,7 +629,7 @@ final class WindowSession {
                 return
             }
             let changed = windows.contains { requestedFrames[$0.id] != targets[assignments[$0.id] ?? 0] }
-            guard bringToFront || changed || correction > 0 || rejectedGrid else { return }
+            guard bringToFront || changed || !retryingWindows.isEmpty || rejectedWindows != nil else { return }
             var errors: [Error] = []
             var actualFrames: [UUID: CGRect] = [:]
             var mismatches: Set<UUID> = []
@@ -609,19 +650,23 @@ final class WindowSession {
                                     width: max(requested.width, $0.width), height: max(requested.height, $0.height)))
                         } ?? requested
                     var attempts = 0
-                    while !WindowGeometry.fits(actual, requested: requested, tolerance: 1),
-                          !WindowGeometry.fits(actual, requested: expected, tolerance: 1), attempts < 6
+                    while !fits(actual, requested: requested),
+                          !fits(actual, requested: expected), attempts < 6
                     {
                         attempts += 1
                         Thread.sleep(forTimeInterval: 0.05)
                         actual = try access.frame(window.candidate.element)
                     }
                     actualFrames[window.id] = actual
-                    if !requested.insetBy(dx: -1, dy: -1).contains(actual) {
+                    if !fits(actual, requested: requested) {
                         mismatches.insert(window.id)
                         var minimum = minimumSizes[window.id] ?? .zero
-                        if actual.width > requested.width + 1 { minimum.width = max(minimum.width, actual.width) }
-                        if actual.height > requested.height + 1 { minimum.height = max(minimum.height, actual.height) }
+                        if actual.width > requested.width + Self.frameRoundingTolerance.width {
+                            minimum.width = max(minimum.width, actual.width)
+                        }
+                        if actual.height > requested.height + Self.frameRoundingTolerance.height {
+                            minimum.height = max(minimum.height, actual.height)
+                        }
                         minimumSizes[window.id] = minimum
                         requestedFrames.removeValue(forKey: window.id)
                     }
@@ -633,12 +678,11 @@ final class WindowSession {
             alignedFrames.merge(actualFrames) { $1 }
             if isSplit, !mismatches.isEmpty {
                 report(errors)
-                if correction == 0 {
-                    correction += 1
+                if retryingWindows.isEmpty {
+                    retryingWindows = mismatches
                 } else {
+                    rejectedWindows = mismatches
                     collapseAfterConstraintFailure()
-                    rejectedGrid = true
-                    correction = 0
                 }
                 continue
             }
@@ -656,12 +700,14 @@ final class WindowSession {
             onPresentedFrame?(selectedID.flatMap { frames[$0] })
             onPresentedFrames?(frames)
             constraintWarningIDs.formUnion(mismatches)
-            if rejectedGrid {
-                onMessage?(.attention(L("対象アプリの最小サイズ・位置制約により分割が収まらないため、1×1表示に戻しました。")))
-            } else if selectedID.map({ constraintWarningIDs.contains($0) }) == true {
-                onMessage?(.attention(L("対象アプリのサイズ・位置の制約により、枠内に完全には収まりません。")))
+            if let rejectedWindows {
+                let apps = constraintAppNames(for: rejectedWindows) ?? L("対象アプリ")
+                onMessage?(.attention(L("%@のウィンドウがペインに収まらないため、分割を解除して1×1表示に戻しました。", apps)))
+            } else if let selectedID, constraintWarningIDs.contains(selectedID) {
+                let app = constraintAppNames(for: [selectedID]) ?? L("対象アプリ")
+                onMessage?(.attention(L("%@のウィンドウがペインの大きさや位置に合わず、完全には収まりません。", app)))
             } else if !frames.isEmpty {
-                onMessage?(.information(L("⌃ Tab / ⌃ ⇧ Tab で切替 · タブの × で元に戻す")))
+                onMessage?(.information(L("⌃ Tab / ⌃ ⇧ Tab でタブを切替")))
             }
             report(errors)
             return
@@ -695,6 +741,13 @@ final class WindowSession {
             try access.setPosition(window.candidate.element, frame.origin)
         }
         requestedFrames[window.id] = frame
+    }
+
+    private func fits(_ actual: CGRect, requested: CGRect) -> Bool {
+        abs(actual.minX - requested.minX) <= Self.framePositionTolerance
+            && abs(actual.minY - requested.minY) <= Self.framePositionTolerance
+            && abs(actual.width - requested.width) <= Self.frameRoundingTolerance.width
+            && abs(actual.height - requested.height) <= Self.frameRoundingTolerance.height
     }
 
     private func clearPresentation() {
@@ -735,14 +788,32 @@ final class WindowSession {
     @discardableResult
     func remove(_ id: UUID) -> Bool {
         guard let index = windows.firstIndex(where: { $0.id == id }) else { return true }
-        // Restoring moves the window out of its pane; until the pane is closed, it would show what is behind the workspace.
-        withdrawPresentation(of: id)
-        do {
-            try windows[index].restore(using: access)
-        } catch {
-            report(error)
-            synchronize(bringToFront: true)
-            return false
+        if closesWindowsOnRelease {
+            let window = windows[index]
+            let number = access.windowID(window.candidate.element) ?? kCGNullWindowID
+            do {
+                try access.close(window.candidate.element)
+            } catch {
+                // A timeout can mean the press was delivered, e.g. while an app opens a modal save dialog.
+                if (error as? WindowAccessError)?.code == .cannotComplete { windows[index].closingWindowID = number }
+                report(error)
+                return false
+            }
+            windows[index].closingWindowID = number
+            // A successful AX press isn't proof of closure: the owner may ask to save or veto closing.
+            guard window.candidate.application.isTerminated || access.probe(window.candidate.element)
+                .error == .invalidUIElement
+            else { return true }
+        } else {
+            // Stop showing the window through its pane before moving it back to its original frame.
+            withdrawPresentation(of: id)
+            do {
+                try windows[index].restore(using: access)
+            } catch {
+                report(error)
+                synchronize(bringToFront: true)
+                return false
+            }
         }
         windows.remove(at: index)
         if !isSplit, cells[0] == id {
@@ -764,46 +835,58 @@ final class WindowSession {
     /// Whether another workspace manages a window; such a window must never be taken over.
     var isClaimedElsewhere: (WindowCandidate) -> Bool = { _ in false }
 
-    private func reresolve(_ stale: WindowCandidate) -> WindowCandidate? {
+    private func reresolve(_ window: ManagedWindow) -> WindowCandidate? {
+        let stale = window.candidate
         guard let live = access.applicationWindows(stale.application) else { return nil }
+        if let number = window.closingWindowID {
+            guard number != kCGNullWindowID else { return nil }
+            return live.first {
+                access.windowID($0.element) == number && !contains($0) && !isClaimedElsewhere($0)
+            }
+        }
         return WindowAccess.reresolve(stale, among: live) { candidate in
             contains(candidate) || isClaimedElsewhere(candidate)
         }
     }
 
     func pruneClosedWindows() {
-        var invalidIDs: Set<UUID> = []
-        var closed: [ManagedWindow] = []
+        var closedIDs: Set<UUID> = []
+        var listedByPID: [pid_t: [AXUIElement]] = [:]
         var titleChanged = false
         for index in windows.indices {
             let window = windows[index]
             if window.candidate.application.isTerminated {
-                closed.append(window)
+                closedIDs.insert(window.id)
                 continue
             }
             let probe = access.probe(window.candidate.element)
+            // Some apps keep the AX element alive after removing the window from their window list.
+            if let number = window.closingWindowID, [.success, .noValue, .attributeUnsupported].contains(probe.error) {
+                let app = window.candidate.application
+                if listedByPID[app.processIdentifier] == nil {
+                    listedByPID[app.processIdentifier] = access.windowElements(app)
+                }
+                if let listed = listedByPID[app.processIdentifier],
+                   !listed.contains(where: { CFEqual($0, window.candidate.element) }),
+                   number == kCGNullWindowID || !listed.contains(where: { access.windowID($0) == number })
+                {
+                    closedIDs.insert(window.id)
+                }
+            }
             if let title = probe.title, windows[index].candidate.title != title {
                 windows[index].candidate.title = title
                 titleChanged = true
             }
-            if probe.error == .invalidUIElement { invalidIDs.insert(window.id) }
-            if ![.success, .noValue, .attributeUnsupported].contains(probe.error) {
-                closed.append(window)
+            // A busy app still owns its window; only a stale element is looked up again.
+            if probe.error == .invalidUIElement {
+                if let fresh = reresolve(window) {
+                    titleChanged = titleChanged || window.candidate.title != fresh.title
+                    windows[index].candidate = fresh
+                    WindowAccess.logger.notice("prune re-resolved \(fresh.label, privacy: .public)")
+                } else {
+                    closedIDs.insert(window.id)
+                }
             }
-        }
-        // A busy app (e.g. a timed-out Electron window) still owns its element; only a stale element is looked up again.
-        for window in closed where invalidIDs.contains(window.id) {
-            guard let index = windows.firstIndex(where: { $0.id == window.id }),
-                  !window.candidate.application.isTerminated,
-                  let fresh = reresolve(window.candidate)
-            else { continue }
-            titleChanged = titleChanged || windows[index].candidate.title != fresh.title
-            windows[index].candidate = fresh
-            WindowAccess.logger.notice("prune re-resolved \(fresh.label, privacy: .public)")
-            closed.removeAll { $0.id == window.id }
-        }
-        let closedIDs = Set(closed.map(\.id)).filter { id in
-            invalidIDs.contains(id) || windows.first { $0.id == id }?.candidate.application.isTerminated == true
         }
         // Require two consecutive misses so a transient AX failure doesn't drop tabs.
         let confirmed = closedIDs.intersection(pendingClosedIDs)

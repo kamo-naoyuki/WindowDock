@@ -34,6 +34,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var globalMonitor: Any?
     private var quitting = false
     private var monitorTrust: Bool?
+    private var tabMenu: NSMenu!
+    private var viewMenu: NSMenu!
+    private var settingsMenu: NSMenu!
     private var shortcutContext = WorkspaceShortcutContext()
     private var dragTimer: Timer?
     private lazy var tabTransfer: WorkspaceTabTransfer = {
@@ -48,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var activation = WorkspaceActivation { [weak self] in self?.controllers ?? [] }
     private lazy var windowDrop: WorkspaceWindowDrop = {
         let drop = WorkspaceWindowDrop { [weak self] in self?.controllers ?? [] }
+        drop.isEnabled = isSettingEnabled(.addWindowsByDragging)
         drop.onSamplingFailure = { [weak self] error in
             self?.activeController?.showNotice(.attention(error.localizedDescription))
         }
@@ -57,6 +61,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activeController: WorkspaceController? { activation.activeController }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.register(defaults: [
+            Setting.closeOnRelease.rawValue: false,
+            Setting.controlTabSwitching.rawValue: true,
+            Setting.addWindowsByDragging.rawValue: true,
+            Setting.autoHideNewWorkspaces.rawValue: false,
+        ])
         buildMenu()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [
             .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp,
@@ -176,7 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let workspace = workspaces.first else { return }
         var chosen = chosen
         var picked: [WindowCandidate] = []
-        controller.setAutoHideTabs(workspace.autoHideTabs ?? false)
+        controller.setAutoHideTabs(workspace.autoHideTabs ?? isSettingEnabled(.autoHideNewWorkspaces))
         controller.presentPicker(
             restoring: workspace.windows,
             excluding: chosen.flatMap { $0.1 },
@@ -196,6 +206,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: Menu
+
+    private enum Setting: String {
+        case closeOnRelease = "closeWindowsOnTabRelease"
+        case controlTabSwitching = "controlTabSwitching"
+        case addWindowsByDragging = "addWindowsByDragging"
+        case autoHideNewWorkspaces = "autoHideNewWorkspaces"
+
+        var defaultValue: Bool {
+            switch self {
+            case .closeOnRelease, .autoHideNewWorkspaces: false
+            case .controlTabSwitching, .addWindowsByDragging: true
+            }
+        }
+    }
+
+    private func isSettingEnabled(_ setting: Setting) -> Bool {
+        UserDefaults.standard.object(forKey: setting.rawValue) as? Bool ?? setting.defaultValue
+    }
+
+    @objc private func toggleSetting(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String, let setting = Setting(rawValue: rawValue) else {
+            return
+        }
+        let enabled = !isSettingEnabled(setting)
+        UserDefaults.standard.set(enabled, forKey: setting.rawValue)
+        sender.state = enabled ? .on : .off
+        switch setting {
+        case .closeOnRelease:
+            for controller in controllers { controller.session.closesWindowsOnRelease = enabled }
+        case .controlTabSwitching:
+            shortcutContext.reset()
+        case .addWindowsByDragging:
+            windowDrop.isEnabled = enabled
+        case .autoHideNewWorkspaces:
+            break
+        }
+    }
 
     private func buildMenu() {
         let menu = NSMenu()
@@ -218,34 +265,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         workspaceItem.submenu = workspaceMenu
         menu.addItem(workspaceItem)
 
-        let windowItem = NSMenuItem()
-        let windowMenu = NSMenu(title: L("ウィンドウ"))
-        windowMenu.addItem(withTitle: L("ウィンドウを追加…"), action: #selector(showPicker), keyEquivalent: "o")
-        windowMenu.addItem(withTitle: L("選択中のタブを解除"), action: #selector(removeSelected), keyEquivalent: "w")
-        let nextTab = windowMenu.addItem(withTitle: L("次のタブ"), action: #selector(selectNextTab), keyEquivalent: "\t")
-        nextTab.keyEquivalentModifierMask = [.control]
-        let previousTab = windowMenu.addItem(
-            withTitle: L("前のタブ"), action: #selector(selectPreviousTab), keyEquivalent: "\t")
-        previousTab.keyEquivalentModifierMask = [.control, .shift]
-        windowMenu.addItem(withTitle: L("最小化"), action: #selector(minimizeWorkspace), keyEquivalent: "m")
-        windowMenu.addItem(withTitle: L("最大化 / 復元"), action: #selector(maximizeWorkspace), keyEquivalent: "")
-        windowMenu.addItem(withTitle: L("列数を1 / 2に切替"), action: #selector(toggleSplit), keyEquivalent: "")
-        windowMenu.addItem(withTitle: L("行数を1 / 2に切替"), action: #selector(toggleStackedSplit), keyEquivalent: "")
-        windowItem.submenu = windowMenu
-        menu.addItem(windowItem)
+        let tabItem = NSMenuItem()
+        tabMenu = NSMenu(title: L("タブ"))
+        tabMenu.delegate = self
+        tabItem.submenu = tabMenu
+        menu.addItem(tabItem)
+
+        let viewItem = NSMenuItem()
+        viewMenu = NSMenu(title: L("表示"))
+        viewMenu.delegate = self
+        viewItem.submenu = viewMenu
+        menu.addItem(viewItem)
+
+        let settingsItem = NSMenuItem()
+        settingsMenu = NSMenu(title: L("設定"))
+        settingsMenu.delegate = self
+        updateSettingsMenu(settingsMenu)
+        settingsItem.submenu = settingsMenu
+        menu.addItem(settingsItem)
+
         NSApp.mainMenu = menu
     }
 
-    /// Rebuilt each time it opens: fixed commands, then every workspace with its registered windows.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === workspaceMenu else { return }
+        if menu === workspaceMenu {
+            updateWorkspaceMenu(menu)
+        } else if menu === tabMenu {
+            updateTabMenu(menu)
+        } else if menu === viewMenu {
+            updateViewMenu(menu)
+        } else if menu === settingsMenu {
+            updateSettingsMenu(menu)
+        }
+    }
+
+    private func updateWorkspaceMenu(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.addItem(withTitle: L("新規ワークスペース"), action: #selector(newWorkspace), keyEquivalent: "n")
         menu.addItem(withTitle: L("ワークスペース名を変更…"), action: #selector(renameWorkspace), keyEquivalent: "")
-        let close = menu.addItem(withTitle: L("ワークスペースを閉じる"), action: #selector(closeWorkspace), keyEquivalent: "w")
+        let close = menu.addItem(
+            withTitle: L("ワークスペースを閉じる"), action: #selector(closeWorkspace), keyEquivalent: "w")
         close.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(deleteWorkspace), keyEquivalent: "")
         menu.addItem(.separator())
+        menu.addItem(withTitle: L("最小化"), action: #selector(minimizeWorkspace), keyEquivalent: "m")
+        menu.addItem(withTitle: L("最大化 / 復元"), action: #selector(maximizeWorkspace), keyEquivalent: "")
+        menu.addItem(.separator())
+        let active = activeController
+        for controller in controllers {
+            let item = NSMenuItem(
+                title: "\(controller.name) — " + L("%d個のウィンドウ", controller.session.windows.count),
+                action: #selector(showWorkspace(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = controller
+            item.state = controller === active ? .on : .off
+            menu.addItem(item)
+        }
+        appendClosedWorkspaces(to: menu)
+    }
+
+    private func updateTabMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        menu.addItem(withTitle: L("ウィンドウを追加…"), action: #selector(showPicker), keyEquivalent: "o")
+        let releaseTitle = isSettingEnabled(.closeOnRelease) ? L("選択中のタブのウィンドウを閉じる") : L("選択中のタブを解除")
+        menu.addItem(withTitle: releaseTitle, action: #selector(removeSelected), keyEquivalent: "w")
+        let controlTabEnabled = isSettingEnabled(.controlTabSwitching)
+        let nextTab = menu.addItem(
+            withTitle: L("次のタブ"), action: controlTabEnabled ? #selector(selectNextTab) : nil, keyEquivalent: "\t")
+        nextTab.target = self
+        nextTab.keyEquivalentModifierMask = [.control]
+        let previousTab = menu.addItem(
+            withTitle: L("前のタブ"), action: controlTabEnabled ? #selector(selectPreviousTab) : nil, keyEquivalent: "\t")
+        previousTab.target = self
+        previousTab.keyEquivalentModifierMask = [.control, .shift]
+        previousTab.isEnabled = controlTabEnabled
+        nextTab.isEnabled = controlTabEnabled
+        let populatedWorkspaces = controllers.filter { !$0.session.windows.isEmpty }
+        guard !populatedWorkspaces.isEmpty else { return }
+        menu.addItem(.separator())
+        for controller in populatedWorkspaces {
+            let workspaceItem = menu.addItem(
+                withTitle: "\(controller.name) — " + L("%d個のウィンドウ", controller.session.windows.count),
+                action: nil, keyEquivalent: "")
+            workspaceItem.isEnabled = false
+            for managed in controller.session.windows {
+                let item = menu.addItem(
+                    withTitle: managed.candidate.label, action: #selector(showWorkspaceWindow(_:)),
+                    keyEquivalent: "")
+                item.target = self
+                item.indentationLevel = 1
+                item.representedObject = WorkspaceWindowRef(controller: controller, id: managed.id)
+                item.state = controller.session.selectedID == managed.id ? .mixed : .off
+            }
+        }
+    }
+
+    private func updateViewMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
         let active = activeController
         let autoHide = menu.addItem(
             withTitle: L("タブバーを自動的に隠す"), action: #selector(toggleAutoHideTabs), keyEquivalent: "")
@@ -256,25 +372,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pane.submenu = active.activePaneMenu()
         }
         menu.addItem(.separator())
-        for controller in controllers {
-            let item = NSMenuItem(
-                title: "\(controller.name) — " + L("%d個のウィンドウ", controller.session.windows.count),
-                action: #selector(showWorkspace(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: L("列数を1 / 2に切替"), action: #selector(toggleSplit), keyEquivalent: "")
+        menu.addItem(withTitle: L("行数を1 / 2に切替"), action: #selector(toggleStackedSplit), keyEquivalent: "")
+    }
+
+    private func updateSettingsMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let settings: [(Setting, String)] = [
+            (.closeOnRelease, "タブを解除するときにウィンドウも閉じる"),
+            (.controlTabSwitching, "Control+Tabでワークスペースのタブを切り替える"),
+            (.addWindowsByDragging, "ウィンドウをドラッグしてワークスペースに追加する"),
+            (.autoHideNewWorkspaces, "新しいワークスペースではタブバーを自動的に隠す"),
+        ]
+        for (setting, title) in settings {
+            let item = menu.addItem(withTitle: L(title), action: #selector(toggleSetting(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = controller
-            item.state = controller === active ? .on : .off
-            menu.addItem(item)
-            for managed in controller.session.windows {
-                let windowItem = NSMenuItem(
-                    title: managed.candidate.label, action: #selector(showWorkspaceWindow(_:)), keyEquivalent: "")
-                windowItem.target = self
-                windowItem.indentationLevel = 1
-                windowItem.representedObject = WorkspaceWindowRef(controller: controller, id: managed.id)
-                windowItem.state = controller.session.selectedID == managed.id ? .mixed : .off
-                menu.addItem(windowItem)
-            }
+            item.representedObject = setting.rawValue
+            item.state = isSettingEnabled(setting) ? .on : .off
         }
-        appendClosedWorkspaces(to: menu)
     }
 
     /// Saved workspaces that are not open right now; each can be reopened or deleted.
@@ -348,6 +463,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @discardableResult
     private func addWorkspace(name: String? = nil) -> WorkspaceController {
         let controller = WorkspaceController(name: name ?? nextWorkspaceName())
+        controller.session.closesWindowsOnRelease = isSettingEnabled(.closeOnRelease)
+        controller.setAutoHideTabs(isSettingEnabled(.autoHideNewWorkspaces))
         controller.onClose = { [weak self] in self?.close($0) }
         controller.onSessionChange = { [weak self] controller in
             guard let self, !self.quitting else { return }
@@ -497,7 +614,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let target,
               let direction = shortcutContext.direction(
                   for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
-                  frontPID: frontPID, visiblePIDs: target.visiblePIDs)
+                  frontPID: frontPID, visiblePIDs: target.visiblePIDs,
+                  enabled: isSettingEnabled(.controlTabSwitching))
         else { return false }
         target.cycleTabs(direction)
         return true

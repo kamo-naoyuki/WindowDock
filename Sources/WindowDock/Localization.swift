@@ -69,14 +69,63 @@ private let translations: [String: [String]] = [
     "ウィンドウ一覧の変換": ["converting the window list", "转换窗口列表", "창 목록 변환", "convertir la lista de ventanas"],
 
     "アップデートを確認…": ["Check for Updates…", "检查更新…", "업데이트 확인…", "Buscar actualizaciones…"],
+    "設定": ["Settings", "设置", "설정", "Ajustes"],
+    "タブを解除するときにウィンドウも閉じる": [
+        "Close windows when releasing tabs", "解除标签页时同时关闭窗口", "탭을 해제할 때 창도 닫기",
+        "Cerrar las ventanas al liberar las pestañas",
+    ],
+    "Control+Tabでワークスペースのタブを切り替える": [
+        "Use Control+Tab to switch workspace tabs", "使用 Control+Tab 切换工作区标签页",
+        "Control+Tab으로 작업 공간 탭 전환", "Usar Control+Tab para cambiar entre pestañas del espacio de trabajo",
+    ],
+    "ウィンドウをドラッグしてワークスペースに追加する": [
+        "Add windows to a workspace by dragging", "通过拖动窗口将其添加到工作区",
+        "창을 드래그하여 작업 공간에 추가", "Añadir ventanas al espacio de trabajo arrastrándolas",
+    ],
+    "新しいワークスペースではタブバーを自動的に隠す": [
+        "Automatically hide the tab bar in new workspaces", "在新工作区中自动隐藏标签栏",
+        "새 작업 공간에서 탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas en espacios de trabajo nuevos",
+    ],
     "WindowDock を終了": ["Quit WindowDock", "退出 WindowDock", "WindowDock 종료", "Salir de WindowDock"],
-    "ウィンドウ": ["Window", "窗口", "윈도우", "Ventana"],
+    "タブ": ["Tabs", "标签页", "탭", "Pestañas"],
+    "表示": ["View", "视图", "보기", "Ver"],
     "ウィンドウを追加…": ["Add Window…", "添加窗口…", "창 추가…", "Añadir ventana…"],
     "選択中のタブを解除": ["Release Selected Tab", "解除所选标签页", "선택한 탭 해제", "Liberar pestaña seleccionada"],
     "タブバーを自動的に隠す": [
         "Automatically Hide Tab Bar", "自动隐藏标签栏", "탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas",
     ],
     "タブを解除": ["Release Tab", "解除标签页", "탭 해제", "Liberar pestaña"],
+    "ウィンドウを閉じる": ["Close Window", "关闭窗口", "창 닫기", "Cerrar ventana"],
+    "選択中のタブのウィンドウを閉じる": [
+        "Close Selected Tab’s Window",
+        "关闭所选标签页的窗口",
+        "선택한 탭의 창 닫기",
+        "Cerrar la ventana de la pestaña seleccionada"
+    ],
+    "他のタブのウィンドウをすべて閉じる": [
+        "Close All Other Tabs’ Windows",
+        "关闭其他所有标签页的窗口",
+        "다른 모든 탭의 창 닫기",
+        "Cerrar las ventanas de las demás pestañas"
+    ],
+    "右側のタブのウィンドウを閉じる": [
+        "Close Windows of Tabs to the Right",
+        "关闭右侧标签页的窗口",
+        "오른쪽 탭의 창 닫기",
+        "Cerrar las ventanas de las pestañas de la derecha"
+    ],
+    "左側のタブのウィンドウを閉じる": [
+        "Close Windows of Tabs to the Left",
+        "关闭左侧标签页的窗口",
+        "왼쪽 탭의 창 닫기",
+        "Cerrar las ventanas de las pestañas de la izquierda"
+    ],
+    "すべてのタブのウィンドウを閉じる": [
+        "Close All Tabs’ Windows",
+        "关闭所有标签页的窗口",
+        "모든 탭의 창 닫기",
+        "Cerrar las ventanas de todas las pestañas"
+    ],
     "他のタブをすべて解除": ["Release All Other Tabs", "解除其他所有标签页", "다른 탭 모두 해제", "Liberar todas las demás pestañas"],
     "右側のタブを解除": ["Release Tabs to the Right", "解除右侧标签页", "오른쪽 탭 해제", "Liberar pestañas a la derecha"],
     "左側のタブを解除": ["Release Tabs to the Left", "解除左侧标签页", "왼쪽 탭 해제", "Liberar pestañas a la izquierda"],
@@ -140,7 +189,7 @@ private let translations: [String: [String]] = [
     "終了": ["Quit", "退出", "종료", "Salir"],
     "戻って再試行": ["Go Back and Retry", "返回并重试", "돌아가서 다시 시도", "Volver y reintentar"],
 
-    "ワークスペース": ["Workspace", "工作区", "작업 공간", "Espacio de trabajo"],
+    "ワークスペース": ["Workspaces", "工作区", "작업 공간", "Espacios de trabajo"],
     "ワークスペース %d": ["Workspace %d", "工作区 %d", "작업 공간 %d", "Espacio de trabajo %d"],
     "前回のワークスペースを復元": [
         "Restore Previous Workspaces", "恢复上次的工作区", "이전 작업 공간 복원", "Restaurar espacios de trabajo anteriores",
@@ -215,23 +264,34 @@ private let translations: [String: [String]] = [
         "Could not get the split view area.", "无法获取分屏区域。", "분할 표시 영역을 가져올 수 없습니다.",
         "No se pudo obtener el área de la vista dividida.",
     ],
-    "対象アプリの最小サイズ・位置制約により分割が収まらないため、1×1表示に戻しました。": [
-        "The split doesn't fit because of app minimum size or position constraints, so the view returned to 1×1.",
-        "由于应用的最小尺寸或位置限制，分屏无法容纳，已恢复为 1×1。",
-        "대상 앱의 최소 크기·위치 제약으로 분할이 맞지 않아 1×1 표시로 되돌렸습니다.",
-        "La división no cabe por las restricciones de tamaño mínimo o posición de las apps; se volvió a 1×1.",
+    "対象アプリ": ["the target app", "目标应用", "대상 앱", "la app de destino"],
+    "%@（%@のウィンドウが収まりません）": [
+        "%@ (%@’s window won’t fit)",
+        "%@（%@ 的窗口无法放入）",
+        "%@ (%@ 창이 맞지 않음)",
+        "%@ (la ventana de %@ no cabe)",
     ],
-    "対象アプリのサイズ・位置の制約により、枠内に完全には収まりません。": [
-        "App size or position constraints prevent the windows from fitting completely.",
-        "由于应用的大小或位置限制，窗口无法完全放入框内。",
-        "대상 앱의 크기·위치 제약으로 프레임 안에 완전히 들어가지 않습니다.",
-        "Por las restricciones de tamaño o posición de las apps, no caben por completo.",
+    "%@の最小サイズにより、この方向には分割できません。": [
+        "%@’s window won’t fit in this direction.",
+        "%@ 的窗口无法放入此方向的窗格。",
+        "%@ 창은 이 방향의 패널에 맞지 않습니다.",
+        "La ventana de %@ no cabe en esta dirección.",
     ],
-    "⌃ Tab / ⌃ ⇧ Tab で切替 · タブの × で元に戻す": [
-        "⌃ Tab / ⌃ ⇧ Tab to switch · × on a tab to restore",
-        "⌃ Tab / ⌃ ⇧ Tab 切换 · 点按标签页的 × 还原",
-        "⌃ Tab / ⌃ ⇧ Tab으로 전환 · 탭의 ×로 원래대로",
-        "⌃ Tab / ⌃ ⇧ Tab para cambiar · × en la pestaña para restaurar",
+    "%@のサイズ・位置の制約により分割できないため、1×1表示に戻しました。": [
+        "The panes could not fit %@’s window, so the workspace returned to 1×1.",
+        "窗格无法容纳 %@ 的窗口，工作区已恢复为 1×1。",
+        "패널에 %@ 창이 맞지 않아 작업 공간을 1×1로 되돌렸습니다.",
+        "Los paneles no admiten la ventana de %@; el espacio de trabajo volvió a 1×1.",
+    ],
+    "%@のサイズ・位置の制約により、枠内に完全には収まりません。": [
+        "%@’s window does not fully fit in the pane.",
+        "%@ 的窗口无法完全放入窗格。",
+        "%@ 창이 패널에 완전히 맞지 않습니다.",
+        "La ventana de %@ no cabe por completo en el panel.",
+    ],
+    "⌃ Tab / ⌃ ⇧ Tab でタブを切替": [
+        "⌃ Tab / ⌃ ⇧ Tab to switch tabs", "⌃ Tab / ⌃ ⇧ Tab 切换标签页",
+        "⌃ Tab / ⌃ ⇧ Tab으로 탭 전환", "⌃ Tab / ⌃ ⇧ Tab para cambiar de pestaña",
     ],
 
     "ここに移動 / 入れ替え": ["Move / Swap Here", "移到此处 / 交换", "여기로 이동 / 교체", "Mover / intercambiar aquí"],

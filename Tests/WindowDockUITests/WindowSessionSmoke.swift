@@ -21,6 +21,7 @@ enum WindowSessionSmoke {
         var frame: CGRect
         var minimized: Bool
         var minimumSize = CGSize.zero
+        var sizeIncrement = CGSize.zero
         /// In native full screen, the window ignores frame changes.
         var fullScreen = false
 
@@ -45,6 +46,8 @@ enum WindowSessionSmoke {
         var failedMinimizations: Set<Int> = []
         var failedRegistrations: Set<Int> = []
         var failedFocuses: Set<Int> = []
+        var closeRequests: [Int] = []
+        var onClose: ((Int) throws -> Void)?
         var focusedWindows: [Int] = []
         /// Windows asked to leave full screen, by index.
         var fullScreenExits: [Int] = []
@@ -87,6 +90,15 @@ enum WindowSessionSmoke {
             model.windows[index].frame = frame
             model.windows[index].frame.size.width = max(frame.width, model.windows[index].minimumSize.width)
             model.windows[index].frame.size.height = max(frame.height, model.windows[index].minimumSize.height)
+            let increment = model.windows[index].sizeIncrement
+            if increment.width > 0 {
+                model.windows[index].frame.size.width =
+                    ceil(model.windows[index].frame.width / increment.width) * increment.width
+            }
+            if increment.height > 0 {
+                model.windows[index].frame.size.height =
+                    ceil(model.windows[index].frame.height / increment.height) * increment.height
+            }
         }
         access.setPosition = { element, position in
             let index = try model.index(of: element)
@@ -113,6 +125,13 @@ enum WindowSessionSmoke {
             return true
         }
         access.raise = { element in model.operations.append(.raise(try model.index(of: element))) }
+        access.close = { element in
+            let index = try model.index(of: element)
+            model.closeRequests.append(index)
+            try model.onClose?(index)
+        }
+        access.windowID = { element in (try? model.index(of: element)).map { CGWindowID($0 + 1) } }
+        access.windowElements = { _ in model.listedWindows.map { model.windows[$0].element } }
         access.focus = { element, _ in
             let index = try model.index(of: element)
             if model.failedFocuses.contains(index) { throw InjectedFailure() }
@@ -296,6 +315,81 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    static func runTabSelectionFeedbackChecks() -> [String] {
+        var failures: [String] = []
+        for autoHide in [false, true] {
+            let model = Model(windowCount: 3)
+            var client = access(for: model)
+            var observe: ((String) -> Void)?
+            let focus = client.focus
+            client.focus = { element, application in
+                observe?("focus")
+                try focus(element, application)
+            }
+            let minimize = client.minimize
+            client.minimize = { element, minimized in
+                observe?("presentation")
+                return try minimize(element, minimized)
+            }
+            let controller = WorkspaceController(name: "Selection feedback", access: client)
+            defer {
+                observe = nil
+                controller.quitting = true
+                controller.setAutoHideTabs(false)
+                controller.window.orderOut(nil)
+            }
+            guard let chrome = controller.window.contentView as? WorkspaceChromeView else {
+                return failures + ["selection feedback fixture could not find its chrome"]
+            }
+            controller.session.add(model.windows.map {
+                WindowCandidate(element: $0.element, application: .current, title: "Selection probe")
+            })
+            controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+            controller.session.setPanePinned(true, at: 0)
+            controller.setAutoHideTabs(autoHide)
+            chrome.setAutoHiddenToolbarVisible(true)
+            controller.window.orderFrontRegardless()
+            chrome.layoutSubtreeIfNeeded()
+            guard let original = controller.session.cells[1],
+                  let hidden = controller.session.windows
+                  .first(where: { controller.session.cellIndex(for: $0.id) == nil })
+            else { return failures + ["selection feedback fixture had no hidden tab"] }
+            let ids = controller.session.windows.map(\.id)
+            func tab(for id: UUID) -> WorkspaceTabGroup? {
+                chrome.tabs.arrangedSubviews.compactMap { $0 as? WorkspaceTabGroup }.first {
+                    ($0.arrangedSubviews.first as? NSButton)?.tag == ids.firstIndex(of: id)
+                }
+            }
+            var expected = hidden.id
+            var operation = "click"
+            var observed: Set<String> = []
+            observe = { phase in
+                guard observed.insert(phase).inserted else { return }
+                let highlighted = chrome.tabs.arrangedSubviews.filter { $0.layer?.borderWidth == 2 }
+                if highlighted.count != 1 || highlighted.first !== tab(for: expected) {
+                    failures.append("\(operation), auto-hide \(autoHide): tab highlight was late at AX \(phase)")
+                }
+                if chrome.tabs.window?.viewsNeedDisplay != false {
+                    failures.append("\(operation), auto-hide \(autoHide): tab drawing was pending at AX \(phase)")
+                }
+            }
+            guard let button = tab(for: hidden.id)?.arrangedSubviews.first as? NSButton,
+                  let action = button.action, NSApp.sendAction(action, to: button.target, from: button)
+            else { return failures + ["selection feedback fixture could not click the hidden tab"] }
+            if observed != ["focus", "presentation"] {
+                failures.append("tab click did not exercise focus and presentation")
+            }
+            expected = original
+            operation = "cycle"
+            observed = []
+            controller.session.cycle(1)
+            if observed != ["focus", "presentation"] {
+                failures.append("tab cycle did not exercise focus and presentation")
+            }
+        }
+        return failures
+    }
+
     static func runNestedPaneUIChecks() -> [String] {
         var failures: [String] = []
         let model = Model(windowCount: 3)
@@ -320,6 +414,11 @@ enum WindowSessionSmoke {
             model.windows.map {
                 WindowCandidate(element: $0.element, application: .current, title: "Nested probe")
             })
+        let singlePaneMenu = controller.activePaneMenu()
+        singlePaneMenu.update()
+        if singlePaneMenu.item(withTitle: L("ペインを固定"))?.isEnabled != false {
+            failures.append("a single pane's pin action became enabled after menu validation")
+        }
         controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
         chrome.layoutSubtreeIfNeeded()
         let left = chrome.gridAreas[0].frame
@@ -345,6 +444,10 @@ enum WindowSessionSmoke {
         perform("上下に分割", in: menu?.item(withTitle: L("ペイン"))?.submenu)
         guard chrome.gridAreas.count == 3 else { return failures + ["tab pane menu did not create a nested split"] }
         let pinMenu = chrome.gridAreas[0].menu(for: event(.rightMouseDown))
+        pinMenu?.update()
+        if pinMenu?.item(withTitle: L("ペインを固定"))?.isEnabled != true {
+            failures.append("splitting a pane did not enable its pin action")
+        }
         perform("ペインを固定", in: pinMenu)
         let pinnedID = controller.session.cells[0]
         let pinnedTag = controller.session.windows.firstIndex { $0.id == pinnedID }
@@ -418,6 +521,14 @@ enum WindowSessionSmoke {
         }
         if controller.session.customLayout != nil || chrome.gridAreas.count != 2 {
             failures.append("choosing a preset after a nested split did not restore the regular grid")
+        }
+        controller.session.setPanePinned(true, at: 0)
+        controller.session.setGrid(.single)
+        let collapsedMenu = controller.activePaneMenu()
+        collapsedMenu.update()
+        let collapsedPin = collapsedMenu.item(withTitle: L("ペインを固定"))
+        if collapsedPin?.isEnabled != false || collapsedPin?.state != .off {
+            failures.append("returning to one pane did not disable and clear its pin action")
         }
         return failures
     }
@@ -523,16 +634,27 @@ enum WindowSessionSmoke {
         guard controller.session.cells.count == 1 else {
             return ["minimum-size fixture did not learn the apps' width constraints"]
         }
+        guard let appName = NSRunningApplication.current.localizedName, !appName.isEmpty else {
+            return ["minimum-size fixture has no application name"]
+        }
+        let warning = model.notices.last?.text ?? ""
+        if !warning.contains("1×1") || warning.components(separatedBy: appName).count != 2 {
+            failures.append("the 1×1 fallback did not name the constraining app exactly once")
+        }
         let menu = controller.activePaneMenu()
         menu.update()
-        if menu.item(withTitle: L("左右に分割"))?.isEnabled != false || menu.item(withTitle: L("上下に分割"))?.isEnabled != true {
-            failures.append("known width minimums did not disable only the infeasible split direction")
+        let horizontal = menu.items.first { $0.title.contains(L("左右に分割")) }
+        if horizontal?.isEnabled != false || horizontal?.title.contains(appName) != true
+            || menu.item(withTitle: L("上下に分割"))?.isEnabled != true
+        {
+            failures.append("known width minimums did not identify the app on just the blocked split direction")
         }
         let cells = controller.session.cells
         model.operations.removeAll()
         model.notices.removeAll()
         controller.session.splitPane(at: 0, axis: .horizontal)
         if controller.session.cells != cells || !model.operations.isEmpty || model.notices.last?.needsAttention != true
+            || model.notices.last?.text.contains(appName) != true
         {
             failures.append("a blocked minimum-size split changed windows or failed without a notice")
         }
@@ -546,6 +668,25 @@ enum WindowSessionSmoke {
         }
         if controller.session.cells.count != 2 {
             failures.append("a re-enabled split failed to fit the windows at their known minimum sizes")
+        }
+
+        // A window can also reject just its requested position, without contributing any minimum size.
+        let (positionSession, positionModel) = fixture(registering: [0, 1])
+        positionSession.targetFrames = {
+            [0: positionModel.target, 1: positionModel.target.offsetBy(dx: positionModel.target.width + 8, dy: 0)]
+        }
+        positionModel.windows[0].fullScreen = true // Simulates a window that ignores position changes.
+        positionSession.setSplit(true)
+        let positionWarning = positionModel.notices.last?.text ?? ""
+        if positionSession.isSplit || !positionWarning.contains(appName) || !positionWarning.contains("1×1") {
+            failures.append("a rejected window position lost the app's name after returning to 1×1")
+        }
+
+        let (terminalSession, terminalModel) = fixture(registering: [0], windowCount: 1)
+        terminalModel.windows[0].sizeIncrement = CGSize(width: 8, height: 16)
+        terminalSession.splitPane(at: 0, axis: .horizontal)
+        if !terminalSession.isSplit || terminalSession.customLayout?.paneCount != 2 {
+            failures.append("small text-grid size rounding was mistaken for a minimum that blocks splitting")
         }
         return failures
     }
@@ -1799,15 +1940,60 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    private static func runCloseOnReleaseChecks() -> [String] {
+        var failures: [String] = []
+        let (session, model) = fixture()
+        let ids = session.windows.map(\.id)
+        model.listedWindows = [0, 1, 2, 3]
+        model.onClose = { index in
+            if index == 0 { model.probeErrors[0] = .invalidUIElement }
+            if index == 2 { throw InjectedFailure() }
+        }
+        session.closesWindowsOnRelease = true
+        session.remove(ids[1])
+        session.pruneClosedWindows()
+        session.pruneClosedWindows()
+        if session.windows.map(\.id) != ids || model.closeRequests != [1] {
+            failures.append("a window awaiting a save decision was detached or asked to close again")
+        }
+        if session.remove(ids[2]) || session.windows.map(\.id) != ids || model.notices.last?.needsAttention != true {
+            failures.append("a rejected close did not report an error and keep the tab")
+        }
+        session.remove(ids[0])
+        if session.windows.map(\.id) != [ids[1], ids[2]] || model.windows[0].frame == model.windows[0].originalFrame {
+            failures.append("an immediately closed tab was not removed without restoring its frame")
+        }
+        // The app keeps an AX element alive after closing its window and has another, unmanaged window.
+        model.listedWindows = [2, 3]
+        session.pruneClosedWindows()
+        session.pruneClosedWindows()
+        if session.windows.map(\.id) != [ids[2]] {
+            failures.append("the closed window's tab was kept or another window was removed")
+        }
+        let (other, _) = fixture(registering: [], sharedModel: model)
+        session.transferWindow(ids[2], to: other)
+        other.closesWindowsOnRelease = true
+        if !other.restoreAll().isEmpty { failures.append("workspace restoration failed with close mode enabled") }
+        other.closesWindowsOnRelease = false
+        other.remove(ids[2])
+        if !other.windows.isEmpty || model.closeRequests != [1, 2, 0] || model.windows[2].frame != model.windows[2]
+            .originalFrame {
+            failures.append("transferring, restoring, or releasing with the option off sent a close request")
+        }
+        return failures
+    }
+
     static func runChecks() -> [String] {
         var failures: [String] = []
         failures += runNestedPaneChecks()
         failures += runPanePinChecks()
+        failures += runTabSelectionFeedbackChecks()
         failures += runNestedPaneUIChecks()
         failures += runNestedPaneLimitChecks()
         failures += runNestedPaneMinimumChecks()
         failures += runManyTabMoveChecks()
         failures += runRemovalApertureChecks()
+        failures += runCloseOnReleaseChecks()
         failures += runDisplacedWindowChecks()
         failures += runReresolveChecks()
         failures += runTabTransferRevealChecks()
@@ -2089,6 +2275,9 @@ enum WindowSessionSmoke {
                 charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: code)!
         }
         var context = WorkspaceShortcutContext()
+        if context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [2], enabled: false) != nil {
+            failures.append("disabled Control Tab switching still intercepted the shortcut")
+        }
         if context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [2]) != 1 {
             failures.append("Control Tab was not accepted from a visible external window")
         }
@@ -2129,6 +2318,8 @@ enum WindowSessionSmoke {
         }
         return failures
     }
+
+    static func runShortcutChecks() -> [String] { checkInput() }
 
     private static func checkSplitSelection(layout: WorkspaceSplitLayout) -> [String] {
         var failures: [String] = []
