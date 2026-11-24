@@ -1,12 +1,6 @@
-ci:
-  # pre-commit.ci runs on Linux without a Swift toolchain.
-  skip: [swift-format]
-
 repos:
-  - repo: local
+  - repo: https://github.com/swiftlang/swift-format
+    rev: 604.0.0
     hooks:
       - id: swift-format
         name: Format Swift sources
-        entry: swift format format --in-place
-        language: system
-        types: [swift]
