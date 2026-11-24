@@ -39,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsMenu: NSMenu!
     private var shortcutContext = WorkspaceShortcutContext()
     private var dragTimer: Timer?
+    private var leftMouseDownLocation: NSPoint?
     private lazy var tabTransfer: WorkspaceTabTransfer = {
         let transfer = WorkspaceTabTransfer { [weak self] in self?.controllers ?? [] }
         transfer.onBegin = { [weak self] in self?.cancelWindowDrag() }
@@ -74,9 +75,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
                     self?.shortcutContext.reset()
                     self?.cancelWindowDrag()
+                    if event.type == .leftMouseDown {
+                        self?.beginLeftMousePress()
+                    } else {
+                        self?.leftMouseDownLocation = nil
+                    }
                     return event
                 }
                 if event.type == .leftMouseUp {
+                    self?.finishLeftMousePress()
                     self?.controllers.forEach { $0.scheduleSelectedWindowRaiseIfPending() }
                     return event
                 }
@@ -636,18 +643,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitorTrust = trusted
         let mask: NSEvent.EventTypeMask =
             trusted
-                ? [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
-                : [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+                ? [.keyDown, .leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown]
+                : [.leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown]
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else { return }
             let point = NSEvent.mouseLocation
             switch event.type {
             case .leftMouseDown:
+                self.beginLeftMousePress()
                 self.shortcutContext.reset()
                 DispatchQueue.main.async { self.controllers.forEach { $0.focusPane(at: point) } }
             case .rightMouseDown, .otherMouseDown:
+                self.leftMouseDownLocation = nil
                 self.shortcutContext.reset()
                 self.cancelWindowDrag()
+            case .leftMouseUp:
+                self.finishLeftMousePress()
             case .keyDown:
                 _ = self.handleShortcut(event)
             default:
@@ -657,6 +668,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if globalMonitor == nil {
             activeController?.showNotice(.attention(L("キー・マウス監視を開始できませんでした。アクセシビリティ権限を確認し、WindowDock を起動し直してください。")))
             WindowAccess.logger.error("Could not install workspace input monitor")
+        }
+    }
+
+    private func beginLeftMousePress() {
+        leftMouseDownLocation = NSEvent.mouseLocation
+    }
+
+    private func finishLeftMousePress() {
+        guard let start = leftMouseDownLocation else { return }
+        leftMouseDownLocation = nil
+        let end = NSEvent.mouseLocation
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        guard dx * dx + dy * dy >= 16 else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.controllers.forEach { $0.session.refitDisplacedWindows() }
         }
     }
 

@@ -53,8 +53,11 @@ enum WorkspaceBackgroundSmoke {
             let shortcutOnly = CommandLine.arguments.contains("--shortcut-only")
             let nestedOnly = CommandLine.arguments.contains("--nested-split-only")
             let focusOnly = CommandLine.arguments.contains("--focus-sync-only")
+            let refitOnly = CommandLine.arguments.contains("--window-refit-only")
             let failures: [String]
-            if focusOnly {
+            if refitOnly {
+                failures = WindowSessionSmoke.runDisplacedWindowChecks()
+            } else if focusOnly {
                 failures = WindowSessionSmoke.runExternalFocusChecks()
             } else if nestedOnly {
                 failures =
@@ -94,6 +97,8 @@ enum WorkspaceBackgroundSmoke {
                         ? "PASS: tab move routing, context menu and drag overlay cleanup"
                         : focusOnly
                         ? "PASS: external focus updates tabs without raising managed windows"
+                        : refitOnly
+                        ? "PASS: displaced windows return to their panes without raising other windows"
                         : activationOnly
                         ?
                         "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus, auto-hidden tab bar click, tab drop key and activation refit"

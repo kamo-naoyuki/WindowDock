@@ -32,7 +32,7 @@ On first launch, allow WindowDock to move and resize windows in **System Setting
 - Right-click a tab and choose **Release Tab** to keep its window open, or **Close Window** to close it. If you cancel a save prompt, the tab stays in the workspace.
 - A tab’s **×**, **⌘W**, and bulk releases leave windows open by default. To close them instead, enable **Settings → Close windows when releasing tabs**. Closing a workspace or quitting WindowDock still leaves its windows open.
 - **Settings** also lets you disable **Control+Tab** switching (so the shortcut goes to the frontmost app), disable adding windows by dragging, or automatically hide the tab bar in newly created workspaces.
-- If you maximize, move, or resize a window outside WindowDock, or make it full screen, switching back to WindowDock fits it into its pane again.
+- Dragging a managed window directly is temporary: after the drag ends, WindowDock returns it to its pane without taking focus from the app. Move the workspace itself by dragging the tab bar. If a window is maximized or made full screen, switching back to WindowDock fits it into its pane again.
 
 Use windows from the current Space. Windows that are already full screen and windows that can't be moved or resized aren't supported.
 

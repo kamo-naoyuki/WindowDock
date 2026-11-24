@@ -1819,7 +1819,7 @@ enum WindowSessionSmoke {
         return failures
     }
 
-    private static func runDisplacedWindowChecks() -> [String] {
+    static func runDisplacedWindowChecks() -> [String] {
         let (session, model) = fixture(registering: [0, 1, 3])
         session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
         func modelIndex(_ id: UUID?) -> Int? {
@@ -1842,6 +1842,7 @@ enum WindowSessionSmoke {
         model.windows[left].frame = CGRect(x: 0, y: 25, width: 1440, height: 875)
         model.windows[hidden].frame.origin.x += 300
         model.operations.removeAll()
+        model.notices.removeAll()
         session.refitDisplacedWindows()
         if model.windows[left].frame != fitted[left]
             || session.cells[0].flatMap({ model.paneFrames[$0] }) != fitted[left]
@@ -1852,6 +1853,15 @@ enum WindowSessionSmoke {
         if model.windows[hidden].frame != fitted[hidden] {
             failures.append(
                 "a background tab's window moved outside WindowDock was not fitted back: \(model.windows[hidden].frame)")
+        }
+        if model.operations.contains(where: { operation in
+            if case .raise = operation { return true }
+            return false
+        }) {
+            failures.append("refitting a displaced window raised managed windows over the external app")
+        }
+        if !model.notices.isEmpty {
+            failures.append("refitting a displaced window showed the tab-switch hint without a WindowDock request")
         }
         if model.operations.contains(.resize(right)) || model.operations.contains(.move(right)) {
             failures.append("refitting moved a window that had stayed in its pane")

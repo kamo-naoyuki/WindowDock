@@ -565,7 +565,8 @@ final class WindowSession {
             requestedFrames.removeValue(forKey: window.id)
             displaced = true
         }
-        if displaced { synchronize(bringToFront: false) }
+        guard displaced else { return }
+        synchronize(bringToFront: false, raiseWindows: false, showShortcutHint: false)
     }
 
     var hasFullScreenWindow: Bool {
@@ -647,7 +648,8 @@ final class WindowSession {
         return names.isEmpty ? nil : ListFormatter.localizedString(byJoining: names)
     }
 
-    private func synchronize(bringToFront: Bool) {
+    private func synchronize(
+        bringToFront: Bool, raiseWindows: Bool = true, showShortcutHint: Bool = true) {
         guard !windows.isEmpty else { return }
         // A resize event (e.g. the zoom animation) can arrive while syncing; rerun afterwards so the final frame isn't lost.
         guard !isSynchronizing else {
@@ -742,12 +744,15 @@ final class WindowSession {
             var frames: [UUID: CGRect] = [:]
             for window in presentationOrder {
                 guard let actual = actualFrames[window.id] else { continue }
-                do {
-                    try access.raise(window.candidate.element)
-                    frames[window.id] = actual
-                } catch {
-                    errors.append(error)
+                if raiseWindows {
+                    do {
+                        try access.raise(window.candidate.element)
+                    } catch {
+                        errors.append(error)
+                        continue
+                    }
                 }
+                frames[window.id] = actual
             }
             presentedFrames = frames
             onPresentedFrame?(selectedID.flatMap { frames[$0] })
@@ -759,7 +764,7 @@ final class WindowSession {
             } else if let selectedID, constraintWarningIDs.contains(selectedID) {
                 let app = constraintAppNames(for: [selectedID]) ?? L("対象アプリ")
                 onMessage?(.attention(L("%@のウィンドウがペインの大きさや位置に合わず、完全には収まりません。", app)))
-            } else if !frames.isEmpty {
+            } else if showShortcutHint, !frames.isEmpty {
                 onMessage?(.information(L("⌃ Tab / ⌃ ⇧ Tab でタブを切替")))
             }
             report(errors)
