@@ -139,8 +139,7 @@ enum WindowSessionSmoke {
 
     private static func fixture(
         registering indexes: [Int] = [0, 1, 2], windowCount: Int = 4,
-        sharedModel: Model? = nil
-    ) -> (WindowSession, Model) {
+        sharedModel: Model? = nil) -> (WindowSession, Model) {
         let model = sharedModel ?? Model(windowCount: windowCount)
         let session = WindowSession(access: access(for: model))
         session.targetFrame = { model.target }
@@ -743,8 +742,7 @@ enum WindowSessionSmoke {
         let moved = start.offsetBy(dx: axDrop.x - grab.x, dy: axDrop.y - grab.y)
 
         func run(dragging number: CGWindowID, windowID: @escaping (AXUIElement) -> CGWindowID?) -> (
-            shown: Bool, finished: Bool
-        ) {
+            shown: Bool, finished: Bool) {
             let coordinator = WorkspaceWindowDrop { [controller] }
             var pointer = WorkspaceWindowDrop.Pointer(location: .zero, buttonDown: false)
             var frame = start
@@ -925,7 +923,7 @@ enum WindowSessionSmoke {
         }
         guard
             let dragSpace = chrome.subviews.flatMap(\.subviews).compactMap({ $0 as? NSStackView })
-                .flatMap(\.arrangedSubviews).first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") })
+            .flatMap(\.arrangedSubviews).first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") })
         else { return ["titlebar focus fixture could not find the toolbar drag area"] }
         var failures: [String] = []
         if !model.focusedWindows.isEmpty {
@@ -1589,7 +1587,7 @@ enum WindowSessionSmoke {
             chrome.layoutSubtreeIfNeeded()
             guard
                 let button = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?
-                    .arrangedSubviews.first as? WorkspaceTabButton
+                .arrangedSubviews.first as? WorkspaceTabButton
             else {
                 failures.append("tab drop key fixture could not find a tab to drag")
                 continue
@@ -1924,8 +1922,7 @@ enum WindowSessionSmoke {
                     CGRect(
                         x: 200 + CGFloat(index % size.columns) * (width + 32),
                         y: 160 + CGFloat(index / size.columns) * (height + 32),
-                        width: width, height: height)
-                )
+                        width: width, height: height))
             })
     }
 

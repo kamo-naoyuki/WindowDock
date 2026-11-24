@@ -128,8 +128,7 @@ enum WindowAccess {
         _ element: AXUIElement, applicationElement: AXUIElement,
         setAttribute: (AXUIElement, String, CFTypeRef) throws -> Void,
         raiseWindow: (AXUIElement) throws -> Void,
-        activateFrontWindowOnly: () -> Bool
-    ) throws {
+        activateFrontWindowOnly: () -> Bool) throws {
         try? setAttribute(element, kAXMainAttribute, kCFBooleanTrue)
         try? setAttribute(element, kAXFocusedAttribute, kCFBooleanTrue)
         // Front-window-only activation brings forward the app's frontmost window, so that must be the target.
@@ -154,8 +153,7 @@ enum WindowAccess {
         else { return nil }
         return (
             unsafeBitCast(getProcess, to: GetProcessForPIDFunction.self),
-            unsafeBitCast(setFront, to: SetFrontProcessWithOptionsFunction.self)
-        )
+            unsafeBitCast(setFront, to: SetFrontProcessWithOptionsFunction.self))
     }()
 
     /// Activates an application like clicking one of its windows: only its frontmost window comes forward.
@@ -305,8 +303,8 @@ extension WindowAccess {
     /// Picks the live window for a cached element that went stale (e.g. after a login-window round trip).
     /// Windows that any workspace already manages are never taken, even when they are the app's only other window.
     static func reresolve(
-        _ stale: WindowCandidate, among windows: [WindowCandidate], isClaimed: (WindowCandidate) -> Bool
-    ) -> WindowCandidate? {
+        _ stale: WindowCandidate, among windows: [WindowCandidate],
+        isClaimed: (WindowCandidate) -> Bool) -> WindowCandidate? {
         let unclaimed = windows.filter { !isClaimed($0) }
         let titled = unclaimed.filter { $0.title == stale.title }
         if titled.count == 1 { return titled[0] }

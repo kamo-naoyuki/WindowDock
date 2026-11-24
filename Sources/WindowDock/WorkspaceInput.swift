@@ -39,8 +39,7 @@ struct WorkspaceWindowDragRegistration {
         _ window: WindowServerWindow,
         among registered: [WindowCandidate],
         windowID: (AXUIElement) -> CGWindowID? = WindowAccess.windowID(of:),
-        resolve: (WindowServerWindow) throws -> WindowCandidate = WindowAccess.candidate(matching:)
-    ) -> Bool {
+        resolve: (WindowServerWindow) throws -> WindowCandidate = WindowAccess.candidate(matching:)) -> Bool {
         let candidates = registered.filter { $0.application.processIdentifier == window.processID }
         guard !candidates.isEmpty else { return false }
         let ids = candidates.map { id(of: $0.element, using: windowID) }
@@ -166,8 +165,7 @@ final class WorkspaceWindowDrop {
 
     private func target(
         at point: NSPoint, accessibilityPoint: CGPoint, drag: WorkspaceWindowDrag,
-        windows: [WindowServerWindow], among controllers: [WorkspaceController]
-    ) -> WorkspaceController? {
+        windows: [WindowServerWindow], among controllers: [WorkspaceController]) -> WorkspaceController? {
         var excluded: Set<CGWindowID> = [drag.window.id]
         for controller in controllers {
             if let number = controller.windowDropPanelNumber, number > 0 {

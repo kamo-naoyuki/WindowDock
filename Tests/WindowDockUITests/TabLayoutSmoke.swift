@@ -27,8 +27,7 @@ private final class TabLayoutDragInfo: NSObject, NSDraggingInfo {
     func enumerateDraggingItems(
         options: NSDraggingItemEnumerationOptions, for view: NSView?,
         classes: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
-        using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void
-    ) {}
+        using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
 }
 
 private final class TitlebarControlProbe: NSButton {
@@ -424,8 +423,8 @@ enum TabLayoutSmoke {
             ] {
                 let screenPoint = CGPoint(x: pressScreen.x + offset, y: screen.frame.maxY - pressScreen.y)
                 if let cgEvent = CGEvent(
-                       mouseEventSource: nil, mouseType: type,
-                       mouseCursorPosition: screenPoint, mouseButton: .left),
+                    mouseEventSource: nil, mouseType: type,
+                    mouseCursorPosition: screenPoint, mouseButton: .left),
                     let event = NSEvent(cgEvent: cgEvent)
                 {
                     queuedEvents.append(event)
@@ -477,8 +476,8 @@ enum TabLayoutSmoke {
             for type in [CGEventType.leftMouseDragged, .leftMouseUp] {
                 let location = CGPoint(x: start.x + delta.width, y: screen.frame.maxY - (start.y + delta.height))
                 if let cgEvent = CGEvent(
-                       mouseEventSource: nil, mouseType: type,
-                       mouseCursorPosition: location, mouseButton: .left),
+                    mouseEventSource: nil, mouseType: type,
+                    mouseCursorPosition: location, mouseButton: .left),
                     let event = NSEvent(cgEvent: cgEvent)
                 {
                     queued.append(event)
@@ -492,20 +491,16 @@ enum TabLayoutSmoke {
         let resizeChecks: [(String, (NSRect) -> NSPoint, NSSize, (NSRect) -> NSRect)] = [
             (
                 "top edge", { NSPoint(x: $0.midX, y: $0.maxY - 2) }, NSSize(width: 0, height: 30),
-                { NSRect(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height + 30) }
-            ),
+                { NSRect(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height + 30) }),
             (
                 "top-right corner", { NSPoint(x: $0.maxX - 2, y: $0.maxY - 2) }, NSSize(width: 20, height: 20),
-                { NSRect(x: $0.minX, y: $0.minY, width: $0.width + 20, height: $0.height + 20) }
-            ),
+                { NSRect(x: $0.minX, y: $0.minY, width: $0.width + 20, height: $0.height + 20) }),
             (
                 "right edge over a pane cell", { NSPoint(x: $0.maxX - 6, y: $0.midY) }, NSSize(width: 25, height: 0),
-                { NSRect(x: $0.minX, y: $0.minY, width: $0.width + 25, height: $0.height) }
-            ),
+                { NSRect(x: $0.minX, y: $0.minY, width: $0.width + 25, height: $0.height) }),
             (
                 "bottom-right grip", { NSPoint(x: $0.maxX - 12, y: 12) }, NSSize(width: 30, height: -20),
-                { NSRect(x: $0.minX, y: $0.minY - 20, width: $0.width + 30, height: $0.height + 20) }
-            ),
+                { NSRect(x: $0.minX, y: $0.minY - 20, width: $0.width + 30, height: $0.height + 20) }),
         ]
         for (label, point, delta, expected) in resizeChecks {
             let before = titleHost.frame
@@ -697,8 +692,8 @@ enum TabLayoutSmoke {
                 (destination, CGEventType.leftMouseDragged),
             ] {
                 if let cg = CGEvent(
-                       mouseEventSource: nil, mouseType: type,
-                       mouseCursorPosition: CGPoint(x: point.x, y: screen.frame.maxY - point.y), mouseButton: .left),
+                    mouseEventSource: nil, mouseType: type,
+                    mouseCursorPosition: CGPoint(x: point.x, y: screen.frame.maxY - point.y), mouseButton: .left),
                     let event = NSEvent(
                         cgEvent: cg) {
                     events.append(event)

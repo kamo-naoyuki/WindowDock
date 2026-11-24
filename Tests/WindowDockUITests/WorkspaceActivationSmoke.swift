@@ -239,7 +239,7 @@ enum WorkspaceActivationSmoke {
         guard let chrome = first.window.contentView as? WorkspaceChromeView,
               let panel = chrome.autoHiddenToolbarPanel, panel.isVisible,
               let dragSpace = panel.contentView?.subviews.compactMap({ $0 as? NSStackView }).flatMap(\.arrangedSubviews)
-                  .first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") }),
+              .first(where: { $0.toolTip == L("ドラッグして移動 / ダブルクリックで最大化") }),
               let screen = NSScreen.screens.first
         else { return ["auto-hidden tab bar click fixture could not show the tab bar"] }
         let point = dragSpace.convert(NSPoint(x: dragSpace.bounds.midX, y: dragSpace.bounds.midY), to: nil)

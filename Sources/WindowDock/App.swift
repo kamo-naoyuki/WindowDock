@@ -61,17 +61,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [
             .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp,
         ]) { [weak self] event in
-            if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
-                self?.shortcutContext.reset()
-                self?.cancelWindowDrag()
+                if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
+                    self?.shortcutContext.reset()
+                    self?.cancelWindowDrag()
+                    return event
+                }
+                if event.type == .leftMouseUp {
+                    self?.controllers.forEach { $0.scheduleSelectedWindowRaiseIfPending() }
+                    return event
+                }
+                if self?.handleShortcut(event) == true { return nil }
                 return event
-            }
-            if event.type == .leftMouseUp {
-                self?.controllers.forEach { $0.scheduleSelectedWindowRaiseIfPending() }
-                return event
-            }
-            if self?.handleShortcut(event) == true { return nil }
-            return event
         }
         refreshGlobalMonitor()
         startWindowDragMonitoring()
@@ -172,8 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// windows never covers the dialog of the next workspace.
     private func restore(
         _ workspaces: ArraySlice<SavedWorkspace>, in controller: WorkspaceController,
-        chosen: [(WorkspaceController, [WindowCandidate], SavedWorkspace)] = []
-    ) {
+        chosen: [(WorkspaceController, [WindowCandidate], SavedWorkspace)] = []) {
         guard let workspace = workspaces.first else { return }
         var chosen = chosen
         var picked: [WindowCandidate] = []
@@ -193,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if !candidates.isEmpty { controller.session.add(candidates) }
                 }
                 chosen.first?.0.present()
-            }
+        }
     }
 
     // MARK: Menu

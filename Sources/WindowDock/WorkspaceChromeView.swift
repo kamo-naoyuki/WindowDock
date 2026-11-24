@@ -1092,8 +1092,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     @discardableResult
     func appendTab(
         title: String, toolTip: String? = nil, icon: NSImage? = nil, selected: Bool, displayed: Bool = false,
-        pinned: Bool = false, tabSwitchTarget: Bool = false
-    ) -> (view: NSView, select: NSButton, close: NSButton) {
+        pinned: Bool = false, tabSwitchTarget: Bool = false) -> (view: NSView, select: NSButton, close: NSButton) {
         let select = WorkspaceTabButton(title: title, target: nil, action: nil)
         select.chrome = self
         select.onDragBegin = { [weak self] button, token, anchor, image in

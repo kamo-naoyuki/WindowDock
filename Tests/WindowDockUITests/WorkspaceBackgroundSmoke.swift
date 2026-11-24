@@ -26,8 +26,7 @@ private final class TabDragInfo: NSObject, NSDraggingInfo {
     func enumerateDraggingItems(
         options: NSDraggingItemEnumerationOptions, for view: NSView?,
         classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
-        using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void
-    ) {}
+        using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
 }
 
 private final class TabClickTarget: NSObject {
@@ -87,7 +86,8 @@ enum WorkspaceBackgroundSmoke {
                         : focused
                         ? "PASS: tab move routing, context menu and drag overlay cleanup"
                         : activationOnly
-                        ? "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus, auto-hidden tab bar click, tab drop key and activation refit"
+                        ?
+                        "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus, auto-hidden tab bar click, tab drop key and activation refit"
                         :
                         "PASS: window drop feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking and resize")
                 exit(0)
@@ -677,7 +677,7 @@ enum WorkspaceBackgroundSmoke {
         if chrome.acceptsWindowDrop(at: center) { failures.append("occupied stage accepted a drop") }
         guard
             let nested = PaneLayout.pane.splittingPane(at: 0, axis: .horizontal)?
-                .splittingPane(at: 1, axis: .vertical)
+            .splittingPane(at: 1, axis: .vertical)
         else { return failures + ["could not construct nested layout fixture"] }
         chrome.setCustomLayout(nested, activeCell: 1)
         chrome.layoutSubtreeIfNeeded()
@@ -924,7 +924,7 @@ enum WorkspaceBackgroundSmoke {
         }
         guard
             let nested = PaneLayout.pane.splittingPane(at: 0, axis: .horizontal)?
-                .splittingPane(at: 1, axis: .vertical)
+            .splittingPane(at: 1, axis: .vertical)
         else { return failures + ["could not construct nested drop fixture"] }
         chrome.setCustomLayout(nested, activeCell: 0)
         let nestedTab = chrome.appendTab(title: "Nested drop", selected: true).select

@@ -28,7 +28,7 @@ Unstaged changes are temporarily stashed by `pre-commit`; if they conflict with 
 To format a file manually with the same version as CI, run `pre-commit run swiftformat --files <file.swift>`.
 Use `pre-commit run swiftformat --all-files` to format all tracked Swift files.
 The upstream hook declares `language: swift`, which lets pre-commit.ci load its Swift toolchain and run the formatter; do not replace it with `language: system` or skip it in CI.
-SwiftFormat is used instead of `swiftlang/swift-format` because the latter exceeded pre-commit.ci's 120-second environment-build limit.
+The formatter version is pinned to the one used by pre-commit.ci's Swift runner test; both `swiftlang/swift-format` and newer SwiftFormat builds exceeded its 120-second environment-build limit. Check the actual CI build before updating the pin.
 
 ## Fixing bugs
 

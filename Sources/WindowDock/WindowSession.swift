@@ -133,8 +133,8 @@ final class WindowSession {
     }
 
     private func plannedPaneSplit(
-        at index: Int, axis: PaneLayout.Axis, currentLayout: PaneLayout?
-    ) -> (layout: PaneLayout, reflow: GridReflowResult<UUID>)? {
+        at index: Int, axis: PaneLayout.Axis,
+        currentLayout: PaneLayout?) -> (layout: PaneLayout, reflow: GridReflowResult<UUID>)? {
         let layout = currentLayout ?? paneLayout
         guard layout.isValid, layout.paneCount == cells.count,
               let split = layout.splittingPane(at: index, axis: axis),
