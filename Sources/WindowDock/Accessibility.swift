@@ -194,6 +194,59 @@ enum WindowAccess {
     }
 }
 
+private final class WindowFocusNotificationContext {
+    let handler: @Sendable () -> Void
+
+    init(handler: @escaping @Sendable () -> Void) {
+        self.handler = handler
+    }
+}
+
+private func windowFocusObserverCallback(
+    _ observer: AXObserver, _ element: AXUIElement, _ notification: CFString, _ refcon: UnsafeMutableRawPointer?) {
+    guard let refcon else { return }
+    Unmanaged<WindowFocusNotificationContext>.fromOpaque(refcon).takeUnretainedValue().handler()
+}
+
+final class WindowFocusObserver {
+    private let observer: AXObserver
+    private let applicationElement: AXUIElement
+    private let context: WindowFocusNotificationContext
+    private let runLoopSource: CFRunLoopSource
+
+    init?(application: NSRunningApplication, onChange: @escaping @Sendable () -> Void) {
+        let pid = application.processIdentifier
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        var createdObserver: AXObserver?
+        let createError = AXObserverCreate(pid, windowFocusObserverCallback, &createdObserver)
+        guard createError == .success, let createdObserver else {
+            WindowAccess.logger.debug("Could not observe focused windows for PID \(pid): \(createError.rawValue)")
+            return nil
+        }
+        let context = WindowFocusNotificationContext(handler: onChange)
+        let notificationError = AXObserverAddNotification(
+            createdObserver, appElement, kAXFocusedWindowChangedNotification as CFString,
+            Unmanaged.passUnretained(context).toOpaque())
+        guard notificationError == .success else {
+            WindowAccess.logger.debug(
+                "Could not register focused-window notification for PID \(pid): \(notificationError.rawValue)")
+            return nil
+        }
+        let source = AXObserverGetRunLoopSource(createdObserver)
+        observer = createdObserver
+        applicationElement = appElement
+        self.context = context
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+    }
+
+    deinit {
+        AXObserverRemoveNotification(observer, applicationElement, kAXFocusedWindowChangedNotification as CFString)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+    }
+}
+
 struct WindowAccessClient {
     var requireWritable: (AXUIElement, String) throws -> Void = WindowAccess.requireWritable
     var frame: (AXUIElement) throws -> CGRect = WindowAccess.frame
@@ -310,6 +363,16 @@ extension WindowAccess {
         let element = AXUIElementCreateApplication(application.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 0.3)
         return try? value(element, kAXWindowsAttribute) as? [AXUIElement]
+    }
+
+    static func focusedWindow(_ application: NSRunningApplication) -> AXUIElement? {
+        let element = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.3)
+        guard let focused = try? value(element, kAXFocusedWindowAttribute),
+              CFGetTypeID(focused) == AXUIElementGetTypeID()
+        else { return nil }
+        let window: AXUIElement = focused as! AXUIElement
+        return window
     }
 
     /// The standard windows of an application, or nil when they cannot be listed.

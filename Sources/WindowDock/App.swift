@@ -626,6 +626,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         shortcutContext.applicationDidActivate(app.processIdentifier)
+        controllers.forEach { $0.applicationDidBecomeFrontmost(app) }
     }
 
     private func refreshGlobalMonitor(force: Bool = false) {

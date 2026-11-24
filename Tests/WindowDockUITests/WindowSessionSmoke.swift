@@ -1984,6 +1984,47 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    static func runExternalFocusChecks() -> [String] {
+        var failures: [String] = []
+        let (single, singleModel) = fixture()
+        let singleIDs = single.windows.map(\.id)
+        singleModel.operations.removeAll()
+        single.observeFocusedWindow(singleModel.windows[1].element)
+        if single.selectedID != singleIDs[1] || singleModel.operations.isEmpty == false
+            || !singleModel.focusedWindows.isEmpty || Set(singleModel.paneFrames.keys) != [singleIDs[1]]
+        {
+            failures.append("external focus did not select a single-pane tab without activating other windows")
+        }
+
+        let (split, splitModel) = fixture()
+        let splitIDs = split.windows.map(\.id)
+        split.setSplit(true)
+        split.setPanePinned(true, at: 0)
+        splitModel.operations.removeAll()
+        split.observeFocusedWindow(splitModel.windows[1].element)
+        if split.primaryID != splitIDs[2] || split.secondaryID != splitIDs[1] || split.selectedID != splitIDs[1]
+            || split.tabSwitchCell != 1 || splitModel.operations.contains(.raise(1))
+            || splitModel.operations.contains(.raise(2)) || splitModel.operations.contains(.raise(0))
+            || splitModel.windows[1].frame != splitModel.rightTarget
+        {
+            failures.append("external focus did not move only the focused tab into the unpinned pane")
+        }
+        split.observeFocusedWindow(splitModel.windows[2].element)
+        if split.selectedID != splitIDs[2] || split.tabSwitchCell != 1 {
+            failures.append("external focus in a pinned pane changed the unpinned-pane switch target")
+        }
+        split.setPanePinned(true, at: 1)
+        let beforeAllPinnedFocus = split.cells
+        split.observeFocusedWindow(splitModel.windows[0].element)
+        if split.cells != beforeAllPinnedFocus || !splitModel.focusedWindows.isEmpty
+            || splitModel.operations.contains(.raise(1)) || splitModel.operations.contains(.raise(2))
+            || splitModel.operations.contains(.raise(0))
+        {
+            failures.append("external focus replaced a pane when every pane was pinned or activated managed windows")
+        }
+        return failures
+    }
+
     static func runChecks() -> [String] {
         var failures: [String] = []
         failures += runNestedPaneChecks()
@@ -2002,6 +2043,7 @@ enum WindowSessionSmoke {
         failures += runTransferChecks()
         failures += runRegisteredWindowDragChecks()
         failures += runExternalWindowDropChecks()
+        failures += runExternalFocusChecks()
         failures += runKeyboardFocusChecks()
         failures += runWindowInsertionChecks()
         let (orderingSession, orderingModel) = fixture()

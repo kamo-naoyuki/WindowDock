@@ -9,6 +9,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private let workspace = WorkspaceChromeView(frame: .zero)
     private var picker: WindowPicker?
     private var tabIDs: [UUID] = []
+    private var focusObservers: [pid_t: WindowFocusObserver] = [:]
     private var windowRaisePending = false
     private var windowRaiseScheduled = false
     private var tabBarHoverStart: TimeInterval?
@@ -255,6 +256,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     private func renderTabs() {
+        refreshFocusObservers()
         workspace.closesWindowsOnRelease = session.closesWindowsOnRelease
         if let layout = session.customLayout {
             workspace.setCustomLayout(layout, activeCell: session.activeCell)
@@ -300,6 +302,38 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         workspace.showManagedWindows(!session.windows.isEmpty)
         if let selectedTab { workspace.revealTab(selectedTab) }
         window.invalidateShadow()
+    }
+
+    private func refreshFocusObservers() {
+        let applications = Dictionary(
+            session.windows.map { ($0.candidate.application.processIdentifier, $0.candidate.application) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        focusObservers = focusObservers.filter { applications[$0.key] != nil }
+        for (pid, application) in applications where focusObservers[pid] == nil {
+            focusObservers[pid] = WindowFocusObserver(application: application) { [weak self] in
+                Task { @MainActor in self?.focusedWindowChanged(for: pid) }
+            }
+        }
+    }
+
+    func applicationDidBecomeFrontmost(_ application: NSRunningApplication) {
+        guard session.windows
+            .contains(where: { $0.candidate.application.processIdentifier == application.processIdentifier })
+        else { return }
+        refreshFocusObservers()
+        focusedWindowChanged(for: application.processIdentifier)
+    }
+
+    private func focusedWindowChanged(for processIdentifier: pid_t) {
+        guard !quitting,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
+              let application = session.windows.first(where: {
+                  $0.candidate.application.processIdentifier == processIdentifier
+              })?.candidate.application,
+              let focused = WindowAccess.focusedWindow(application)
+        else { return }
+        session.observeFocusedWindow(focused)
     }
 
     func showNotice(_ notice: WorkspaceNotice) {

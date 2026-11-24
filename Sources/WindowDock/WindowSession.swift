@@ -274,6 +274,59 @@ final class WindowSession {
         if let index = cellIndex(for: id) { activateCell(index) }
     }
 
+    func observeFocusedWindow(_ element: AXUIElement) {
+        guard let window = windows.first(where: { CFEqual($0.candidate.element, element) }) else { return }
+        let id = window.id
+        let previousAssignment = assignments[id]
+        var changed = false
+        var targetCell: Int?
+        if let cell = cellIndex(for: id) {
+            targetCell = cell
+            if activeCell != cell {
+                activeCell = cell
+                changed = true
+            }
+            if !pinnedCells.contains(cell), lastUnpinnedCell != cell {
+                lastUnpinnedCell = cell
+                changed = true
+            }
+        } else {
+            let cell: Int?
+            if isSplit {
+                cell = tabSwitchCell
+            } else {
+                cell = cells.indices.first
+            }
+            guard let cell else { return }
+            targetCell = cell
+            cells[cell] = id
+            assignments[id] = cell
+            activeCell = cell
+            if !pinnedCells.contains(cell) { lastUnpinnedCell = cell }
+            changed = true
+        }
+        guard changed else { return }
+        var errors: [Error] = []
+        if previousAssignment != targetCell,
+           let target = targetCell.flatMap({ currentTargets()[$0] })
+        {
+            do {
+                try align(window, to: target)
+                alignedFrames[id] = try access.frame(window.candidate.element)
+            } catch {
+                errors.append(error)
+            }
+        }
+        presentedFrames = Dictionary(
+            uniqueKeysWithValues: visibleWindows.compactMap { window in
+                alignedFrames[window.id].map { (window.id, $0) }
+            })
+        onPresentedFrame?(selectedID.flatMap { presentedFrames[$0] })
+        onPresentedFrames?(presentedFrames)
+        onChange?()
+        report(errors)
+    }
+
     func contains(_ candidate: WindowCandidate) -> Bool {
         windows.contains { $0.candidate.isSameWindow(as: candidate) }
     }
