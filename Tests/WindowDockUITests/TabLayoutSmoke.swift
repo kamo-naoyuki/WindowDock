@@ -193,48 +193,39 @@ enum TabLayoutSmoke {
         for (tag, group) in chrome.tabs.arrangedSubviews.enumerated() {
             ((group as! WorkspaceTabGroup).arrangedSubviews.first as! NSButton).tag = tag
         }
-        var released: [[UUID]] = []
+        var released: [TabReleaseRequest] = []
         chrome.onReleaseTabs = { released.append($0) }
         let rightClick = NSEvent.mouseEvent(
             with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
             windowNumber: host.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
-        let releaseMenu =
-            (((chrome.tabs.arrangedSubviews[1] as! WorkspaceTabGroup).arrangedSubviews.first) as! NSButton).menu(
-                for: rightClick)
-        let releaseItems = releaseMenu?.items.filter { $0.representedObject is [UUID] } ?? []
-        let expectedReleases: [(String, [Int])] = [
-            (L("タブを解除"), [1]), (L("他のタブをすべて解除"), [0, 2, 3]),
-            (L("右側のタブを解除"), [2, 3]), (L("左側のタブを解除"), [0]), (L("すべてのタブを解除"), [0, 1, 2, 3]),
-        ]
-        if releaseItems.map(\.title) != expectedReleases.map(\.0) {
-            failures.append("tab context menu did not offer the release items: \(releaseItems.map(\.title))")
-        }
-        for (item, expectation) in zip(releaseItems, expectedReleases) {
-            let expected = expectation.1
-            guard let action = item.action else {
-                failures.append("release item \(item.title) is disabled")
-                continue
-            }
-            released.removeAll()
-            _ = NSApp.sendAction(action, to: item.target, from: item)
-            if released != [expected.map { releaseIDs[$0] }] {
-                failures.append("release item \(item.title) reported \(released), expected \(expected)")
-            }
-        }
+        let targetTab = (chrome.tabs.arrangedSubviews[1] as! WorkspaceTabGroup).arrangedSubviews.first as! NSButton
+        let releaseMenu = targetTab.menu(for: rightClick)
         chrome.closesWindowsOnRelease = true
-        let closeMenu = ((chrome.tabs.arrangedSubviews[1] as! WorkspaceTabGroup).arrangedSubviews.first as! NSButton)
-            .menu(for: rightClick)
-        if let item = closeMenu?.item(withTitle: L("他のタブのウィンドウをすべて閉じる")), let action = item.action {
-            // An already open menu must not target a different set of windows if its tabs are rebuilt.
-            chrome.clearTabs()
-            chrome.appendTab(title: "New tab", selected: true)
-            released.removeAll()
-            _ = NSApp.sendAction(action, to: item.target, from: item)
-            if released != [[releaseIDs[0], releaseIDs[2], releaseIDs[3]]] {
-                failures.append("bulk close did not target the windows named by the open menu")
+        let closeMenu = targetTab.menu(for: rightClick)
+        // An open menu still targets the windows and the action it originally offered.
+        chrome.clearTabs()
+        chrome.appendTab(title: "New tab", selected: true)
+        for (menu, bulkClose) in [(releaseMenu, false), (closeMenu, true)] {
+            let expectations: [(String, [Int], Bool)] = [
+                ("タブを解除", [1], false), ("ウィンドウを閉じる", [1], true),
+                (bulkClose ? "他のタブのウィンドウをすべて閉じる" : "他のタブをすべて解除", [0, 2, 3], bulkClose),
+                (bulkClose ? "右側のタブのウィンドウを閉じる" : "右側のタブを解除", [2, 3], bulkClose),
+                (bulkClose ? "左側のタブのウィンドウを閉じる" : "左側のタブを解除", [0], bulkClose),
+                (bulkClose ? "すべてのタブのウィンドウを閉じる" : "すべてのタブを解除", [0, 1, 2, 3], bulkClose),
+            ]
+            for (title, indexes, closeWindows) in expectations {
+                guard let item = menu?.item(withTitle: L(title)), let action = item.action else {
+                    failures.append("tab context menu did not offer \(title)")
+                    continue
+                }
+                released.removeAll()
+                _ = NSApp.sendAction(action, to: item.target, from: item)
+                if released != [TabReleaseRequest(ids: indexes.map { releaseIDs[$0] }, closeWindows: closeWindows)] {
+                    failures
+                        .append(
+                            "tab context menu performed the wrong action or targeted the wrong windows for \(title)")
+                }
             }
-        } else {
-            failures.append("bulk release did not indicate that it would close windows")
         }
         chrome.closesWindowsOnRelease = false
         let regularStageTop = chrome.stage.frame.maxY

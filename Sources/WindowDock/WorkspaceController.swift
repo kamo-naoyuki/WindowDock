@@ -149,9 +149,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
                 self.session.select(id, activate: true)
             }
         }
-        workspace.onReleaseTabs = { [weak self] ids in
+        workspace.onReleaseTabs = { [weak self] request in
             guard let self else { return }
-            for id in ids { self.session.remove(id) }
+            for id in request.ids { self.session.remove(id, closeWindow: request.closeWindows) }
         }
         workspace.onMoveTab = { [weak self] tab, cell in
             guard let self, self.tabIDs.indices.contains(tab) else { return }

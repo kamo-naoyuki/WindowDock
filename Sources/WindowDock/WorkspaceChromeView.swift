@@ -51,6 +51,11 @@ private final class WorkspaceToolbarDragSpace: NSView {
     }
 }
 
+struct TabReleaseRequest: Equatable {
+    let ids: [UUID]
+    let closeWindows: Bool
+}
+
 final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     let tabs = NSStackView()
     let stage = WorkspaceGridView(frame: .zero)
@@ -70,7 +75,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     var onMoveTab: ((Int, Int) -> Void)?
     var onReorderTabs: (([Int]) -> Void)?
     var closesWindowsOnRelease = false
-    var onReleaseTabs: (([UUID]) -> Void)?
+    var onReleaseTabs: ((TabReleaseRequest) -> Void)?
     var onToolbarMenuTracking: ((Bool) -> Void)?
     var onAutoHiddenToolbarMouseDown: ((NSEvent) -> Void)?
     var onTabDragBegin: ((Int, String, NSButton) -> Void)?
@@ -1048,10 +1053,21 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         }
         menu.addItem(.separator())
         let count = tabSizing.count
-        let own = IndexSet(integer: button.tag)
         let all = IndexSet(integersIn: 0 ..< count)
+        let own = all.intersection(IndexSet(integer: button.tag))
+        func addRelease(_ title: String, _ indexes: IndexSet, closeWindows: Bool) {
+            let item = NSMenuItem(
+                title: L(title), action: indexes.isEmpty ? nil : #selector(releaseTabsFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = TabReleaseRequest(
+                ids: indexes.map { tabSizing[$0].id },
+                closeWindows: closeWindows)
+            menu.addItem(item)
+        }
+        addRelease("タブを解除", own, closeWindows: false)
+        addRelease("ウィンドウを閉じる", own, closeWindows: true)
+        menu.addItem(.separator())
         let releases: [(String, IndexSet)] = [
-            (closesWindowsOnRelease ? "ウィンドウを閉じる" : "タブを解除", all.intersection(own)),
             (closesWindowsOnRelease ? "他のタブのウィンドウをすべて閉じる" : "他のタブをすべて解除", all.subtracting(own)),
             (
                 closesWindowsOnRelease ? "右側のタブのウィンドウを閉じる" : "右側のタブを解除",
@@ -1062,11 +1078,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             (closesWindowsOnRelease ? "すべてのタブのウィンドウを閉じる" : "すべてのタブを解除", all),
         ]
         for (title, indexes) in releases {
-            let item = NSMenuItem(
-                title: L(title), action: indexes.isEmpty ? nil : #selector(releaseTabsFromMenu(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = indexes.map { tabSizing[$0].id }
-            menu.addItem(item)
+            addRelease(title, indexes, closeWindows: closesWindowsOnRelease)
         }
         return menu
     }
@@ -1080,8 +1092,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     }
 
     @objc private func releaseTabsFromMenu(_ item: NSMenuItem) {
-        guard let ids = item.representedObject as? [UUID] else { return }
-        onReleaseTabs?(ids)
+        guard let request = item.representedObject as? TabReleaseRequest else { return }
+        onReleaseTabs?(request)
     }
 
     @objc private func moveTabFromMenu(_ item: NSMenuItem) {

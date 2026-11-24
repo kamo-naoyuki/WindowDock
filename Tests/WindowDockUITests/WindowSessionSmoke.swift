@@ -1949,13 +1949,14 @@ enum WindowSessionSmoke {
             if index == 0 { model.probeErrors[0] = .invalidUIElement }
             if index == 2 { throw InjectedFailure() }
         }
-        session.closesWindowsOnRelease = true
-        session.remove(ids[1])
+        session.remove(ids[1], closeWindow: true)
+        if session.closesWindowsOnRelease { failures.append("a one-off close enabled the default close setting") }
         session.pruneClosedWindows()
         session.pruneClosedWindows()
         if session.windows.map(\.id) != ids || model.closeRequests != [1] {
             failures.append("a window awaiting a save decision was detached or asked to close again")
         }
+        session.closesWindowsOnRelease = true
         if session.remove(ids[2]) || session.windows.map(\.id) != ids || model.notices.last?.needsAttention != true {
             failures.append("a rejected close did not report an error and keep the tab")
         }
@@ -1974,11 +1975,11 @@ enum WindowSessionSmoke {
         session.transferWindow(ids[2], to: other)
         other.closesWindowsOnRelease = true
         if !other.restoreAll().isEmpty { failures.append("workspace restoration failed with close mode enabled") }
-        other.closesWindowsOnRelease = false
-        other.remove(ids[2])
+        other.remove(ids[2], closeWindow: false)
+        if !other.closesWindowsOnRelease { failures.append("a one-off release disabled the default close setting") }
         if !other.windows.isEmpty || model.closeRequests != [1, 2, 0] || model.windows[2].frame != model.windows[2]
             .originalFrame {
-            failures.append("transferring, restoring, or releasing with the option off sent a close request")
+            failures.append("transferring, restoring, or explicitly releasing a tab sent a close request")
         }
         return failures
     }

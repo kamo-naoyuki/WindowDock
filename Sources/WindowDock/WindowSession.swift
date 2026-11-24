@@ -787,8 +787,13 @@ final class WindowSession {
 
     @discardableResult
     func remove(_ id: UUID) -> Bool {
+        remove(id, closeWindow: closesWindowsOnRelease)
+    }
+
+    @discardableResult
+    func remove(_ id: UUID, closeWindow: Bool) -> Bool {
         guard let index = windows.firstIndex(where: { $0.id == id }) else { return true }
-        if closesWindowsOnRelease {
+        if closeWindow {
             let window = windows[index]
             let number = access.windowID(window.candidate.element) ?? kCGNullWindowID
             do {
