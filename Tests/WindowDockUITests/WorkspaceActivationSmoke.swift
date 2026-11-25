@@ -58,6 +58,8 @@ enum WorkspaceActivationSmoke {
         first.window.setFrame(NSRect(x: 160, y: 160, width: 720, height: 480), display: false)
         second.window.setFrame(NSRect(x: 260, y: 240, width: 720, height: 480), display: false)
         defer {
+            first.quitting = true
+            second.quitting = true
             first.window.orderOut(nil)
             second.window.orderOut(nil)
         }

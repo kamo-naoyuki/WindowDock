@@ -74,6 +74,61 @@ enum WindowAccess {
     }
 
     static func setFrame(_ element: AXUIElement, _ frame: CGRect) throws {
+        let application = try applicationElement(for: element)
+        let enhancedUIAttribute = "AXEnhancedUserInterface"
+        let enhancedUI: Bool?
+        do {
+            guard let value = try value(application, enhancedUIAttribute) as? Bool else {
+                throw WindowAccessError(operation: L("拡張UI状態の取得"), code: .illegalArgument)
+            }
+            enhancedUI = value
+        } catch let error as WindowAccessError
+            where error.code == .attributeUnsupported || error.code == .noValue
+        {
+            enhancedUI = nil
+        }
+        guard enhancedUI == true else {
+            try setFrameAttributes(element, frame)
+            return
+        }
+
+        do {
+            try setEnhancedUI(false, on: application, attribute: enhancedUIAttribute)
+            try setFrameAttributes(element, frame)
+        } catch {
+            let frameError = error
+            do {
+                try setEnhancedUI(true, on: application, attribute: enhancedUIAttribute)
+            } catch {
+                logger
+                    .error(
+                        "Could not restore Enhanced UI after a failed frame change: \(error.localizedDescription, privacy: .public)")
+            }
+            throw frameError
+        }
+        try setEnhancedUI(true, on: application, attribute: enhancedUIAttribute)
+    }
+
+    private static func applicationElement(for element: AXUIElement) throws -> AXUIElement {
+        var processIdentifier: pid_t = 0
+        let error = AXUIElementGetPid(element, &processIdentifier)
+        guard error == .success else {
+            throw WindowAccessError(operation: L("対象アプリの取得"), code: error)
+        }
+        return AXUIElementCreateApplication(processIdentifier)
+    }
+
+    private static func setEnhancedUI(_ enabled: Bool, on application: AXUIElement, attribute: String) throws {
+        let result = AXUIElementSetAttributeValue(
+            application, attribute as CFString, enabled ? kCFBooleanTrue : kCFBooleanFalse)
+        guard let actual = try WindowAccess.value(application, attribute) as? Bool, actual == enabled else {
+            throw WindowAccessError(
+                operation: L("拡張UI状態の変更"),
+                code: result == .success ? .cannotComplete : result)
+        }
+    }
+
+    private static func setFrameAttributes(_ element: AXUIElement, _ frame: CGRect) throws {
         var size = frame.size
         guard let sizeValue = AXValueCreate(.cgSize, &size) else {
             throw WindowAccessError(operation: L("ウィンドウサイズの変換"), code: .illegalArgument)
@@ -194,55 +249,99 @@ enum WindowAccess {
     }
 }
 
-private final class WindowFocusNotificationContext {
-    let handler: @Sendable () -> Void
+private final class WindowNotificationContext {
+    let onFocusChange: @Sendable () -> Void
+    let onWindowChange: @Sendable (AXUIElement) -> Void
 
-    init(handler: @escaping @Sendable () -> Void) {
-        self.handler = handler
+    init(
+        onFocusChange: @escaping @Sendable () -> Void,
+        onWindowChange: @escaping @Sendable (AXUIElement) -> Void) {
+        self.onFocusChange = onFocusChange
+        self.onWindowChange = onWindowChange
     }
 }
 
-private func windowFocusObserverCallback(
+private func windowObserverCallback(
     _ observer: AXObserver, _ element: AXUIElement, _ notification: CFString, _ refcon: UnsafeMutableRawPointer?) {
     guard let refcon else { return }
-    Unmanaged<WindowFocusNotificationContext>.fromOpaque(refcon).takeUnretainedValue().handler()
+    let context = Unmanaged<WindowNotificationContext>.fromOpaque(refcon).takeUnretainedValue()
+    if notification as String == kAXFocusedWindowChangedNotification {
+        context.onFocusChange()
+    } else {
+        context.onWindowChange(element)
+    }
 }
 
-final class WindowFocusObserver {
+/// Watches an app's focused window and its windows being moved, resized or minimized.
+final class WindowEventObserver {
+    private static let applicationNotifications = [
+        kAXFocusedWindowChangedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
+    ]
     private let observer: AXObserver
     private let applicationElement: AXUIElement
-    private let context: WindowFocusNotificationContext
+    private let context: WindowNotificationContext
     private let runLoopSource: CFRunLoopSource
+    private let applicationNotifications: [String]
+    private var minimizableWindows: [AXUIElement] = []
 
-    init?(application: NSRunningApplication, onChange: @escaping @Sendable () -> Void) {
+    /// The handlers are called on the main thread.
+    init?(
+        application: NSRunningApplication, onFocusChange: @escaping @Sendable () -> Void,
+        onWindowChange: @escaping @Sendable (AXUIElement) -> Void) {
         let pid = application.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
         var createdObserver: AXObserver?
-        let createError = AXObserverCreate(pid, windowFocusObserverCallback, &createdObserver)
+        let createError = AXObserverCreate(pid, windowObserverCallback, &createdObserver)
         guard createError == .success, let createdObserver else {
-            WindowAccess.logger.debug("Could not observe focused windows for PID \(pid): \(createError.rawValue)")
+            WindowAccess.logger.debug("Could not observe windows for PID \(pid): \(createError.rawValue)")
             return nil
         }
-        let context = WindowFocusNotificationContext(handler: onChange)
-        let notificationError = AXObserverAddNotification(
-            createdObserver, appElement, kAXFocusedWindowChangedNotification as CFString,
-            Unmanaged.passUnretained(context).toOpaque())
-        guard notificationError == .success else {
-            WindowAccess.logger.debug(
-                "Could not register focused-window notification for PID \(pid): \(notificationError.rawValue)")
-            return nil
+        let context = WindowNotificationContext(onFocusChange: onFocusChange, onWindowChange: onWindowChange)
+        let registered = Self.applicationNotifications.filter { notification in
+            let error = AXObserverAddNotification(
+                createdObserver, appElement, notification as CFString, Unmanaged.passUnretained(context).toOpaque())
+            if error != .success {
+                WindowAccess.logger.debug(
+                    "Could not register \(notification, privacy: .public) for PID \(pid): \(error.rawValue)")
+            }
+            return error == .success
         }
+        guard !registered.isEmpty else { return nil }
         let source = AXObserverGetRunLoopSource(createdObserver)
         observer = createdObserver
         applicationElement = appElement
         self.context = context
+        applicationNotifications = registered
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
     }
 
+    /// Apps report minimizing for each window rather than for the whole app.
+    func observeMinimizing(of windows: [AXUIElement]) {
+        let notification = kAXWindowMiniaturizedNotification as CFString
+        for element in minimizableWindows where !windows.contains(where: { CFEqual($0, element) }) {
+            AXObserverRemoveNotification(observer, element, notification)
+        }
+        minimizableWindows.removeAll { element in !windows.contains { CFEqual($0, element) } }
+        for element in windows where !minimizableWindows.contains(where: { CFEqual($0, element) }) {
+            let error = AXObserverAddNotification(
+                observer, element, notification, Unmanaged.passUnretained(context).toOpaque())
+            guard error == .success || error == .notificationAlreadyRegistered else {
+                WindowAccess.logger.debug("Could not observe minimizing of a window: \(error.rawValue)")
+                continue
+            }
+            minimizableWindows.append(element)
+        }
+    }
+
     deinit {
-        AXObserverRemoveNotification(observer, applicationElement, kAXFocusedWindowChangedNotification as CFString)
+        for notification in applicationNotifications {
+            AXObserverRemoveNotification(observer, applicationElement, notification as CFString)
+        }
+        for element in minimizableWindows {
+            AXObserverRemoveNotification(observer, element, kAXWindowMiniaturizedNotification as CFString)
+        }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
     }
 }
@@ -309,6 +408,19 @@ extension WindowAccess {
             else { return nil }
             return WindowServerWindow(id: id, processID: pid, frame: frame, layer: layer)
         }
+    }
+
+    /// The window a click at `point` (AppKit screen coordinates) would reach, skipping `excluded` windows. Unlike the
+    /// WindowServer list, this passes through click-through overlays such as Accessibility Inspector's.
+    static func windowReceivingClick(at point: NSPoint, excluding excluded: Set<CGWindowID>) -> CGWindowID? {
+        var below = 0
+        for _ in 0 ... excluded.count {
+            let number = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: below)
+            guard number > 0 else { return nil }
+            if !excluded.contains(CGWindowID(number)) { return CGWindowID(number) }
+            below = number
+        }
+        return nil
     }
 
     static func candidate(matching moved: WindowServerWindow) throws -> WindowCandidate {

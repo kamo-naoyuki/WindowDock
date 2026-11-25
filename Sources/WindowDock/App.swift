@@ -79,7 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Setting.controlTabSwitching.rawValue: true,
             Setting.addWindowsByDragging.rawValue: true,
             Setting.autoHideNewWorkspaces.rawValue: false,
-            Setting.returnDraggedWindows.rawValue: true,
+            Setting.returnDisplacedWindows.rawValue: true,
+            Setting.returnFullScreenWindows.rawValue: false,
         ])
         buildMenu()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [
@@ -232,12 +233,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case controlTabSwitching = "controlTabSwitching"
         case addWindowsByDragging = "addWindowsByDragging"
         case autoHideNewWorkspaces = "autoHideNewWorkspaces"
-        case returnDraggedWindows = "returnDraggedWindowsToPanes"
+        case returnDisplacedWindows = "returnDraggedWindowsToPanes"
+        case returnFullScreenWindows = "returnFullScreenWindowsToPanes"
 
         var defaultValue: Bool {
             switch self {
-            case .closeOnRelease, .autoHideNewWorkspaces: false
-            case .controlTabSwitching, .addWindowsByDragging, .returnDraggedWindows: true
+            case .closeOnRelease, .autoHideNewWorkspaces, .returnFullScreenWindows: false
+            case .controlTabSwitching, .addWindowsByDragging, .returnDisplacedWindows: true
             }
         }
     }
@@ -260,7 +262,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             shortcutContext.reset()
         case .addWindowsByDragging:
             windowDrop.isEnabled = enabled
-        case .autoHideNewWorkspaces, .returnDraggedWindows:
+        case .returnDisplacedWindows:
+            for controller in controllers { controller.returnsDisplacedWindows = enabled }
+        case .returnFullScreenWindows:
+            for controller in controllers { controller.returnsFullScreenWindows = enabled }
+        case .autoHideNewWorkspaces:
             break
         }
     }
@@ -405,7 +411,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.closeOnRelease, "タブを解除するときにウィンドウも閉じる"),
             (.controlTabSwitching, "Control+Tabでワークスペースのタブを切り替える"),
             (.addWindowsByDragging, "ウィンドウをドラッグしてワークスペースに追加する"),
-            (.returnDraggedWindows, "ドラッグで動かしたウィンドウをペインに戻す"),
+            (.returnDisplacedWindows, "移動・最大化・最小化したウィンドウをペインに戻す"),
+            (.returnFullScreenWindows, "フルスクリーンのウィンドウもペインに戻す"),
             (.autoHideNewWorkspaces, "新しいワークスペースではタブバーを自動的に隠す"),
         ]
         for (setting, title) in settings {
@@ -491,6 +498,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func addWorkspace(name: String? = nil, dropPoint: NSPoint? = nil) -> WorkspaceController {
         let controller = WorkspaceController(name: name ?? nextWorkspaceName())
         controller.session.closesWindowsOnRelease = isSettingEnabled(.closeOnRelease)
+        controller.returnsDisplacedWindows = isSettingEnabled(.returnDisplacedWindows)
+        controller.returnsFullScreenWindows = isSettingEnabled(.returnFullScreenWindows)
         controller.setAutoHideTabs(isSettingEnabled(.autoHideNewWorkspaces))
         controller.onClose = { [weak self] in self?.close($0) }
         controller.onSessionChange = { [weak self] controller in
@@ -607,6 +616,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             skipLayoutSave = false
             return
         }
+        // The restored windows are still in the session; don't put them back into their panes.
+        controller.returnsDisplacedWindows = false
+        controller.returnsFullScreenWindows = false
         let failures = controller.session.restoreAll()
         if !failures.isEmpty {
             let alert = NSAlert()
@@ -614,7 +626,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.informativeText = failures.joined(separator: "\n")
             alert.addButton(withTitle: L("閉じる"))
             alert.addButton(withTitle: L("戻って再試行"))
-            if alert.runModal() == .alertSecondButtonReturn { return }
+            if alert.runModal() == .alertSecondButtonReturn {
+                controller.returnsDisplacedWindows = isSettingEnabled(.returnDisplacedWindows)
+                controller.returnsFullScreenWindows = isSettingEnabled(.returnFullScreenWindows)
+                return
+            }
         }
         controllers.removeAll { $0 === controller }
         if forget { SavedLayout.remove(named: controller.name) }
@@ -708,14 +724,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func finishLeftMousePress() {
         guard let start = leftMouseDownLocation else { return }
         leftMouseDownLocation = nil
-        guard isSettingEnabled(.returnDraggedWindows) else { return }
+        guard isSettingEnabled(.returnDisplacedWindows) else { return }
         let end = NSEvent.mouseLocation
         let dx = end.x - start.x
         let dy = end.y - start.y
         guard dx * dx + dy * dy >= 16 else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.controllers.forEach { $0.session.refitDisplacedWindows() }
-        }
+        controllers.forEach { $0.windowsChangedOutsideWorkspace() }
     }
 
     // MARK: Window drag and drop

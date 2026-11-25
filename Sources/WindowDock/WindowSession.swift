@@ -310,7 +310,7 @@ final class WindowSession {
         }
         guard changed else { return }
         var errors: [Error] = []
-        if previousAssignment != targetCell,
+        if previousAssignment != targetCell, !access.isFullScreen(window.candidate.element),
            let target = targetCell.flatMap({ currentTargets()[$0] })
         {
             do {
@@ -322,7 +322,8 @@ final class WindowSession {
         }
         presentedFrames = Dictionary(
             uniqueKeysWithValues: visibleWindows.compactMap { window in
-                alignedFrames[window.id].map { (window.id, $0) }
+                guard !access.isFullScreen(window.candidate.element) else { return nil }
+                return alignedFrames[window.id].map { (window.id, $0) }
             })
         onPresentedFrame?(selectedID.flatMap { presentedFrames[$0] })
         onPresentedFrames?(presentedFrames)
@@ -558,19 +559,36 @@ final class WindowSession {
         synchronize(bringToFront: false)
     }
 
-    /// Puts windows that were moved, resized or maximized outside WindowDock back into their panes.
+    /// Puts windows that were moved, resized, maximized or minimized outside WindowDock back into their panes.
     func refitDisplacedWindows() {
         var displaced = false
-        for window in windows {
-            guard let aligned = alignedFrames[window.id],
-                  let actual = try? access.frame(window.candidate.element),
-                  !WindowGeometry.fits(actual, requested: aligned, tolerance: 1)
-            else { continue }
-            requestedFrames.removeValue(forKey: window.id)
-            displaced = true
+        var errors: [Error] = []
+        for window in windows where !suspendedWindowIDs.contains(window.id) {
+            guard !access.isFullScreen(window.candidate.element) else {
+                requestedFrames.removeValue(forKey: window.id)
+                alignedFrames.removeValue(forKey: window.id)
+                withdrawPresentation(of: window.id)
+                continue
+            }
+            do {
+                if try access.isMinimized(window.candidate.element) {
+                    _ = try access.minimize(window.candidate.element, false)
+                    requestedFrames.removeValue(forKey: window.id)
+                    displaced = true
+                }
+                if let aligned = alignedFrames[window.id],
+                   WindowGeometry.fits(try access.frame(window.candidate.element), requested: aligned, tolerance: 1)
+                { continue }
+                requestedFrames.removeValue(forKey: window.id)
+                displaced = true
+            } catch {
+                errors.append(error)
+            }
         }
-        guard displaced else { return }
-        synchronize(bringToFront: false, raiseWindows: false, showShortcutHint: false)
+        if displaced {
+            synchronize(bringToFront: false, raiseWindows: false, showShortcutHint: false)
+        }
+        report(errors)
     }
 
     var hasFullScreenWindow: Bool {
@@ -610,14 +628,15 @@ final class WindowSession {
     }
 
     func raiseSelected(activate: Bool = false) {
+        let order = presentationOrder.filter { !access.isFullScreen($0.candidate.element) }
         guard !activate else {
             // Front-window-only activation brings one window per call above other apps, so every visible
             // window takes its turn, ending with the selected one.
-            for window in presentationOrder { focus(window.id) }
+            for window in order { focus(window.id) }
             return
         }
         var errors: [Error] = []
-        for window in presentationOrder {
+        for window in order {
             do {
                 try access.raise(window.candidate.element)
             } catch {
@@ -695,6 +714,12 @@ final class WindowSession {
             let visibleIDs = Set(visibleWindows.map(\.id))
             let order = windows.filter { !visibleIDs.contains($0.id) } + presentationOrder
             for window in order {
+                // Native full-screen windows live in another Space and cannot be fitted until they leave it.
+                guard !access.isFullScreen(window.candidate.element) else {
+                    requestedFrames.removeValue(forKey: window.id)
+                    alignedFrames.removeValue(forKey: window.id)
+                    continue
+                }
                 guard let requested = targets[assignments[window.id] ?? 0] else { continue }
                 do {
                     try align(window, to: requested)

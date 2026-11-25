@@ -49,6 +49,19 @@ private let translations: [String: [String]] = [
     "ウィンドウ位置の取得": ["getting the window position", "获取窗口位置", "창 위치 가져오기", "obtener la posición de la ventana"],
     "ウィンドウ位置の変換": ["converting the window position", "转换窗口位置", "창 위치 변환", "convertir la posición de la ventana"],
     "ウィンドウサイズの変換": ["converting the window size", "转换窗口大小", "창 크기 변환", "convertir el tamaño de la ventana"],
+    "拡張UI状態の取得": [
+        "getting the Enhanced UI state",
+        "获取增强 UI 状态",
+        "향상된 UI 상태 가져오기",
+        "obtener el estado de interfaz de usuario mejorada"
+    ],
+    "拡張UI状態の変更": [
+        "changing the Enhanced UI state",
+        "更改增强 UI 状态",
+        "향상된 UI 상태 변경",
+        "cambiar el estado de interfaz de usuario mejorada"
+    ],
+    "対象アプリの取得": ["getting the target app", "获取目标应用", "대상 앱 가져오기", "obtener la app de destino"],
     "最小化状態の取得": ["getting the minimized state", "获取最小化状态", "최소화 상태 가져오기", "obtener el estado minimizado"],
     "ウィンドウの前面表示": ["bringing the window to front", "将窗口置于前台", "창을 맨 앞으로 가져오기", "traer la ventana al frente"],
     "名称未設定": ["Untitled", "未命名", "제목 없음", "Sin título"],
@@ -88,9 +101,14 @@ private let translations: [String: [String]] = [
         "Add windows to a workspace by dragging", "通过拖动窗口将其添加到工作区",
         "창을 드래그하여 작업 공간에 추가", "Añadir ventanas al espacio de trabajo arrastrándolas",
     ],
-    "ドラッグで動かしたウィンドウをペインに戻す": [
-        "Return dragged windows to their panes", "将拖动过的窗口放回窗格",
-        "드래그한 창을 패널로 되돌리기", "Devolver las ventanas arrastradas a su panel",
+    "移動・最大化・最小化したウィンドウをペインに戻す": [
+        "Return moved, maximized, or minimized windows to their panes", "将移动、最大化或最小化的窗口放回窗格",
+        "이동·최대화·최소화한 창을 패널로 되돌리기",
+        "Devolver a su panel las ventanas movidas, maximizadas o minimizadas",
+    ],
+    "フルスクリーンのウィンドウもペインに戻す": [
+        "Also return full-screen windows to their panes", "也将全屏窗口放回窗格",
+        "전체 화면 창도 패널로 되돌리기", "Devolver también a su panel las ventanas a pantalla completa",
     ],
     "新しいワークスペースではタブバーを自動的に隠す": [
         "Automatically hide the tab bar in new workspaces", "在新工作区中自动隐藏标签栏",

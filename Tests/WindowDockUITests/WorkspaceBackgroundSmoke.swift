@@ -39,8 +39,10 @@ enum WorkspaceBackgroundSmoke {
     @MainActor
     static func main() {
         let application = NSApplication.shared
-        if CommandLine.arguments.contains("--activation-helper") {
-            WindowSessionSmoke.runActivationHelper(application)
+        if CommandLine.arguments.contains("--activation-helper") || CommandLine.arguments
+            .contains("--resizable-helper") {
+            WindowSessionSmoke.runActivationHelper(
+                application, resizable: CommandLine.arguments.contains("--resizable-helper"))
             application.run()
             return
         }
@@ -55,11 +57,16 @@ enum WorkspaceBackgroundSmoke {
             let focusOnly = CommandLine.arguments.contains("--focus-sync-only")
             let refitOnly = CommandLine.arguments.contains("--window-refit-only")
             let constraintOnly = CommandLine.arguments.contains("--constraint-notice-only")
+            let enhancedUIOnly = CommandLine.arguments.contains("--enhanced-ui-only")
             let failures: [String]
-            if constraintOnly {
+            if enhancedUIOnly {
+                failures = WindowSessionSmoke.runEnhancedUIFrameChecks()
+            } else if constraintOnly {
                 failures = WindowSessionSmoke.runConstraintNoticeChecks()
             } else if refitOnly {
-                failures = WindowSessionSmoke.runDisplacedWindowChecks()
+                failures = WindowSessionSmoke.runDisplacedWindowChecks() + WindowSessionSmoke
+                    .runWindowEventRefitChecks() + WindowSessionSmoke.runWindowEventReturnPolicyChecks()
+                    + WindowSessionSmoke.runActivationRefitChecks()
             } else if focusOnly {
                 failures = WindowSessionSmoke.runExternalFocusChecks()
             } else if nestedOnly {
@@ -97,6 +104,8 @@ enum WorkspaceBackgroundSmoke {
                         ? "PASS: nested pane menus, layout, resizing, persistence, tab reflow and routing"
                         : constraintOnly
                         ? "PASS: window constraint notices"
+                        : enhancedUIOnly
+                        ? "PASS: Enhanced UI frame alignment"
                         : dropOnly
                         ? "PASS: native WindowServer move/release sampling and nonactivating drop feedback"
                         : focused

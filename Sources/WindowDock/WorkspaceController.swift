@@ -9,7 +9,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private let workspace = WorkspaceChromeView(frame: .zero)
     private var picker: WindowPicker?
     private var tabIDs: [UUID] = []
-    private var focusObservers: [pid_t: WindowFocusObserver] = [:]
+    private var windowObservers: [pid_t: WindowEventObserver] = [:]
     private var windowRaisePending = false
     private var windowRaiseScheduled = false
     private var tabBarHoverStart: TimeInterval?
@@ -22,6 +22,23 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private(set) var suspended = false
     private(set) var autoHideTabs = false
     var quitting = false
+    /// Whether windows moved, resized, maximized or minimized outside WindowDock go back to their panes.
+    var returnsDisplacedWindows = true {
+        didSet {
+            if !returnsDisplacedWindows {
+                displacedWindowTimer?.invalidate()
+                displacedWindowTimer = nil
+            }
+        }
+    }
+    var returnsFullScreenWindows = false {
+        didSet {
+            if !returnsFullScreenWindows {
+                fullScreenExitTimer?.invalidate()
+                fullScreenExitTimer = nil
+            }
+        }
+    }
 
     var name: String {
         didSet {
@@ -262,7 +279,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     private func renderTabs() {
-        refreshFocusObservers()
+        refreshWindowObservers()
         workspace.closesWindowsOnRelease = session.closesWindowsOnRelease
         if let layout = session.customLayout {
             workspace.setCustomLayout(layout, activeCell: session.activeCell)
@@ -310,16 +327,62 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         window.invalidateShadow()
     }
 
-    private func refreshFocusObservers() {
+    private func refreshWindowObservers() {
         let applications = Dictionary(
             session.windows.map { ($0.candidate.application.processIdentifier, $0.candidate.application) },
             uniquingKeysWith: { first, _ in first }
         )
-        focusObservers = focusObservers.filter { applications[$0.key] != nil }
-        for (pid, application) in applications where focusObservers[pid] == nil {
-            focusObservers[pid] = WindowFocusObserver(application: application) { [weak self] in
-                Task { @MainActor in self?.focusedWindowChanged(for: pid) }
+        windowObservers = windowObservers.filter { applications[$0.key] != nil }
+        for (pid, application) in applications {
+            if windowObservers[pid] == nil {
+                windowObservers[pid] = WindowEventObserver(
+                    application: application,
+                    onFocusChange: { [weak self] in
+                        Task { @MainActor in self?.focusedWindowChanged(for: pid) }
+                    },
+                    onWindowChange: { [weak self] element in
+                        MainActor.assumeIsolated {
+                            guard let self, self.session.windows.contains(where: {
+                                CFEqual($0.candidate.element, element)
+                            }) else { return }
+                            self.windowsChangedOutsideWorkspace()
+                        }
+                    }
+                )
             }
+            windowObservers[pid]?.observeMinimizing(
+                of: session.windows.filter { $0.candidate.application.processIdentifier == pid }
+                    .map(\.candidate.element)
+            )
+        }
+    }
+
+    private var displacedWindowTimer: Timer?
+
+    /// WindowDock's own changes also send notifications; refitting an aligned window is a no-op.
+    func windowsChangedOutsideWorkspace() {
+        guard returnsDisplacedWindows, !suspended, !quitting else { return }
+        displacedWindowTimer?.invalidate()
+        // Wait for the change, such as a zoom animation, to finish.
+        let timer = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.returnDisplacedWindows() }
+        }
+        displacedWindowTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func returnDisplacedWindows() {
+        displacedWindowTimer = nil
+        guard returnsDisplacedWindows, !suspended, !quitting, !window.isMiniaturized, picker == nil,
+              window.attachedSheet == nil,
+              fullScreenExitTimer?.isValid != true
+        else { return }
+        // Windows dragged with the mouse are put back once the button is released.
+        guard NSEvent.pressedMouseButtons == 0 else { return windowsChangedOutsideWorkspace() }
+        if returnsFullScreenWindows, session.leaveFullScreen() {
+            refitAfterLeavingFullScreen(raiseWindows: false)
+        } else {
+            session.refitDisplacedWindows()
         }
     }
 
@@ -327,7 +390,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         guard session.windows
             .contains(where: { $0.candidate.application.processIdentifier == application.processIdentifier })
         else { return }
-        refreshFocusObservers()
+        refreshWindowObservers()
         focusedWindowChanged(for: application.processIdentifier)
     }
 
@@ -802,8 +865,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         fullScreenExitTimer?.invalidate()
         fullScreenExitTimer = nil
         // Focusing a full-screen window would switch to its Space instead of showing it in its pane.
-        guard !session.leaveFullScreen() else {
-            raiseAfterLeavingFullScreen(activate: activate)
+        if returnsFullScreenWindows, session.leaveFullScreen() {
+            refitAfterLeavingFullScreen(raiseWindows: true, activate: activate)
             return
         }
         session.refitDisplacedWindows()
@@ -812,21 +875,34 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     private var fullScreenExitTimer: Timer?
 
-    private func raiseAfterLeavingFullScreen(activate: Bool) {
-        let deadline = ProcessInfo.processInfo.systemUptime + 3
+    private func refitAfterLeavingFullScreen(raiseWindows: Bool, activate: Bool = false) {
+        let start = ProcessInfo.processInfo.systemUptime
+        var lastRequest = start
         fullScreenExitTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
-                guard let self, !self.suspended, !self.quitting, !self.window.isMiniaturized, self.picker == nil else {
+                guard let self, !self.suspended, !self.quitting, !self.window.isMiniaturized, self.picker == nil,
+                      self.returnsFullScreenWindows,
+                      raiseWindows || self.returnsDisplacedWindows
+                else {
                     return timer.invalidate()
                 }
+                guard NSEvent.pressedMouseButtons == 0 else { return }
                 guard !self.session.hasFullScreenWindow else {
-                    if ProcessInfo.processInfo.systemUptime > deadline { timer.invalidate() }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if now - start > 5 {
+                        timer.invalidate()
+                        WindowAccess.logger.error("Timed out waiting for a managed window to leave full screen")
+                    } else if now - lastRequest >= 1 {
+                        // A window still entering full screen ignores the request to leave it.
+                        lastRequest = now
+                        _ = self.session.leaveFullScreen()
+                    }
                     return
                 }
                 timer.invalidate()
                 self.fullScreenExitTimer = nil
                 self.session.refitDisplacedWindows()
-                guard NSApp.isActive, self.window.isKeyWindow else { return }
+                guard raiseWindows, NSApp.isActive, self.window.isKeyWindow else { return }
                 self.window.orderFront(nil)
                 self.session.raiseSelected(activate: activate)
             }

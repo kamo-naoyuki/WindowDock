@@ -48,7 +48,7 @@ When you find or are asked to fix a bug, follow this order:
   - `LanguageResolver.swift` – picks the UI language from preferred languages.
   - `WindowDragTracking.swift` – `WindowServerWindow` and `WorkspaceWindowDragTracker`, which detects foreign-window drags from sampled WindowServer frames.
   - `WorkspaceTabDragRoute.swift` – decides whether a dragged tab stays in its workspace, transfers to another, or does nothing.
-  - `WindowHitTesting.swift` – finds the visible workspace under a dragged window.
+  - `WindowHitTesting.swift` – recognizes a click on an own window that just activated the app.
 - `WindowDock` (`Sources/WindowDock`): the app (depends on Core and Sparkle).
 
 ## Where things are (`Sources/WindowDock`)
@@ -57,7 +57,7 @@ When you find or are asked to fix a bug, follow this order:
 |---|---|
 | Entry point (`@main`), `AppDelegate`: menus, workspace list, restore on launch, global key/mouse monitors, cross-app window-drag polling, quit/restore | `App.swift` |
 | Which workspace comes forward on app activation, Dock click/menu or Workspace menu, and sending the other workspaces back (`WorkspaceActivation`) | `WorkspaceActivation.swift` |
-| One workspace = one `WorkspaceController` (owns the NSWindow, wires `WindowSession` ↔ views, NSWindowDelegate, picker, drop handling) | `WorkspaceController.swift` |
+| One workspace = one `WorkspaceController` (owns the NSWindow, wires `WindowSession` ↔ views, NSWindowDelegate, picker, drop handling, returns moved/zoomed/minimized windows via `WindowEventObserver`; returning full-screen windows is opt-in) | `WorkspaceController.swift` |
 | Model/state of a workspace: managed windows, grid cells, selection, sync/align/raise, suspend/resume, restore originals | `WindowSession.swift` |
 | All Accessibility API calls (`WindowAccess`), `WindowAccessClient` (injectable for tests), `WindowCandidate`, window scanning, window-server list | `Accessibility.swift` |
 | Workspace NSWindow (`WorkspaceWindow`), resize/drag background view, coverage | `WorkspaceBackgroundView.swift` |

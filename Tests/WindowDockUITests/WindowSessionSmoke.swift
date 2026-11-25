@@ -865,6 +865,8 @@ enum WindowSessionSmoke {
         window.setFrame(NSRect(x: 200, y: 160, width: 900, height: 600), display: true)
         controller.session.add(
             WindowCandidate(element: model.windows[0].element, application: .current, title: "Registered"))
+        // Drop targets are hit-tested like clicks; keep other apps' windows from covering the fixture.
+        window.level = .floating
         window.orderFrontRegardless()
         chrome.layoutSubtreeIfNeeded()
         let pid = ProcessInfo.processInfo.processIdentifier
@@ -880,14 +882,28 @@ enum WindowSessionSmoke {
             return ["window drop fixture's tab bar did not accept drops"]
         }
         let axDrop = CGPoint(x: drop.x, y: screen.frame.maxY - drop.y)
+        // Let the WindowServer apply the ordering before hit-testing it.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         // The dragged window starts outside the workspace and is grabbed 40 points into its titlebar.
         let start = CGRect(x: workspace.frame.maxX + 60, y: workspace.frame.minY + 40, width: 500, height: 400)
         let grab = CGPoint(x: start.minX + 40, y: start.minY + 10)
         let moved = start.offsetBy(dx: axDrop.x - grab.x, dy: axDrop.y - grab.y)
 
+        // Tools such as Accessibility Inspector cover the screen with a transparent, click-through overlay window.
+        let overlay = NSWindow(
+            contentRect: window.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        overlay.isReleasedWhenClosed = false
+        overlay.backgroundColor = .clear
+        overlay.isOpaque = false
+        overlay.ignoresMouseEvents = true
+        overlay.level = .screenSaver
+        defer { overlay.orderOut(nil) }
+        let overlayWindow = WindowServerWindow(
+            id: 9_000_003, processID: pid, frame: workspace.frame, layer: Int(CGWindowLevelForKey(.screenSaverWindow)))
+
         func run(
             dragging number: CGWindowID, windowID: @escaping (AXUIElement) -> CGWindowID?,
-            releaseOutside: Bool = false) -> (
+            releaseOutside: Bool = false, coveredByOverlay: Bool = false) -> (
             shownBeforeHover: Bool, shown: Bool, finished: Bool) {
             let coordinator = WorkspaceWindowDrop { [controller] }
             var pointer = WorkspaceWindowDrop.Pointer(location: .zero, buttonDown: false)
@@ -895,7 +911,10 @@ enum WindowSessionSmoke {
             var finished: [WorkspaceController] = []
             var finishedIndex: Int?
             coordinator.pointer = { pointer }
-            coordinator.windows = { [WindowServerWindow(id: number, processID: pid, frame: frame), workspace] }
+            coordinator.windows = {
+                [WindowServerWindow(id: number, processID: pid, frame: frame)]
+                    + (coveredByOverlay ? [overlayWindow] : []) + [workspace]
+            }
             // The harness owns both fake windows, so only the workspace must not count as its own app.
             coordinator.ownPID = -1
             coordinator.isRegularApplication = { _ in true }
@@ -955,6 +974,16 @@ enum WindowSessionSmoke {
         let registered = run(dragging: registeredNumber, windowID: numbers)
         if registered.shownBeforeHover || registered.shown || registered.finished {
             failures.append("dragging an already registered window offered it for addition: \(registered)")
+        }
+        overlay.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        let onScreen = (CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], CGWindowID(window.windowNumber))
+            as? [[String: Any]] ?? []).contains { $0[kCGWindowNumber as String] as? Int == overlay.windowNumber }
+        if !onScreen { failures.append("the click-through overlay fixture was not above the workspace") }
+        let covered = run(dragging: draggedNumber, windowID: numbers, coveredByOverlay: true)
+        overlay.orderOut(nil)
+        if !covered.shown || !covered.finished {
+            failures.append("a click-through overlay above the workspace blocked dropping a window: \(covered)")
         }
         return failures
     }
@@ -1337,6 +1366,57 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    static func runEnhancedUIFrameChecks() -> [String] {
+        let helper: ActivationHelperProcess
+        switch ActivationHelperProcess.launch(resizable: true) {
+        case .success(let launched): helper = launched
+        case .failure(let failure): return [failure.message]
+        }
+        defer { helper.terminate() }
+
+        let application = AXUIElementCreateApplication(helper.pid)
+        AXUIElementSetMessagingTimeout(application, 0.3)
+        let attribute = "AXEnhancedUserInterface"
+        let wasEnhanced = (try? WindowAccess.value(application, attribute) as? Bool) ?? false
+        defer {
+            _ = AXUIElementSetAttributeValue(
+                application, attribute as CFString, wasEnhanced ? kCFBooleanTrue : kCFBooleanFalse)
+        }
+        _ = AXUIElementSetAttributeValue(application, attribute as CFString, kCFBooleanTrue)
+        guard (try? WindowAccess.value(application, attribute) as? Bool) == true else {
+            return ["could not enable Enhanced UI on the helper application"]
+        }
+
+        guard let process = NSRunningApplication(processIdentifier: helper.pid),
+              let windows = WindowAccess.windowElements(process),
+              let window = windows.first(where: { WindowAccess.windowID(of: $0) == CGWindowID(helper.windows[0]) }),
+              let before = try? WindowAccess.frame(window)
+        else {
+            return ["could not find the Enhanced UI helper window"]
+        }
+        let target = CGRect(
+            x: before.minX, y: before.minY + 24, width: before.width, height: before.height - 24)
+        do {
+            try WindowAccess.setFrame(window, target)
+        } catch {
+            return ["could not resize the Enhanced UI helper window: \(error.localizedDescription)"]
+        }
+
+        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+        guard let actual = try? WindowAccess.frame(window),
+              WindowGeometry.fits(actual, requested: target, tolerance: 1)
+        else {
+            return [
+                "Enhanced UI frame change did not reach its target "
+                    + "(actual: \(String(describing: try? WindowAccess.frame(window))), target: \(target))"
+            ]
+        }
+        guard (try? WindowAccess.value(application, attribute) as? Bool) == true else {
+            return ["Enhanced UI was not restored after changing the helper window frame"]
+        }
+        return []
+    }
+
     static func runManyTabMoveChecks() -> [String] {
         var failures: [String] = []
         let (session, model) = fixture(registering: Array(0 ..< 20), windowCount: 20)
@@ -1357,15 +1437,17 @@ enum WindowSessionSmoke {
     }
 
     /// Child process for `runFrontWindowOnlyActivationChecks`: an inactive app with three windows.
-    static func runActivationHelper(_ application: NSApplication) {
+    static func runActivationHelper(_ application: NSApplication, resizable: Bool = false) {
         // Regular apps activate themselves at launch; becoming regular afterwards keeps this one in the background.
         application.setActivationPolicy(.accessory)
         DispatchQueue.main.async { application.setActivationPolicy(.regular) }
         let windows = (0 ..< 3).map { index in
             let window = NSWindow(
                 contentRect: NSRect(x: 300 + index * 40, y: 300 + index * 40, width: 300, height: 200),
-                styleMask: [.titled], backing: .buffered, defer: false)
+                styleMask: resizable ? [.titled, .resizable, .miniaturizable] : [.titled], backing: .buffered,
+                defer: false)
             window.isReleasedWhenClosed = false
+            if resizable { window.collectionBehavior.insert(.fullScreenPrimary) }
             window.orderFrontRegardless()
             return window
         }
@@ -1377,6 +1459,12 @@ enum WindowSessionSmoke {
             while let line = readLine() {
                 if line.hasPrefix("raise "), let index = Int(line.dropFirst(6)) {
                     DispatchQueue.main.async { windows[index].orderFrontRegardless() }
+                } else if line.hasPrefix("zoom "), let index = Int(line.dropFirst(5)) {
+                    DispatchQueue.main.async { windows[index].zoom(nil) }
+                } else if line.hasPrefix("minimize "), let index = Int(line.dropFirst(9)) {
+                    DispatchQueue.main.async { windows[index].miniaturize(nil) }
+                } else if line.hasPrefix("fullscreen "), let index = Int(line.dropFirst(11)) {
+                    DispatchQueue.main.async { windows[index].toggleFullScreen(nil) }
                 } else if line.hasPrefix("yield "), let pid = pid_t(line.dropFirst(6)) {
                     // Stands in for the Dock, which lets the app whose Dock menu item was chosen activate itself.
                     DispatchQueue.main.async {
@@ -1405,7 +1493,7 @@ enum WindowSessionSmoke {
         private let input: Pipe
 
         /// Fails with a description when the helper cannot be launched.
-        static func launch() -> Result<ActivationHelperProcess, SmokeFailure> {
+        static func launch(resizable: Bool = false) -> Result<ActivationHelperProcess, SmokeFailure> {
             guard let executable = Bundle.main.executableURL else {
                 return .failure(.init("activation helper could not find its executable"))
             }
@@ -1413,7 +1501,7 @@ enum WindowSessionSmoke {
             let output = Pipe()
             let input = Pipe()
             process.executableURL = executable
-            process.arguments = ["--activation-helper"]
+            process.arguments = [resizable ? "--resizable-helper" : "--activation-helper"]
             process.standardOutput = output
             process.standardInput = input
             do { try process.run() } catch {
@@ -2124,10 +2212,41 @@ enum WindowSessionSmoke {
         if model.operations.contains(.resize(right)) || model.operations.contains(.move(right)) {
             failures.append("refitting moved a window that had stayed in its pane")
         }
+
+        model.windows[left].minimized = true
+        model.windows[hidden].minimized = true
+        model.operations.removeAll()
+        session.refitDisplacedWindows()
+        if model.windows[left].minimized || model.windows[hidden].minimized {
+            failures.append("refitting did not restore minimized windows, including a background tab")
+        }
+        if model.operations.contains(where: {
+            if case .raise = $0 { return true }
+            return false
+        }) {
+            failures.append("restoring minimized windows raised other managed windows")
+        }
+
+        model.windows[left].minimized = true
+        model.failedMinimizations.insert(left)
+        session.refitDisplacedWindows()
+        if model.notices.last?.needsAttention != true {
+            failures.append("a failed automatic unminimize did not report an error")
+        }
+
+        let (constrained, constrainedModel) = fixture(registering: [0])
+        constrainedModel.windows[0].minimumSize.width = constrainedModel.target.width + 80
+        constrainedModel.windows[0].frame.size.width = constrainedModel.windows[0].minimumSize.width
+        constrained.realign()
+        constrainedModel.operations.removeAll()
+        constrained.refitDisplacedWindows()
+        if !constrainedModel.operations.isEmpty {
+            failures.append("refitting retried a known size constraint even though the window had not moved")
+        }
         return failures
     }
 
-    /// Windows maximized or made full screen while another app was active return to their panes once WindowDock is active.
+    /// Activation refits normal windows; full-screen windows only return when enabled.
     static func runActivationRefitChecks() -> [String] {
         let model = Model(windowCount: 2)
         let controller = WorkspaceController(name: "Activation refit", access: access(for: model))
@@ -2183,7 +2302,28 @@ enum WindowSessionSmoke {
 
         model.windows[1].fullScreen = true
         model.windows[1].frame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        model.windows[0].frame = fitted[0].offsetBy(dx: 30, dy: 20)
         model.operations.removeAll()
+        activation.applicationDidBecomeActive()
+        settle(0.5)
+        if !model.fullScreenExits.isEmpty || raised(1)
+            || model.operations.contains(.resize(1)) || model.operations.contains(.move(1))
+            || controller.session.gridSize != grid
+        {
+            failures.append("activation changed a full-screen window or its pane layout without opting in")
+        }
+        if model.windows[0].frame != fitted[0] {
+            failures.append("preserving full screen prevented another pane's maximized window from returning")
+        }
+        model.focusedWindows.removeAll()
+        controller.scheduleSelectedWindowRaise(activate: true)
+        settle(0.4)
+        if model.focusedWindows.contains(1) {
+            failures.append("activating the workspace focused a full-screen window in another Space without opting in")
+        }
+        model.fullScreenExits.removeAll()
+        model.operations.removeAll()
+        controller.returnsFullScreenWindows = true
         activation.applicationDidBecomeActive()
         settle(0.4)
         if model.fullScreenExits != [1] {
@@ -2205,6 +2345,219 @@ enum WindowSessionSmoke {
         if !raised(1) {
             failures.append("the workspace's windows were not raised once the window had left full screen")
         }
+        return failures
+    }
+
+    /// A real window zoomed or minimized by its app, without a mouse drag, returns to its pane on its own.
+    static func runWindowEventRefitChecks() -> [String] {
+        let helper: ActivationHelperProcess
+        switch ActivationHelperProcess.launch(resizable: true) {
+        case .success(let launched): helper = launched
+        case .failure(let failure): return [failure.message]
+        }
+        defer { helper.terminate() }
+        guard let application = NSRunningApplication(processIdentifier: helper.pid),
+              let element = WindowAccess.windowElements(application)?.first(where: {
+                  WindowAccess.windowID(of: $0) == CGWindowID(helper.windows[0])
+              })
+        else { return ["could not find the window-event helper window"] }
+        let controller = WorkspaceController(name: "Window events")
+        let window = controller.window
+        defer {
+            controller.quitting = true
+            window.orderOut(nil)
+        }
+        func settle(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline {
+                if let event = NSApp.nextEvent(
+                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true)
+                {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        window.setFrame(NSRect(x: 160, y: 180, width: 900, height: 600), display: true)
+        window.orderFrontRegardless()
+        controller.session.add(WindowCandidate(element: element, application: application, title: "Event probe"))
+        settle(1)
+        guard let fitted = try? WindowAccess.frame(element), fitted.width > 600 else {
+            return ["window-event fixture did not fit the helper window into its pane"]
+        }
+        func inPane() -> Bool {
+            guard (try? WindowAccess.isMinimized(element)) == false, let frame = try? WindowAccess.frame(element)
+            else { return false }
+            return WindowGeometry.fits(frame, requested: fitted, tolerance: 1)
+        }
+        var failures: [String] = []
+
+        helper.send("zoom 0")
+        var zoomed = false
+        settle(3) {
+            if !inPane() { zoomed = true }
+            return zoomed && inPane()
+        }
+        if !zoomed {
+            failures.append("the helper window did not zoom")
+        } else if !inPane() {
+            failures.append(
+                "a window zoomed by its app stayed maximized instead of returning to its pane: "
+                    + "\(String(describing: try? WindowAccess.frame(element)))")
+        }
+
+        helper.send("minimize 0")
+        var minimized = false
+        settle(4) {
+            if (try? WindowAccess.isMinimized(element)) == true { minimized = true }
+            return minimized && inPane()
+        }
+        if !minimized {
+            failures.append("the helper window did not minimize")
+        } else if !inPane() {
+            failures.append(
+                "a window minimized by its app stayed out of its pane (minimized: "
+                    + "\(String(describing: try? WindowAccess.isMinimized(element))))")
+        }
+
+        settle(0.5)
+        helper.send("fullscreen 0")
+        var fullScreen = false
+        settle(3) {
+            if WindowAccess.isFullScreen(element) { fullScreen = true }
+            return false
+        }
+        if !fullScreen {
+            failures.append("the helper window did not enter full screen")
+        } else if !WindowAccess.isFullScreen(element) {
+            failures.append("a real full-screen window returned to its pane without opting in")
+        }
+        controller.returnsFullScreenWindows = true
+        controller.windowsChangedOutsideWorkspace()
+        settle(10) { !WindowAccess.isFullScreen(element) && inPane() }
+        if WindowAccess.isFullScreen(element) || !inPane() {
+            failures.append(
+                "a window made full screen by its app did not return to its pane (full screen: "
+                    +
+                    "\(WindowAccess.isFullScreen(element)), frame: \(String(describing: try? WindowAccess.frame(element))))")
+        }
+
+        // AXFullScreen clears before AppKit finishes the transition and accepts another window action.
+        settle(1)
+        controller.returnsDisplacedWindows = false
+        helper.send("minimize 0")
+        var minimizedWhileDisabled = false
+        settle(1.5) {
+            if (try? WindowAccess.isMinimized(element)) == true { minimizedWhileDisabled = true }
+            return false
+        }
+        if !minimizedWhileDisabled {
+            failures.append("the helper window did not minimize for the disabled-setting check")
+        } else if (try? WindowAccess.isMinimized(element)) != true {
+            failures.append("automatic return unminimized a window while the setting was disabled")
+        }
+        do {
+            _ = try WindowAccess.minimize(element, false)
+            try WindowAccess.setFrame(element, fitted.offsetBy(dx: 30, dy: 20))
+        } catch {
+            return failures + ["could not move the helper window: \(error.localizedDescription)"]
+        }
+        settle(0.6)
+        if inPane() {
+            failures.append("automatic return moved a window while the setting was disabled")
+        }
+        controller.returnsDisplacedWindows = true
+        controller.windowsChangedOutsideWorkspace()
+        settle(2, until: inPane)
+
+        controller.applicationDidHide()
+        settle(1)
+        if (try? WindowAccess.isMinimized(element)) != true {
+            failures.append("automatic return undid the workspace's own minimization")
+        }
+        controller.applicationDidUnhide()
+        settle(2, until: inPane)
+        if !inPane() { failures.append("a suspended workspace did not restore its managed window on resume") }
+
+        guard let managed = controller.session.windows.first else {
+            return failures + ["the window-event fixture lost its registered window"]
+        }
+        controller.windowsChangedOutsideWorkspace()
+        controller.session.remove(managed.id, closeWindow: false)
+        settle(0.8)
+        if let frame = try? WindowAccess.frame(element),
+           !WindowGeometry.fits(frame, requested: managed.originalFrame, tolerance: 1) {
+            failures.append("a queued automatic return moved a released window back into its old pane")
+        }
+        return failures
+    }
+
+    static func runWindowEventReturnPolicyChecks() -> [String] {
+        let model = Model(windowCount: 1)
+        let controller = WorkspaceController(name: "Automatic return policy", access: access(for: model))
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        controller.session.add(
+            WindowCandidate(element: model.windows[0].element, application: .current, title: "Return policy"))
+        let fitted = model.windows[0].frame
+        func settle(_ seconds: TimeInterval = 0.4) {
+            RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+        }
+        var failures: [String] = []
+        model.windows[0].fullScreen = true
+        model.windows[0].frame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        model.operations.removeAll()
+        controller.windowsChangedOutsideWorkspace()
+        settle()
+        if !model.fullScreenExits.isEmpty || !model.operations.isEmpty {
+            failures.append("automatic return changed a full-screen window without opting in")
+        }
+        model.fullScreenExits.removeAll()
+        controller.returnsFullScreenWindows = true
+        controller.windowsChangedOutsideWorkspace()
+        settle()
+        if model.fullScreenExits.isEmpty {
+            failures.append("automatic return did not request leaving full screen")
+        }
+        controller.returnsDisplacedWindows = false
+        model.windows[0].fullScreen = false
+        model.windows[0].frame = fitted.offsetBy(dx: 80, dy: 40)
+        model.operations.removeAll()
+        settle()
+        if !model.operations.isEmpty {
+            failures.append("a pending full-screen return changed the window after the setting was disabled")
+        }
+        controller.returnsDisplacedWindows = true
+        model.windows[0].fullScreen = true
+        controller.windowsChangedOutsideWorkspace()
+        settle()
+        let exitRequests = model.fullScreenExits.count
+        controller.returnsFullScreenWindows = false
+        model.operations.removeAll()
+        settle(1.3)
+        if model.fullScreenExits.count != exitRequests || !model.operations.isEmpty {
+            failures.append("disabling full-screen return did not cancel its pending retries")
+        }
+        model.windows[0].fullScreen = false
+        model.onMove = { controller.windowsChangedOutsideWorkspace() }
+        model.onSetFrame = { _, _ in controller.windowsChangedOutsideWorkspace() }
+        for _ in 0 ..< 5 {
+            model.windows[0].frame = fitted.offsetBy(dx: 80, dy: 40)
+            controller.windowsChangedOutsideWorkspace()
+            settle()
+            if model.windows[0].frame != fitted {
+                failures.append("repeated window moves stopped returning to the pane")
+                break
+            }
+        }
+        model.operations.removeAll()
+        settle(0.8)
+        if !model.operations.isEmpty {
+            failures.append("notifications from automatic return repeatedly moved or raised an aligned window")
+        }
+        model.onMove = nil
+        model.onSetFrame = nil
         return failures
     }
 
@@ -2305,6 +2658,8 @@ enum WindowSessionSmoke {
         failures += runRemovalApertureChecks()
         failures += runCloseOnReleaseChecks()
         failures += runDisplacedWindowChecks()
+        failures += runWindowEventRefitChecks()
+        failures += runWindowEventReturnPolicyChecks()
         failures += runReresolveChecks()
         failures += runTabTransferRevealChecks()
         failures += runOutsideTabDropChecks()

@@ -143,12 +143,7 @@ final class WorkspaceWindowDrop {
         case .moving(let drag):
             let target =
                 isRegularApplication(drag.window.processID)
-                    ? self.target(
-                        at: point,
-                        accessibilityPoint: axPoint,
-                        drag: drag,
-                        windows: windows,
-                        among: controllers)
+                    ? self.target(at: point, drag: drag, among: controllers)
                     : nil
             for controller in controllers {
                 if controller === target {
@@ -176,8 +171,7 @@ final class WorkspaceWindowDrop {
                 registration.reset()
                 previewTitle = nil
             }
-            let target = self.target(
-                at: point, accessibilityPoint: axPoint, drag: drag, windows: windows, among: controllers)
+            let target = self.target(at: point, drag: drag, among: controllers)
             let insertionIndex = target?.windowDropInsertionIndex(at: point)
             controllers.forEach { $0.hideWindowDropTarget() }
             if let target, let insertionIndex, isRegularApplication(drag.window.processID) {
@@ -194,18 +188,15 @@ final class WorkspaceWindowDrop {
     }
 
     private func target(
-        at point: NSPoint, accessibilityPoint: CGPoint, drag: WorkspaceWindowDrag,
-        windows: [WindowServerWindow], among controllers: [WorkspaceController]) -> WorkspaceController? {
+        at point: NSPoint, drag: WorkspaceWindowDrag,
+        among controllers: [WorkspaceController]) -> WorkspaceController? {
         var excluded: Set<CGWindowID> = [drag.window.id]
         for controller in controllers {
             if let number = controller.windowDropPanelNumber, number > 0 {
                 excluded.insert(CGWindowID(number))
             }
         }
-        guard
-            let frontmost = WindowHitTesting.frontmostWindow(
-                at: accessibilityPoint, windows: windows.map { (id: $0.id, frame: $0.frame) }, excluding: excluded)
-        else { return nil }
+        guard let frontmost = WindowAccess.windowReceivingClick(at: point, excluding: excluded) else { return nil }
         guard
             let target = controllers.first(where: {
                 let isWorkspace = $0.window.windowNumber > 0 && CGWindowID($0.window.windowNumber) == frontmost
