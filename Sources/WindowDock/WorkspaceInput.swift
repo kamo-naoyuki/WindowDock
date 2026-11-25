@@ -87,9 +87,9 @@ final class WorkspaceWindowDrop {
     }
     var windowID: (AXUIElement) -> CGWindowID? = WindowAccess.windowID(of:)
     var resolve: (WindowServerWindow) throws -> WindowCandidate = WindowAccess.candidate(matching:)
-    var finish: (WorkspaceController, WorkspaceWindowDrag, CGPoint, NSPoint) -> Void = {
-        controller, drag, axPoint, point in
-        controller.finishWindowDrag(drag, accessibilityPoint: axPoint, screenPoint: point)
+    var finish: (WorkspaceController, WorkspaceWindowDrag, CGPoint, Int) -> Void = {
+        controller, drag, axPoint, index in
+        controller.finishWindowDrag(drag, accessibilityPoint: axPoint, insertionIndex: index)
     }
     var onSamplingFailure: (Error) -> Void = { _ in }
 
@@ -97,6 +97,7 @@ final class WorkspaceWindowDrop {
     private var registration = WorkspaceWindowDragRegistration()
     private var lastSnapshot: TimeInterval = 0
     private var samplingFailed = false
+    private var previewTitle: (id: CGWindowID, processID: pid_t, title: String?)?
 
     init(controllers: @escaping () -> [WorkspaceController]) {
         self.controllers = controllers
@@ -137,6 +138,7 @@ final class WorkspaceWindowDrop {
         {
         case .idle:
             registration.reset()
+            previewTitle = nil
             controllers.forEach { $0.hideWindowDropTarget() }
         case .moving(let drag):
             let target =
@@ -150,18 +152,36 @@ final class WorkspaceWindowDrop {
                     : nil
             for controller in controllers {
                 if controller === target {
-                    controller.showWindowDropTarget(at: point)
+                    if WindowAccess.isTrusted,
+                       previewTitle?.id != drag.window.id || previewTitle?.processID != drag.window.processID
+                    {
+                        do {
+                            previewTitle = (drag.window.id, drag.window.processID, try resolve(drag.window).title)
+                        } catch {
+                            WindowAccess.logger
+                                .debug(
+                                    "Could not read dragged window title: \(error.localizedDescription, privacy: .public)")
+                            previewTitle = (drag.window.id, drag.window.processID, nil)
+                        }
+                    }
+                    controller.showWindowDropTarget(
+                        at: point, application: NSRunningApplication(processIdentifier: drag.window.processID),
+                        title: previewTitle?.title)
                 } else {
                     controller.hideWindowDropTarget()
                 }
             }
         case .released(let drag):
-            defer { registration.reset() }
+            defer {
+                registration.reset()
+                previewTitle = nil
+            }
             let target = self.target(
                 at: point, accessibilityPoint: axPoint, drag: drag, windows: windows, among: controllers)
+            let insertionIndex = target?.windowDropInsertionIndex(at: point)
             controllers.forEach { $0.hideWindowDropTarget() }
-            if let target, isRegularApplication(drag.window.processID) {
-                finish(target, drag, axPoint, point)
+            if let target, let insertionIndex, isRegularApplication(drag.window.processID) {
+                finish(target, drag, axPoint, insertionIndex)
             }
         }
     }
@@ -169,6 +189,7 @@ final class WorkspaceWindowDrop {
     func cancel() {
         tracker.cancel()
         registration.reset()
+        previewTitle = nil
         controllers().forEach { $0.hideWindowDropTarget() }
     }
 
@@ -193,9 +214,7 @@ final class WorkspaceWindowDrop {
             })
         else { return nil }
         let registered = controllers.flatMap { $0.session.windows.map(\.candidate) }
-        guard !registration.isRegistered(drag.window, among: registered, windowID: windowID, resolve: resolve) else {
-            return nil
-        }
-        return target
+        return registration.isRegistered(drag.window, among: registered, windowID: windowID, resolve: resolve)
+            ? nil : target
     }
 }

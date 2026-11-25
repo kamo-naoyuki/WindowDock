@@ -31,6 +31,7 @@ enum PaneSplitRestriction: Error {
 final class WindowSession {
     private static let frameRoundingTolerance = CGSize(width: 12, height: 20)
     private static let framePositionTolerance: CGFloat = 1
+    private static let constraintRecoveryDelay: TimeInterval = 3
 
     private(set) var windows: [ManagedWindow] = []
     // The last regular-grid preset; customLayout takes precedence when present.
@@ -45,6 +46,7 @@ final class WindowSession {
         didSet { if oldValue != closesWindowsOnRelease { onChange?() } }
     }
     var onMessage: ((WorkspaceNotice) -> Void)?
+    var onConstraintWarningCleared: ((String) -> Void)?
     var onPresentedFrame: ((CGRect?) -> Void)?
     var onPresentedFrames: (([UUID: CGRect]) -> Void)?
     var targetFrame: (() -> CGRect?)?
@@ -57,6 +59,7 @@ final class WindowSession {
     private var assignments: [UUID: Int] = [:]
     private var minimumSizes: [UUID: CGSize] = [:]
     private var constraintWarningIDs: Set<UUID> = []
+    private var constraintRecoveryTimers: [UUID: (timer: Timer, fitted: Bool)] = [:]
     /// The frames last passed to `onPresentedFrames`, which the workspace shows through.
     private var presentedFrames: [UUID: CGRect] = [:]
     /// The frames windows had once they were last aligned, to notice when they are moved, resized or maximized outside WindowDock.
@@ -496,6 +499,7 @@ final class WindowSession {
         destination.windows.insert(window, at: insertion)
         destination.minimumSizes[id] = minimumSizes.removeValue(forKey: id)
         if constraintWarningIDs.remove(id) != nil { destination.constraintWarningIDs.insert(id) }
+        cancelConstraintRecovery(for: id)
         requestedFrames.removeValue(forKey: id)
         suspendedWindowIDs.remove(id)
         assignments.removeValue(forKey: id)
@@ -715,6 +719,7 @@ final class WindowSession {
                     actualFrames[window.id] = actual
                     if !fits(actual, requested: requested) {
                         mismatches.insert(window.id)
+                        cancelConstraintRecovery(for: window.id)
                         var minimum = minimumSizes[window.id] ?? .zero
                         if actual.width > requested.width + Self.frameRoundingTolerance.width {
                             minimum.width = max(minimum.width, actual.width)
@@ -726,6 +731,7 @@ final class WindowSession {
                         requestedFrames.removeValue(forKey: window.id)
                     }
                 } catch {
+                    cancelConstraintRecovery(for: window.id)
                     requestedFrames.removeValue(forKey: window.id)
                     errors.append(error)
                 }
@@ -758,6 +764,9 @@ final class WindowSession {
             onPresentedFrame?(selectedID.flatMap { frames[$0] })
             onPresentedFrames?(frames)
             constraintWarningIDs.formUnion(mismatches)
+            for id in actualFrames.keys where constraintWarningIDs.contains(id) {
+                scheduleConstraintRecovery(for: id, fitted: !mismatches.contains(id))
+            }
             if let rejectedWindows {
                 let apps = constraintAppNames(for: rejectedWindows) ?? L("対象アプリ")
                 onMessage?(.attention(L("%@のウィンドウがペインに収まらないため、分割を解除して1×1表示に戻しました。", apps)))
@@ -806,6 +815,50 @@ final class WindowSession {
             && abs(actual.minY - requested.minY) <= Self.framePositionTolerance
             && abs(actual.width - requested.width) <= Self.frameRoundingTolerance.width
             && abs(actual.height - requested.height) <= Self.frameRoundingTolerance.height
+    }
+
+    private func cancelConstraintRecovery(for id: UUID) {
+        constraintRecoveryTimers.removeValue(forKey: id)?.timer.invalidate()
+    }
+
+    private func scheduleConstraintRecovery(for id: UUID, fitted: Bool) {
+        if constraintRecoveryTimers[id]?.fitted == fitted { return }
+        cancelConstraintRecovery(for: id)
+        let timer = Timer(timeInterval: Self.constraintRecoveryDelay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.confirmConstraintRecovery(for: id, wasFitted: fitted)
+            }
+        }
+        constraintRecoveryTimers[id] = (timer, fitted)
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func confirmConstraintRecovery(for id: UUID, wasFitted: Bool) {
+        constraintRecoveryTimers.removeValue(forKey: id)
+        guard constraintWarningIDs.contains(id),
+              let window = windows.first(where: { $0.id == id }),
+              let target = currentTargets()[assignments[id] ?? 0]
+        else { return }
+        do {
+            guard fits(try access.frame(window.candidate.element), requested: target) else {
+                requestedFrames.removeValue(forKey: id)
+                scheduleConstraintRecovery(for: id, fitted: false)
+                return
+            }
+            guard wasFitted else {
+                scheduleConstraintRecovery(for: id, fitted: true)
+                return
+            }
+            constraintWarningIDs.remove(id)
+            if selectedID == id {
+                let app = constraintAppNames(for: [id]) ?? L("対象アプリ")
+                onConstraintWarningCleared?(
+                    L("%@のウィンドウがペインの大きさや位置に合わず、完全には収まりません。", app))
+            }
+        } catch {
+            requestedFrames.removeValue(forKey: id)
+            report(error)
+        }
     }
 
     private func clearPresentation() {
@@ -887,6 +940,7 @@ final class WindowSession {
         assignments.removeValue(forKey: id)
         minimumSizes.removeValue(forKey: id)
         constraintWarningIDs.remove(id)
+        cancelConstraintRecovery(for: id)
         reconcilePanes()
         onChange?()
         presentVisibleWindows()
@@ -966,6 +1020,7 @@ final class WindowSession {
         assignments = assignments.filter { !ids.contains($0.key) }
         minimumSizes = minimumSizes.filter { !ids.contains($0.key) }
         constraintWarningIDs.subtract(ids)
+        for id in ids { cancelConstraintRecovery(for: id) }
         reconcilePanes()
         onChange?()
         presentVisibleWindows()

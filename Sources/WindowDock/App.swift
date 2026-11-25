@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var viewMenu: NSMenu!
     private var settingsMenu: NSMenu!
     private var shortcutContext = WorkspaceShortcutContext()
+    private let tabOutsideDropSettings = TabOutsideDropSettings()
     private var dragTimer: Timer?
     private var leftMouseDownLocation: NSPoint?
     private lazy var tabTransfer: WorkspaceTabTransfer = {
@@ -46,6 +47,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         transfer.onTransfer = { [weak self] source, destination in
             guard let self else { return }
             SavedLayout.upsert([self.savedWorkspace(source), self.savedWorkspace(destination)])
+        }
+        transfer.outsideDropAction = { [weak self] in self?.tabOutsideDropSettings.action ?? .release }
+        transfer.createWorkspace = { [weak self] point in self?.addWorkspace(dropPoint: point) }
+        transfer.discardWorkspace = { [weak self] controller in
+            self?.controllers.removeAll { $0 === controller }
+            controller.window.delegate = nil
+            controller.window.close()
+        }
+        transfer.onRelease = { [weak self] source in
+            guard let self else { return }
+            SavedLayout.upsert([self.savedWorkspace(source)])
         }
         return transfer
     }()
@@ -377,6 +389,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoHide.target = self
         autoHide.state = active?.autoHideTabs == true ? .on : .off
         if let active {
+            let position = menu.addItem(withTitle: L("タブバーの位置"), action: nil, keyEquivalent: "")
+            position.submenu = active.tabBarPositionMenu()
             let pane = menu.addItem(withTitle: L("ペイン"), action: nil, keyEquivalent: "")
             pane.submenu = active.activePaneMenu()
         }
@@ -400,6 +414,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.representedObject = setting.rawValue
             item.state = isSettingEnabled(setting) ? .on : .off
         }
+        menu.addItem(.separator())
+        let outsideDrop = menu.addItem(withTitle: L("タブをワークスペースの外にドロップしたとき"), action: nil, keyEquivalent: "")
+        outsideDrop.submenu = tabOutsideDropSettings.menu()
     }
 
     /// Saved workspaces that are not open right now; each can be reopened or deleted.
@@ -471,7 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func newWorkspace() { addWorkspace() }
 
     @discardableResult
-    private func addWorkspace(name: String? = nil) -> WorkspaceController {
+    private func addWorkspace(name: String? = nil, dropPoint: NSPoint? = nil) -> WorkspaceController {
         let controller = WorkspaceController(name: name ?? nextWorkspaceName())
         controller.session.closesWindowsOnRelease = isSettingEnabled(.closeOnRelease)
         controller.setAutoHideTabs(isSettingEnabled(.autoHideNewWorkspaces))
@@ -493,7 +510,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return self.controllers.contains { $0 !== controller && $0.session.contains(candidate) }
         }
         tabTransfer.attach(controller)
-        if let origin = activeController?.window.frame.origin {
+        if let dropPoint,
+           let screen = NSScreen.screens.first(where: { $0.frame.contains(dropPoint) }) ?? NSScreen.main
+        {
+            let visible = screen.visibleFrame
+            let size = controller.window.frame.size
+            let x = min(max(dropPoint.x - size.width / 2, visible.minX), max(visible.minX, visible.maxX - size.width))
+            let y = min(
+                max(dropPoint.y - size.height + 20, visible.minY),
+                max(visible.minY, visible.maxY - size.height))
+            controller.window.setFrameOrigin(NSPoint(x: x, y: y))
+        } else if let origin = activeController?.window.frame.origin {
             controller.window.setFrameOrigin(NSPoint(x: origin.x + 30, y: origin.y - 30))
         }
         controllers.append(controller)
@@ -561,7 +588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
             }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows,
             autoHideTabs: controller.autoHideTabs, paneLayout: controller.session.customLayout,
-            pinnedPanes: controller.session.pinnedCells.sorted())
+            pinnedPanes: controller.session.pinnedCells.sorted(), tabBarPosition: controller.tabBarPosition)
     }
 
     /// Restores the workspace's windows to their original positions and closes it; closing the last workspace quits.

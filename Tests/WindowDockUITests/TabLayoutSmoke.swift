@@ -313,11 +313,9 @@ enum TabLayoutSmoke {
                 toScreen: pane.convert(NSPoint(x: pane.bounds.midX, y: pane.bounds.midY), to: nil))
             _ = chrome.updateFloatingTab(pasteboard: board, source: source, screenPoint: panePoint)
             if pane.subviews.contains(where: { $0 is WorkspaceTabDropOverlay })
-                || chrome.tabDragPreviewPanel?.isVisible == true
-                || (source.superview as? WorkspaceTabGroup)?.isFloating != true
+                || chrome.tabDragPreviewPanel?.isVisible != true
             {
-                failures.append(
-                    "a single pane offered a meaningless move-here target instead of keeping the tab in the strip")
+                failures.append("a single pane did not show the detached-tab preview without a pane target")
             }
             chrome.endTabDrag()
         }
@@ -580,26 +578,43 @@ enum TabLayoutSmoke {
         } else {
             failures.append("the tab insertion line was not created")
         }
-        otherChrome.showWindowDropTarget(at: otherHost.convertPoint(toScreen: tabPoint), requiresPermission: false)
-        if let panel = otherChrome.windowDropPanel {
-            let messages =
-                panel.contentView?.subviews.compactMap { view -> String? in
-                    guard let label = view as? NSTextField, !label.isHidden else { return nil }
-                    return label.stringValue
-                } ?? []
-            if panel.frame.width != otherChrome.bounds.width || panel.frame.height != 34
-                || !messages.contains(L("ここで離すとタブに追加")) || !panel.ignoresMouseEvents || panel.isKeyWindow
+        otherChrome.showWindowDropTarget(
+            at: otherHost.convertPoint(toScreen: tabPoint), requiresPermission: false,
+            application: .current, title: "Dragged window")
+        if let preview = otherChrome.windowDropPreview {
+            if otherChrome.tabs.arrangedSubviews.firstIndex(of: preview) != 1
+                || preview.alphaValue >= 1 || otherChrome.windowDropPanel?.isVisible != true
+                || otherChrome.windowDropPanel?.ignoresMouseEvents != true
+                || (otherChrome.windowDropPanel?.frame.width ?? 0) <= preview.frame.width
+                || (otherChrome.windowDropPanel?.level ?? .normal) <= .normal
+                || (preview as? NSStackView)?.arrangedSubviews.compactMap({ $0 as? NSButton })
+                .first?.title != "Dragged window"
                 || NSApp.keyWindow !== previousKey
             {
-                failures.append("ordinary window addition did not restore the nonactivating blue toolbar message")
+                failures.append("ordinary window addition did not show the tab bar and insertion preview in front")
+            }
+            otherChrome.layoutSubtreeIfNeeded()
+            let previewPoint = otherHost.convertPoint(
+                toScreen: preview.convert(NSPoint(x: preview.bounds.midX, y: preview.bounds.midY), to: nil))
+            if otherChrome.tabInsertionIndex(at: previewPoint) != 1 {
+                failures.append("the preview did not preserve the insertion index under the pointer")
+            }
+            let last = otherChrome.tabs.arrangedSubviews.last!
+            let endPoint = otherHost.convertPoint(
+                toScreen: last.convert(NSPoint(x: last.bounds.maxX - 1, y: last.bounds.midY), to: nil))
+            otherChrome.showWindowDropTarget(at: endPoint, requiresPermission: false)
+            if otherChrome.tabs.arrangedSubviews.last !== preview
+                || otherChrome.tabInsertionIndex(at: endPoint) != 3
+            {
+                failures.append("the translucent preview did not follow the insertion position")
             }
         } else {
-            failures.append("the ordinary window-addition bar was not created")
+            failures.append("the ordinary window-addition preview was not created")
         }
         _ = destinationButton.draggingUpdated(tabInfo)
         if otherChrome.windowDropPanel?.frame != tabMarkerFrame
             || otherChrome.windowDropPanel?.contentView?.subviews.contains(where: { !$0.isHidden && $0 is NSTextField })
-            == true
+            == true || otherChrome.windowDropPreview != nil
         {
             failures.append("switching from window addition to tab transfer retained a wide bar or visible label")
         }
@@ -683,7 +698,7 @@ enum TabLayoutSmoke {
                 failures.append("mouse tracking lost its transfer token before completion")
             }
             mouseCompletions.append((point, cancelled))
-            if !cancelled, host.frame.contains(point) {
+            if !cancelled, host.frame.contains(point), chrome.tabRowContains(point) || chrome.gridAreas.count > 1 {
                 _ = chrome.completeTabDrop(pasteboard: board, source: source, screenPoint: point)
             }
         }
@@ -791,11 +806,9 @@ enum TabLayoutSmoke {
         let onlyPane = chrome.gridAreas[0]
         let onlyPaneY = onlyPane.convert(NSPoint(x: 0, y: onlyPane.bounds.midY), to: nil).y
         replayTabDrag(to: host.convertPoint(toScreen: NSPoint(x: destinationX, y: onlyPaneY)), escape: false)
-        var expectedOrder = Array(0 ..< tabViews.count)
-        expectedOrder.swapAt(sourceIndex, neighborIndex)
-        if movedCell != nil || committedOrder != expectedOrder {
+        if movedCell != nil || committedOrder != nil {
             failures.append(
-                "releasing a tab over the only pane did not reorder it like the tab bar: moved=\(String(describing: movedCell)) order=\(String(describing: committedOrder)) expected=\(expectedOrder) tag=\(source.tag)")
+                "releasing a tab over the only pane unexpectedly reordered or moved it: moved=\(String(describing: movedCell)) order=\(String(describing: committedOrder))")
         }
         // Another app activated during the drag may receive its mouse-up; tracking must end once the button is up.
         let completionsBeforeLostRelease = mouseCompletions.count
@@ -843,11 +856,190 @@ enum TabLayoutSmoke {
             failures.append("auto-hidden toolbar remained visible after leaving it")
         }
         autoHideController.window.orderOut(nil)
+        failures += positionChecks()
         if failures.isEmpty {
             print("PASS: tab layout, cross-workspace drops, actual tab mouse release/Escape, and movement masks")
             exit(0)
         }
         failures.forEach { fputs("FAIL: \($0)\n", stderr) }
         exit(1)
+    }
+
+    @MainActor
+    private static func positionChecks() -> [String] {
+        var failures: [String] = []
+        let host = WorkspaceWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 720, height: 480),
+            styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        let chrome = WorkspaceChromeView(frame: .zero)
+        host.contentView = chrome
+        chrome.workspaceButton.title = "Workspace"
+        for index in 0 ..< 20 {
+            let tab = chrome.appendTab(title: "Window \(index)", selected: index == 0)
+            tab.select.tag = index
+        }
+        host.orderFrontRegardless()
+        defer { host.close() }
+        func settle() {
+            for _ in 0 ..< 4 {
+                chrome.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+        }
+        for position in TabBarPosition.allCases {
+            chrome.setTabBarPosition(position)
+            settle()
+            let stage = chrome.stage.frame
+            switch position {
+            case .top:
+                if stage.maxY > chrome.bounds.maxY - 33 { failures.append("top tab bar did not reserve space") }
+            case .bottom:
+                if stage.minY < chrome.bounds.minY + 36 { failures.append("bottom tab bar did not reserve space") }
+            case .left:
+                if stage.minX < chrome.bounds.minX + 190 { failures.append("left tab bar did not reserve space") }
+            case .right:
+                if stage.maxX > chrome.bounds.maxX - 190 { failures.append("right tab bar did not reserve space") }
+            }
+            if position.isVertical {
+                if chrome.tabs.orientation != .vertical || chrome.tabs.visibleRect.width < 175
+                    || chrome.tabs.visibleRect.height < 50 || chrome.tabs.bounds.height <= chrome.tabs.visibleRect
+                    .height
+                {
+                    failures.append("\(position): vertical tabs did not have a scrollable viewport")
+                }
+            } else if chrome.tabs.orientation != .horizontal || chrome.tabs.visibleRect.height < 28 {
+                failures.append("\(position): horizontal tabs did not have a usable viewport")
+            }
+            for control in [chrome.addButton, chrome.columnSelector, chrome.rowSelector, chrome.permissionButton] {
+                let frame = chrome.convert(control.bounds, from: control)
+                if frame.isEmpty || !chrome.bounds.contains(frame) {
+                    failures.append("\(position): toolbar control was clipped")
+                }
+            }
+            guard let last = chrome.tabs.arrangedSubviews.last else {
+                failures.append("\(position): tabs disappeared")
+                continue
+            }
+            chrome.revealTab(last)
+            settle()
+            if !chrome.tabs.visibleRect.contains(last.frame) {
+                failures.append("\(position): last tab could not be revealed")
+            }
+            let point = position.isVertical
+                ? NSPoint(x: last.bounds.midX, y: last.bounds.maxY - 1)
+                : NSPoint(x: last.bounds.minX + 1, y: last.bounds.midY)
+            let screenPoint = host.convertPoint(toScreen: last.convert(point, to: nil))
+            if chrome.tabInsertionIndex(at: screenPoint) != 19 {
+                failures.append("\(position): insertion index did not follow tab order")
+            }
+            chrome.showWindowDropTarget(at: screenPoint, requiresPermission: false)
+            if chrome.windowDropPreview == nil || chrome.windowDropPanel?.isVisible != true
+                || chrome.tabInsertionIndex(at: screenPoint) != 19
+            {
+                failures.append("\(position): window drop preview was missing or misplaced")
+            }
+            chrome.hideWindowDropTarget()
+            if position.isVertical {
+                let sourceGroup = chrome.tabs.arrangedSubviews[18] as! WorkspaceTabGroup
+                let source = sourceGroup.arrangedSubviews.first as! WorkspaceTabButton
+                let originalOrder = chrome.tabs.arrangedSubviews.compactMap {
+                    ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? WorkspaceTabButton
+                }.map(\.tag)
+                var committed: [Int]?
+                chrome.onReorderTabs = { committed = $0 }
+                let board = NSPasteboard.withUniqueName()
+                board.setString("vertical-reorder", forType: workspaceTabDragType)
+                chrome.beginTabDrag(source: source, token: "vertical-reorder")
+                let destination = host.convertPoint(
+                    toScreen: last.convert(NSPoint(x: last.bounds.midX, y: last.bounds.minY + 1), to: nil))
+                _ = chrome.updateFloatingTab(pasteboard: board, source: source, screenPoint: destination)
+                let dropped = chrome.performTabReorder(
+                    pasteboard: board, source: source, screenPoint: destination)
+                var expected = originalOrder
+                expected.append(expected.remove(at: 18))
+                if !dropped || committed != expected {
+                    failures.append("\(position): vertical tab reorder did not follow the pointer")
+                }
+                board.releaseGlobally()
+
+                let incoming = NSButton(title: "Incoming", target: nil, action: nil)
+                let incomingBoard = NSPasteboard.withUniqueName()
+                incomingBoard.setString("incoming", forType: workspaceTabDragType)
+                chrome.acceptsExternalTab = { token, button in token == "incoming" && button === incoming }
+                var receivedIndex: Int?
+                chrome.onExternalTabDrop = { _, _, index, _ in
+                    receivedIndex = index
+                    return true
+                }
+                let target = chrome.tabs.arrangedSubviews[18]
+                chrome.revealTab(target)
+                settle()
+                let incomingPoint = host.convertPoint(
+                    toScreen: target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.maxY - 1), to: nil))
+                let expectedIndex = chrome.tabInsertionIndex(at: incomingPoint)
+                _ = chrome.updateFloatingTab(pasteboard: incomingBoard, source: incoming, screenPoint: incomingPoint)
+                if chrome.windowDropPanel?.frame.height != 3 || (chrome.windowDropPanel?.frame.width ?? 0) < 40
+                    || !chrome.completeTabDrop(
+                        pasteboard: incomingBoard, source: incoming, screenPoint: incomingPoint)
+                    || receivedIndex != expectedIndex
+                {
+                    failures.append("\(position): incoming tab marker or insertion index was incorrect")
+                }
+                incomingBoard.releaseGlobally()
+                chrome.acceptsExternalTab = nil
+                chrome.onExternalTabDrop = nil
+            }
+            chrome.setAutoHideTabBar(true)
+            chrome.setAutoHiddenToolbarVisible(true)
+            settle()
+            let expanded = chrome.stage.frame
+            if position.isVertical ? expanded.width < stage.width + 180 : expanded.height < stage.height + 30 {
+                failures.append("\(position): auto-hide did not reclaim the tab bar area")
+            }
+            if chrome.autoHiddenToolbarPanel?.isVisible != true
+                || !host.frame.contains(chrome.toolbarHoverFrame)
+            {
+                failures.append("\(position): auto-hidden toolbar or edge hover area was missing")
+            }
+            if let panel = chrome.autoHiddenToolbarPanel {
+                chrome.showWindowDropTarget(
+                    at: NSPoint(x: panel.frame.midX, y: panel.frame.midY), requiresPermission: false)
+                if chrome.windowDropPreview == nil || chrome.windowDropPanel?.frame != panel.frame {
+                    failures.append("\(position): auto-hidden window drop preview was not shown on its bar")
+                }
+                chrome.hideWindowDropTarget()
+            }
+            chrome.setAutoHideTabBar(false)
+            settle()
+        }
+        do {
+            let old = try JSONDecoder().decode(SavedWorkspace.self, from: Data(#"{"name":"old","windows":[]}"#.utf8))
+            if old.tabBarPosition != nil { failures.append("old layouts did not preserve the default tab position") }
+            let saved = SavedWorkspace(name: "Saved", windows: [], tabBarPosition: .right)
+            let restored = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(saved))
+            let controller = WorkspaceController(name: "Position")
+            controller.restoreLayout(restored)
+            if controller.tabBarPosition != .right {
+                failures.append("tab bar position did not survive restoring a saved workspace")
+            }
+            let menu = controller.tabBarPositionMenu()
+            menu.update()
+            if menu.items.count != 4 || menu.items[3].state != .on {
+                failures.append("tab bar position menu did not reflect the restored position")
+            } else if let action = menu.items[1].action {
+                _ = NSApp.sendAction(action, to: menu.items[1].target, from: menu.items[1])
+                if controller.tabBarPosition != .bottom {
+                    failures.append("tab bar position menu did not change the workspace")
+                }
+            } else {
+                failures.append("tab bar position menu did not offer an action")
+            }
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        } catch {
+            failures.append("tab bar position persistence failed: \(error)")
+        }
+        return failures
     }
 }

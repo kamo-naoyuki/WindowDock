@@ -7,10 +7,12 @@ final class WorkspaceTabDragRouteTests: XCTestCase {
     private let destination = CGRect(x: 1000, y: 0, width: 800, height: 600)
 
     private func route(
-        _ point: CGPoint, inSourceTabRow: Bool = false, destinations: [CGRect]? = nil, inFront: Int = 0
+        _ point: CGPoint, inSourceTabRow: Bool = false, multiplePanes: Bool = true,
+        destinations: [CGRect]? = nil, inFront: Int = 0
     ) -> WorkspaceTabDragRoute {
         WorkspaceTabDragRoute.resolve(
             at: point, sourceFrame: source, sourceTabRowContains: inSourceTabRow,
+            sourceHasMultiplePanes: multiplePanes,
             destinationFrames: destinations ?? [destination], destinationsInFront: inFront
         )
     }
@@ -53,6 +55,16 @@ final class WorkspaceTabDragRouteTests: XCTestCase {
     func testSourceBodyKeepsTabInSourceForPaneMoves() {
         XCTAssertEqual(route(CGPoint(x: 400, y: 300)), .source)
         XCTAssertEqual(route(CGPoint(x: 400, y: 300), destinations: []), .source)
+    }
+
+    func testSinglePaneOutsideTabRowUsesOutsideActionWithoutTargetingWorkspacesBehind() {
+        let body = CGPoint(x: 700, y: 400)
+        let overlapping = CGRect(x: 600, y: 300, width: 800, height: 600)
+        XCTAssertEqual(route(body, multiplePanes: false, destinations: []), .none)
+        XCTAssertEqual(route(body, multiplePanes: false, destinations: [overlapping]), .none)
+        XCTAssertEqual(route(body, inSourceTabRow: true, multiplePanes: false, destinations: [overlapping]), .source)
+        XCTAssertEqual(route(body, multiplePanes: false, destinations: [overlapping], inFront: 1), .transfer(0))
+        XCTAssertEqual(route(CGPoint(x: 1200, y: 300), multiplePanes: false), .transfer(0))
     }
 
     func testReleasingAwayFromEveryWorkspaceDoesNothing() {

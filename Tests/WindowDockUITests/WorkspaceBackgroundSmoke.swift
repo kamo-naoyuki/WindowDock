@@ -54,8 +54,11 @@ enum WorkspaceBackgroundSmoke {
             let nestedOnly = CommandLine.arguments.contains("--nested-split-only")
             let focusOnly = CommandLine.arguments.contains("--focus-sync-only")
             let refitOnly = CommandLine.arguments.contains("--window-refit-only")
+            let constraintOnly = CommandLine.arguments.contains("--constraint-notice-only")
             let failures: [String]
-            if refitOnly {
+            if constraintOnly {
+                failures = WindowSessionSmoke.runConstraintNoticeChecks()
+            } else if refitOnly {
                 failures = WindowSessionSmoke.runDisplacedWindowChecks()
             } else if focusOnly {
                 failures = WindowSessionSmoke.runExternalFocusChecks()
@@ -66,11 +69,12 @@ enum WorkspaceBackgroundSmoke {
                         + WindowSessionSmoke.runNestedPaneUIChecks() + WindowSessionSmoke.runNestedPaneLimitChecks()
                         + WindowSessionSmoke.runNestedPaneMinimumChecks() + checkGridLayout() + checkTabMoveRouting()
             } else if dropOnly {
-                failures = checkNativeWindowDrops()
+                failures = WindowSessionSmoke.runExternalWindowDropChecks() + checkNativeWindowDrops()
             } else if shortcutOnly {
                 failures = WindowSessionSmoke.runShortcutChecks()
             } else if focused {
                 failures = checkTabMoveRouting() + WindowSessionSmoke.runTabTransferRevealChecks()
+                    + WindowSessionSmoke.runOutsideTabDropChecks()
             } else if activationOnly {
                 failures =
                     WindowSessionSmoke.runFrontWindowOnlyActivationChecks()
@@ -91,6 +95,8 @@ enum WorkspaceBackgroundSmoke {
                 print(
                     nestedOnly
                         ? "PASS: nested pane menus, layout, resizing, persistence, tab reflow and routing"
+                        : constraintOnly
+                        ? "PASS: window constraint notices"
                         : dropOnly
                         ? "PASS: native WindowServer move/release sampling and nonactivating drop feedback"
                         : focused
@@ -190,27 +196,37 @@ enum WorkspaceBackgroundSmoke {
                 toScreen: chrome.addButton.convert(
                     NSPoint(x: chrome.addButton.bounds.midX, y: chrome.addButton.bounds.midY), to: nil))
             chrome.showWindowDropTarget(at: dropPoint, requiresPermission: false)
-            guard let panel = chrome.windowDropPanel else { return failures + ["drop target panel was not created"] }
             flush()
-            if !panel.isVisible || panel.level <= .normal || !panel.ignoresMouseEvents || panel.isKeyWindow
-                || NSApp.keyWindow !== previousKey
-            {
-                failures.append("drop feedback was hidden, stole focus or blocked mouse input")
-            }
-            let point = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
-            if !chrome.acceptsWindowDrop(at: point) {
-                failures.append("visible drop target was outside the actual accepted area")
-            }
-            if NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == panel.windowNumber {
-                failures.append("drop indicator intercepted the window move")
+            if chrome.windowDropPreview == nil || NSApp.keyWindow !== previousKey {
+                failures.append("drop preview was hidden or stole focus")
             }
             chrome.showWindowDropTarget(at: dropPoint, requiresPermission: true)
+            guard let panel = chrome.windowDropPanel else { return failures + ["permission feedback was not created"] }
             let messages = panel.contentView?.subviews.compactMap { ($0 as? NSTextField)?.stringValue } ?? []
-            if !messages.contains(L("追加にはアクセシビリティの許可が必要です")) {
+            if !messages.contains(L("追加にはアクセシビリティの許可が必要です")) || chrome.windowDropPreview != nil
+                || !panel.ignoresMouseEvents || panel.isKeyWindow
+            {
                 failures.append("unauthorized drops showed no permission explanation")
             }
             chrome.hideWindowDropTarget()
-            if panel.isVisible { failures.append("drop feedback persisted after completion/cancellation") }
+            if panel.isVisible || chrome.windowDropPreview != nil {
+                failures.append("drop feedback persisted after completion/cancellation")
+            }
+            chrome.setAutoHideTabBar(true)
+            chrome.setAutoHiddenToolbarVisible(true)
+            if let toolbar = chrome.autoHiddenToolbarPanel {
+                let point = NSPoint(x: toolbar.frame.midX, y: toolbar.frame.midY)
+                chrome.showWindowDropTarget(at: point, requiresPermission: false)
+                if !panel.isVisible || panel.frame != toolbar.frame || !panel.ignoresMouseEvents
+                    || panel.isKeyWindow || NSApp.keyWindow !== previousKey
+                {
+                    failures.append("auto-hidden tab bar was not shown in front without intercepting the drag")
+                }
+                chrome.hideWindowDropTarget()
+            } else {
+                failures.append("auto-hidden toolbar was not created")
+            }
+            chrome.setAutoHideTabBar(false)
         } catch {
             failures.append("native window drop check failed: \(error.localizedDescription)")
         }

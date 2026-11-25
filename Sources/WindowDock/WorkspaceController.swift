@@ -104,6 +104,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             autoHide.target = self
             autoHide.state = self?.autoHideTabs == true ? .on : .off
             menu.addItem(autoHide)
+            let position = menu.addItem(withTitle: L("タブバーの位置"), action: nil, keyEquivalent: "")
+            position.submenu = self?.tabBarPositionMenu()
             let pane = menu.addItem(withTitle: L("ペイン"), action: nil, keyEquivalent: "")
             pane.submenu = self?.activePaneMenu()
             menu.addItem(.separator())
@@ -196,6 +198,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.onSessionChange?(self)
         }
         session.onMessage = { [weak self] message in self?.showNotice(message) }
+        session.onConstraintWarningCleared = { [weak self] text in
+            guard let self, self.workspace.currentNoticeText == text else { return }
+            self.showNotice(.information(L("⌃ Tab / ⌃ ⇧ Tab でタブを切替")))
+        }
         session.onPresentedFrames = { [weak self] frames in
             guard let self else { return }
             self.coverageGeneration += 1
@@ -375,6 +381,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     func activePaneMenu() -> NSMenu { workspace.paneMenu(for: session.activeCell) }
 
     func restoreLayout(_ saved: SavedWorkspace) {
+        setTabBarPosition(saved.tabBarPosition ?? .top)
         setAutoHideTabs(saved.autoHideTabs ?? false)
         if let layout = saved.paneLayout {
             session.setCustomLayout(layout)
@@ -382,6 +389,36 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             session.setGrid(grid)
         }
         session.setPinnedCells(saved.pinnedPanes ?? [])
+    }
+
+    var tabBarPosition: TabBarPosition { workspace.tabBarPosition }
+
+    func setTabBarPosition(_ position: TabBarPosition) {
+        guard position != tabBarPosition else { return }
+        workspace.setTabBarPosition(position)
+        tabBarHoverStart = nil
+        syncIfVisible()
+        onSessionChange?(self)
+    }
+
+    func tabBarPositionMenu() -> NSMenu {
+        let menu = NSMenu()
+        for (index, position) in TabBarPosition.allCases.enumerated() {
+            let item = menu.addItem(
+                withTitle: position.title,
+                action: #selector(changeTabBarPosition(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = index
+            item.state = position == tabBarPosition ? .on : .off
+        }
+        return menu
+    }
+
+    @objc private func changeTabBarPosition(_ item: NSMenuItem) {
+        guard TabBarPosition.allCases.indices.contains(item.tag) else { return }
+        setTabBarPosition(TabBarPosition.allCases[item.tag])
     }
 
     @objc private func toggleAutoHideTabs() {
@@ -634,20 +671,22 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         workspace.completeTabDrop(pasteboard: pasteboard, source: source, screenPoint: point)
     }
 
-    func showWindowDropTarget(at point: NSPoint) {
+    func showWindowDropTarget(at point: NSPoint, application: NSRunningApplication?, title: String?) {
         guard acceptsWindowDrag else { return hideWindowDropTarget() }
         workspace.showWindowDropTarget(
-            at: point, requiresPermission: !WindowAccess.isTrusted
+            at: point, requiresPermission: !WindowAccess.isTrusted, application: application, title: title
         )
     }
 
     func hideWindowDropTarget() { workspace.hideWindowDropTarget() }
 
+    func windowDropInsertionIndex(at point: NSPoint) -> Int { workspace.tabInsertionIndex(at: point) }
+
     func acceptsWindowDrop(at point: NSPoint) -> Bool {
         acceptsWindowDrag && workspace.acceptsWindowDrop(at: point)
     }
 
-    func finishWindowDrag(_ drag: WorkspaceWindowDrag, accessibilityPoint: CGPoint, screenPoint: NSPoint) {
+    func finishWindowDrag(_ drag: WorkspaceWindowDrag, accessibilityPoint: CGPoint, insertionIndex: Int) {
         guard WindowAccess.isTrusted else {
             WindowAccess.requestPermission()
             showNotice(.attention(L("追加にはアクセシビリティ権限が必要です。システム設定で現在の WindowDock を許可してください。")))
@@ -667,7 +706,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
                 showNotice(.information(L("このウィンドウは別のワークスペースに登録されています。")))
             } else {
                 session.add(
-                    candidate, originalFrame: drag.originalFrame, at: workspace.tabInsertionIndex(at: screenPoint)
+                    candidate, originalFrame: drag.originalFrame, at: insertionIndex
                 )
             }
         } catch {

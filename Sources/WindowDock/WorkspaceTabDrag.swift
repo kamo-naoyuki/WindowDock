@@ -3,6 +3,58 @@ import WindowDockCore
 
 let workspaceTabDragType = NSPasteboard.PasteboardType("local.windowdock.tab-move")
 
+enum TabOutsideDropAction: String, CaseIterable {
+    case release
+    case newWorkspace
+    case nothing
+
+    var title: String {
+        switch self {
+        case .release: L("タブを解除")
+        case .newWorkspace: L("ワークスペースを作成")
+        case .nothing: L("何もしない")
+        }
+    }
+}
+
+@MainActor
+final class TabOutsideDropSettings: NSObject {
+    private static let key = "tabOutsideDropAction"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    var action: TabOutsideDropAction {
+        guard let value = defaults.string(forKey: Self.key) else { return .release }
+        guard let action = TabOutsideDropAction(rawValue: value) else {
+            WindowAccess.logger.error("Invalid tab outside drop action: \(value, privacy: .public)")
+            return .release
+        }
+        return action
+    }
+
+    func menu() -> NSMenu {
+        let menu = NSMenu()
+        for action in TabOutsideDropAction.allCases {
+            let item = menu.addItem(withTitle: action.title, action: #selector(selectAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            item.state = action == self.action ? .on : .off
+        }
+        return menu
+    }
+
+    @objc private func selectAction(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String, TabOutsideDropAction(rawValue: value) != nil else {
+            WindowAccess.logger.error("Invalid tab outside drop menu selection")
+            return
+        }
+        defaults.set(value, forKey: Self.key)
+    }
+}
+
 extension NSDraggingInfo {
     fileprivate var tabDragScreenPoint: NSPoint? {
         draggingDestinationWindow?.convertPoint(toScreen: draggingLocation)
@@ -291,6 +343,10 @@ final class WorkspaceTabTransfer {
     var onBegin: () -> Void = {}
     /// Called after a tab moved from the first workspace to the second.
     var onTransfer: (WorkspaceController, WorkspaceController) -> Void = { _, _ in }
+    var outsideDropAction: () -> TabOutsideDropAction = { .release }
+    var createWorkspace: (NSPoint) -> WorkspaceController? = { _ in nil }
+    var discardWorkspace: (WorkspaceController) -> Void = { _ in }
+    var onRelease: (WorkspaceController) -> Void = { _ in }
 
     private var drag: Drag?
     private var revealed: WorkspaceController?
@@ -338,9 +394,10 @@ final class WorkspaceTabTransfer {
         for controller in controllers() where controller !== target {
             controller.hideTabTransferTargets()
         }
-        if let destination, destination !== revealed {
-            revealed = destination
-            reveal(destination)
+        let visibleWorkspace = destination ?? (drag.source.window.frame.contains(point) ? drag.source : nil)
+        if let visibleWorkspace, visibleWorkspace !== revealed {
+            revealed = visibleWorkspace
+            reveal(visibleWorkspace)
         }
         // Resolve overlaps before showing (and raising) any pane overlay.
         (destination ?? drag.source).previewTabTransfer(pasteboard: pasteboard, source: button, at: point)
@@ -370,8 +427,37 @@ final class WorkspaceTabTransfer {
 
     private func end(token: String, pasteboard: NSPasteboard, at point: NSPoint, cancelled: Bool) {
         guard let drag, drag.token == token else { return }
-        if !cancelled, drag.source.acceptsWindowDrag, let destination = self.destination(at: point, from: drag.source) {
-            _ = destination.completeTabDrop(pasteboard: pasteboard, source: drag.button, at: point)
+        if !cancelled, drag.source.acceptsWindowDrag {
+            if let destination = self.destination(at: point, from: drag.source) {
+                _ = destination.completeTabDrop(pasteboard: pasteboard, source: drag.button, at: point)
+            } else if drag.source.session.windows.contains(where: { $0.id == drag.id }) {
+                hideTargets()
+                switch outsideDropAction() {
+                case .release:
+                    if drag.source.session.remove(drag.id),
+                       !drag.source.session.windows.contains(where: { $0.id == drag.id })
+                    {
+                        onRelease(drag.source)
+                    }
+                case .newWorkspace:
+                    if let destination = createWorkspace(point) {
+                        if drag.source.session.transferWindow(drag.id, to: destination.session) {
+                            transferred = true
+                            revealed = destination
+                            onTransfer(drag.source, destination)
+                            reveal(destination)
+                            destination.makeKeyAfterReveal()
+                        } else {
+                            discardWorkspace(destination)
+                        }
+                    } else {
+                        WindowAccess.logger.error("Could not create a workspace for the dropped tab")
+                        drag.source.showNotice(.attention(L("タブを移動できませんでした。移動先と対象ウィンドウを確認してください。")))
+                    }
+                case .nothing:
+                    break
+                }
+            }
         }
         // The tab stayed in its workspace, so bring that workspace back in front of those it passed over.
         let restoresSource = !transferred && revealed !== drag.source
@@ -407,6 +493,7 @@ final class WorkspaceTabTransfer {
         }
         switch WorkspaceTabDragRoute.resolve(
             at: point, sourceFrame: source.window.frame, sourceTabRowContains: source.tabRowContains(point),
+            sourceHasMultiplePanes: source.session.isSplit,
             destinationFrames: candidates.map { $0.window.frame }, destinationsInFront: destinationsInFront ?? 0
         ) {
         case .none: return nil

@@ -165,6 +165,9 @@ enum WindowSessionSmoke {
         session.secondaryTargetFrame = { model.rightTarget }
         session.targetFrames = { model.gridTargets ?? [0: model.target, 1: model.rightTarget] }
         session.onMessage = { model.notices.append($0) }
+        session.onConstraintWarningCleared = { text in
+            if model.notices.last?.text == text { model.notices.append(.information("Recovered")) }
+        }
         session.onPresentedFrame = { model.presentedFrames.append($0) }
         session.onPresentedFrames = { model.paneFrames = $0 }
         session.onChange = { model.changeCount += 1 }
@@ -882,12 +885,15 @@ enum WindowSessionSmoke {
         let grab = CGPoint(x: start.minX + 40, y: start.minY + 10)
         let moved = start.offsetBy(dx: axDrop.x - grab.x, dy: axDrop.y - grab.y)
 
-        func run(dragging number: CGWindowID, windowID: @escaping (AXUIElement) -> CGWindowID?) -> (
-            shown: Bool, finished: Bool) {
+        func run(
+            dragging number: CGWindowID, windowID: @escaping (AXUIElement) -> CGWindowID?,
+            releaseOutside: Bool = false) -> (
+            shownBeforeHover: Bool, shown: Bool, finished: Bool) {
             let coordinator = WorkspaceWindowDrop { [controller] }
             var pointer = WorkspaceWindowDrop.Pointer(location: .zero, buttonDown: false)
             var frame = start
             var finished: [WorkspaceController] = []
+            var finishedIndex: Int?
             coordinator.pointer = { pointer }
             coordinator.windows = { [WindowServerWindow(id: number, processID: pid, frame: frame), workspace] }
             // The harness owns both fake windows, so only the workspace must not count as its own app.
@@ -895,18 +901,28 @@ enum WindowSessionSmoke {
             coordinator.isRegularApplication = { _ in true }
             coordinator.windowID = windowID
             coordinator.resolve = { _ in throw InjectedFailure() }
-            coordinator.finish = { target, _, _, _ in finished.append(target) }
+            coordinator.finish = { target, _, _, index in
+                finished.append(target)
+                finishedIndex = index
+            }
             func sample(_ point: CGPoint, down: Bool) {
                 pointer = .init(location: NSPoint(x: point.x, y: screen.frame.maxY - point.y), buttonDown: down)
                 coordinator.poll()
             }
             sample(grab, down: false)
             sample(grab, down: true)
+            frame = start.offsetBy(dx: 30, dy: 0)
+            sample(CGPoint(x: grab.x + 30, y: grab.y), down: true)
+            let shownBeforeHover = chrome.windowDropPanel?.isVisible == true && chrome.windowDropPreview == nil
+            if releaseOutside {
+                sample(CGPoint(x: grab.x + 30, y: grab.y), down: false)
+                return (shownBeforeHover, chrome.windowDropPanel?.isVisible == true, !finished.isEmpty)
+            }
             frame = moved
             sample(axDrop, down: true)
-            let shown = chrome.windowDropPanel?.isVisible == true
+            let shown = chrome.windowDropPanel?.isVisible == true || chrome.windowDropPreview != nil
             sample(axDrop, down: false)
-            return (shown, finished.count == 1 && finished.first === controller)
+            return (shownBeforeHover, shown, finished.count == 1 && finished.first === controller && finishedIndex == 1)
         }
 
         var failures: [String] = []
@@ -914,6 +930,9 @@ enum WindowSessionSmoke {
             CFEqual(element, model.windows[0].element) ? registeredNumber : nil
         }
         let sibling = run(dragging: draggedNumber, windowID: numbers)
+        if sibling.shownBeforeHover {
+            failures.append("a dragged window showed the tab bar before reaching the workspace")
+        }
         if !sibling.shown {
             failures.append(
                 "dragging an unregistered window over the tab bar showed no drop target when another window of its app was registered")
@@ -922,13 +941,19 @@ enum WindowSessionSmoke {
             failures.append(
                 "releasing an unregistered window on the tab bar did not add it when another window of its app was registered")
         }
-        if chrome.windowDropPanel?.isVisible == true { failures.append("the drop target stayed visible after release") }
+        let outside = run(dragging: draggedNumber, windowID: numbers, releaseOutside: true)
+        if outside.shownBeforeHover || outside.shown || outside.finished {
+            failures.append("a drag released outside the workspace did not dismiss its tab bar")
+        }
+        if chrome.windowDropPanel?.isVisible == true || chrome.windowDropPreview != nil {
+            failures.append("the drop target stayed visible after release")
+        }
         let fallback = run(dragging: draggedNumber, windowID: { _ in nil })
         if !fallback.shown || !fallback.finished {
             failures.append("a window whose moving frame could not be matched was not added: \(fallback)")
         }
         let registered = run(dragging: registeredNumber, windowID: numbers)
-        if registered.shown || registered.finished {
+        if registered.shownBeforeHover || registered.shown || registered.finished {
             failures.append("dragging an already registered window offered it for addition: \(registered)")
         }
         return failures
@@ -1241,6 +1266,74 @@ enum WindowSessionSmoke {
         if model.notices.last?.needsAttention != true {
             failures.append("returning to the constrained tab did not restore its warning")
         }
+        RunLoop.current.run(until: Date().addingTimeInterval(3.2))
+        if model.notices.last?.needsAttention == true {
+            failures.append("a window that stayed fitted did not clear its warning")
+        }
+
+        model.windows[0].minimumSize.width = model.target.width + 100
+        model.target.size.width -= 1
+        session.sync()
+        model.windows[0].minimumSize = .zero
+        model.target.origin.x += 1
+        session.sync()
+        RunLoop.current.run(until: Date().addingTimeInterval(1.6))
+        model.windows[0].minimumSize.width = model.target.width + 100
+        model.target.size.width -= 1
+        session.sync()
+        model.windows[0].minimumSize = .zero
+        model.target.origin.x += 1
+        session.sync()
+        RunLoop.current.run(until: Date().addingTimeInterval(1.6))
+        if model.notices.last?.needsAttention != true {
+            failures.append("a renewed mismatch did not restart the warning recovery delay")
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(1.6))
+        if model.notices.last?.needsAttention == true {
+            failures.append("a warning did not clear after the restarted recovery delay")
+        }
+
+        model.windows[0].minimumSize.width = model.target.width + 100
+        model.target.size.width -= 1
+        session.sync()
+        model.windows[0].minimumSize = .zero
+        model.target.origin.x += 1
+        session.sync()
+        model.windows[0].frame.origin.x += 50
+        RunLoop.current.run(until: Date().addingTimeInterval(3.2))
+        if model.notices.last?.needsAttention != true {
+            failures.append("a warning cleared without checking the current window frame")
+        }
+        session.sync()
+        RunLoop.current.run(until: Date().addingTimeInterval(3.2))
+        if model.notices.last?.needsAttention == true {
+            failures.append("a warning did not clear after the displaced window was refitted")
+        }
+        model.windows[0].minimumSize.width = model.target.width + 100
+        model.target.size.width -= 1
+        session.sync()
+        model.windows[0].minimumSize = .zero
+        model.target.origin.x += 1
+        session.sync()
+        model.notices.append(.attention("Another problem"))
+        RunLoop.current.run(until: Date().addingTimeInterval(3.2))
+        if model.notices.last?.text != "Another problem" {
+            failures.append("clearing a fit warning replaced an unrelated notice")
+        }
+
+        let (settlingSession, settlingModel) = fixture(registering: [0], windowCount: 1)
+        settlingModel.windows[0].minimumSize.width = settlingModel.target.width + 100
+        settlingModel.target.size.width -= 1
+        settlingSession.sync()
+        settlingModel.windows[0].frame = settlingModel.target
+        RunLoop.current.run(until: Date().addingTimeInterval(3.2))
+        if settlingModel.notices.last?.needsAttention != true {
+            failures.append("a window that settled without a sync cleared its warning too soon")
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(3.2))
+        if settlingModel.notices.last?.needsAttention == true {
+            failures.append("a window that settled without a sync kept its warning")
+        }
         return failures
     }
 
@@ -1476,6 +1569,171 @@ enum WindowSessionSmoke {
         third.pruneClosedWindows()
         if !manages(third, 2) || third.windows.count != 1 {
             failures.append("a tab with a stale element was not re-resolved to its app's unclaimed window")
+        }
+        return failures
+    }
+
+    static func runOutsideTabDropChecks() -> [String] {
+        var failures: [String] = []
+        let suite = "WindowDockOutsideDropSmoke-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { return ["could not create isolated settings"] }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = TabOutsideDropSettings(defaults: defaults)
+        if settings.action != .release { failures.append("outside drop did not default to release") }
+        let menu = settings.menu()
+        if menu.items.count != 3 || menu.items.map(\.state) != [.on, .off, .off] {
+            failures.append("outside drop settings menu did not show three options with release selected")
+        }
+        for (index, action) in TabOutsideDropAction.allCases.enumerated() where menu.items.indices.contains(index) {
+            let item = menu.items[index]
+            if let selector = item.action { NSApp.sendAction(selector, to: item.target, from: item) }
+            if TabOutsideDropSettings(defaults: defaults).action != action
+                || settings.menu().items[index].state != .on
+            {
+                failures.append("outside drop setting did not persist or show selection: \(action)")
+            }
+        }
+
+        let model = Model(windowCount: 1)
+        let source = WorkspaceController(name: "Outside source", access: access(for: model))
+        var created: [WorkspaceController] = []
+        defer {
+            for controller in [source] + created {
+                controller.hideTabTransferTargets()
+                controller.quitting = true
+                controller.window.orderOut(nil)
+            }
+        }
+        guard let chrome = source.window.contentView as? WorkspaceChromeView else {
+            return failures + ["outside drop fixture has no chrome"]
+        }
+        source.window.orderFrontRegardless()
+        let candidate = WindowCandidate(element: model.windows[0].element, application: .current, title: "Outside")
+        source.session.add(candidate)
+        let originalID = source.session.windows[0].id
+        let transfer = WorkspaceTabTransfer { [source] + created }
+        var action: TabOutsideDropAction = .nothing
+        var releases = 0
+        var transfers = 0
+        var creationPoint: NSPoint?
+        var duplicateOnCreate = false
+        var discards = 0
+        transfer.outsideDropAction = { action }
+        transfer.onRelease = { _ in releases += 1 }
+        transfer.onTransfer = { _, _ in transfers += 1 }
+        transfer.createWorkspace = { point in
+            creationPoint = point
+            let controller = WorkspaceController(name: "Created", access: access(for: model))
+            created.append(controller)
+            transfer.attach(controller)
+            controller.window.orderFrontRegardless()
+            if duplicateOnCreate { controller.session.add(candidate) }
+            return controller
+        }
+        transfer.discardWorkspace = { controller in
+            discards += 1
+            controller.window.orderOut(nil)
+        }
+        transfer.attach(source)
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let outside = NSPoint(x: source.window.frame.maxX + 500, y: source.window.frame.maxY + 500)
+        func drag(to point: NSPoint? = nil, cancelled: Bool = false) {
+            chrome.layoutSubtreeIfNeeded()
+            guard let button = (chrome.tabs.arrangedSubviews.first as? WorkspaceTabGroup)?.arrangedSubviews.first
+                as? WorkspaceTabButton else {
+                failures.append("outside drop fixture could not find a tab")
+                return
+            }
+            let token = UUID().uuidString
+            board.clearContents()
+            board.setString(token, forType: workspaceTabDragType)
+            button.onDragBegin?(button, token, NSPoint(x: 10, y: 10), NSImage(size: NSSize(width: 100, height: 28)))
+            button.onDragMove?(board, point ?? outside)
+            button.onDragEnd?(board, point ?? outside, cancelled)
+        }
+        drag()
+        if source.session.windows.map(\.id) != [originalID] || !created.isEmpty || releases != 0 {
+            failures.append("do-nothing outside drop changed the workspace")
+        }
+        action = .newWorkspace
+        drag(cancelled: true)
+        if source.session.windows.map(\.id) != [originalID] || !created.isEmpty {
+            failures.append("cancelled outside drop created a workspace or moved the tab")
+        }
+        drag()
+        if created.count != 1 || creationPoint != outside || transfers != 1 || !source.session.windows.isEmpty
+            || created.first?.session.windows.first?.id != originalID
+            || created.first?.session.windows.first?.originalFrame != model.windows[0].originalFrame
+        {
+            failures.append("outside drop did not transfer the tab to a new workspace with its original state")
+        }
+        if let destination = created.first {
+            _ = destination.session.transferWindow(originalID, to: source.session)
+            destination.window.orderOut(nil)
+        }
+        duplicateOnCreate = true
+        drag()
+        if discards != 1 || transfers != 1 || source.session.windows.map(\.id) != [originalID] {
+            failures.append("a failed new-workspace transfer did not retain the source tab and discard the workspace")
+        }
+        action = .release
+        drag()
+        if !source.session.windows.isEmpty || releases != 1 || model.windows[0].frame != model.windows[0].originalFrame
+            || !model.closeRequests.isEmpty
+        {
+            failures.append("outside release did not restore and release the window")
+        }
+        source.session.add(candidate)
+        source.session.closesWindowsOnRelease = true
+        model.onClose = { _ in throw InjectedFailure() }
+        let closeID = source.session.windows[0].id
+        drag()
+        if model.closeRequests != [0] || source.session.windows.map(\.id) != [closeID] || releases != 1 {
+            failures.append("outside release ignored the close setting or removed a tab whose close failed")
+        }
+        source.session.closesWindowsOnRelease = false
+        duplicateOnCreate = false
+        let panePoint = NSPoint(x: source.window.frame.midX, y: source.window.frame.midY)
+        action = .nothing
+        drag(to: panePoint)
+        if source.session.windows.map(\.id) != [closeID] || created.count != 2 {
+            failures.append("do-nothing over the only pane changed the workspace")
+        }
+        action = .newWorkspace
+        drag(to: panePoint, cancelled: true)
+        if source.session.windows.map(\.id) != [closeID] || created.count != 2 {
+            failures.append("cancelling over the only pane changed the workspace")
+        }
+        drag(to: panePoint)
+        if created.count != 3 || creationPoint != panePoint || transfers != 2
+            || !source.session.windows.isEmpty || created.last?.session.windows.first?.id != closeID
+        {
+            failures.append("dropping a tab over the only pane did not create a workspace")
+        }
+        if let destination = created.last, destination.session.windows.contains(where: { $0.id == closeID }) {
+            _ = destination.session.transferWindow(closeID, to: source.session)
+            destination.window.orderOut(nil)
+        }
+        source.window.orderFrontRegardless()
+        source.session.setSplit(true)
+        chrome.layoutSubtreeIfNeeded()
+        if chrome.gridAreas.count == 2 {
+            let pane = chrome.gridAreas[1]
+            let splitPoint = source.window.convertPoint(
+                toScreen: pane.convert(NSPoint(x: pane.bounds.midX, y: pane.bounds.midY), to: nil))
+            action = .release
+            drag(to: splitPoint)
+            if source.session.cells[1] != closeID || releases != 1 {
+                failures.append("dropping in a split pane did not move the tab within the workspace")
+            }
+        } else {
+            failures.append("could not create split pane fixture")
+        }
+        source.session.setSplit(false)
+        drag(to: panePoint)
+        if !source.session.windows.isEmpty || releases != 2 {
+            failures.append("dropping over the only pane did not release the tab")
         }
         return failures
     }
@@ -2049,6 +2307,7 @@ enum WindowSessionSmoke {
         failures += runDisplacedWindowChecks()
         failures += runReresolveChecks()
         failures += runTabTransferRevealChecks()
+        failures += runOutsideTabDropChecks()
         failures += runConstraintNoticeChecks()
         failures += runTransferChecks()
         failures += runRegisteredWindowDragChecks()

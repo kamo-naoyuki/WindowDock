@@ -70,6 +70,12 @@ private let translations: [String: [String]] = [
 
     "アップデートを確認…": ["Check for Updates…", "检查更新…", "업데이트 확인…", "Buscar actualizaciones…"],
     "設定": ["Settings", "设置", "설정", "Ajustes"],
+    "タブをワークスペースの外にドロップしたとき": [
+        "When dropping a tab outside a workspace", "将标签页拖放到工作区外时",
+        "탭을 작업 공간 밖에 놓을 때", "Al soltar una pestaña fuera de un espacio de trabajo",
+    ],
+    "ワークスペースを作成": ["Create Workspace", "创建工作区", "작업 공간 생성", "Crear espacio de trabajo"],
+    "何もしない": ["Do Nothing", "不执行任何操作", "아무것도 하지 않기", "No hacer nada"],
     "タブを解除するときにウィンドウも閉じる": [
         "Close windows when releasing tabs", "解除标签页时同时关闭窗口", "탭을 해제할 때 창도 닫기",
         "Cerrar las ventanas al liberar las pestañas",
@@ -98,6 +104,7 @@ private let translations: [String: [String]] = [
     "タブバーを自動的に隠す": [
         "Automatically Hide Tab Bar", "自动隐藏标签栏", "탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas",
     ],
+    "タブバーの位置": ["Tab Bar Position", "标签栏位置", "탭 막대 위치", "Posición de la barra de pestañas"],
     "タブを解除": ["Release Tab", "解除标签页", "탭 해제", "Liberar pestaña"],
     "ウィンドウを閉じる": ["Close Window", "关闭窗口", "창 닫기", "Cerrar ventana"],
     "選択中のタブのウィンドウを閉じる": [
@@ -323,9 +330,6 @@ private let translations: [String: [String]] = [
     "追加にはアクセシビリティの許可が必要です": [
         "Accessibility permission is required to add", "添加需要辅助功能权限", "추가하려면 손쉬운 사용 허용이 필요합니다",
         "Se requiere permiso de Accesibilidad para añadir",
-    ],
-    "ここで離すとタブに追加": [
-        "Release here to add as a tab", "在此松开以添加为标签页", "여기서 놓으면 탭에 추가", "Suelte aquí para añadir como pestaña",
     ],
     "この帯へ移動して離すとタブに追加": [
         "Move onto this banner and release to add as a tab", "移到此横幅并松开即可添加为标签页",
