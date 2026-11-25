@@ -86,3 +86,4 @@ Other: `Support/Info.plist`, `Support/AppIcon.*` (bundle resources), `Package.sw
 - Windows must be restored to their original frames on release/quit (`restoreAll`, `ManagedWindow.restore`).
 - Window-server coordinates (AX, top-left origin) differ from AppKit (bottom-left); see `pollWindowDrag` for the conversion.
 - Update `README.md` when user-facing behavior or shortcuts change.
+- When committing, do not add a `Co-authored-by` trailer to commit messages.
