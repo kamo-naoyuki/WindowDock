@@ -292,6 +292,11 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         updateToolbarPanelFrame()
     }
 
+    func setWorkspaceName(_ name: String) {
+        workspaceButton.title = name
+        workspaceButton.toolTip = name
+    }
+
     func setAutoHideTabBar(_ enabled: Bool) {
         guard enabled != autoHideTabBar else { return }
         endCloseSizing()
@@ -1689,7 +1694,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         icon?.size = NSSize(width: 16, height: 16)
         select.image = icon
         select.imagePosition = icon == nil ? .noImage : .imageLeading
-        select.toolTip = item.toolTip ?? item.title
+        let tabToolTip = item.toolTip ?? item.title
+        select.toolTip = tabToolTip
+        tab.view.toolTip = tabToolTip
         select.font = .systemFont(ofSize: 12, weight: item.selected ? .semibold : .regular)
         select.setAccessibilityValue(item.selected ? L("操作対象") : (item.displayed ? L("分割表示中") : L("未選択")))
         let closeTitle = closesWindowsOnRelease ? L("ウィンドウを閉じる") : L("元の位置に戻してタブから解除")

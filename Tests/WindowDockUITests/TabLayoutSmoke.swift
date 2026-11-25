@@ -237,8 +237,9 @@ enum TabLayoutSmoke {
         host.orderBack(nil)
         defer { host.close() }
         var failures: [String] = []
-        let first = WorkspaceTabItem(id: UUID(), title: "First", selected: true, displayed: true, pinned: true,
-                                     tabSwitchTarget: true)
+        let first = WorkspaceTabItem(
+            id: UUID(), title: "First", toolTip: "Safari — First", selected: true, displayed: true, pinned: true,
+            tabSwitchTarget: true)
         let middle = WorkspaceTabItem(id: UUID(), title: "Middle", selected: false)
         let last = WorkspaceTabItem(id: UUID(), title: "Last", selected: false)
         func settle() {
@@ -249,6 +250,13 @@ enum TabLayoutSmoke {
         for vertical in [false, true] {
             chrome.setTabBarPosition(vertical ? .left : .top)
             let existing = chrome.setTabs([first, last])
+            if existing[0].select.toolTip != "Safari — First" || existing[0].view.toolTip != "Safari — First" {
+                failures.append("hovering anywhere over the tab did not expose its app name and full title")
+            }
+            chrome.setWorkspaceName("Research workspace")
+            if chrome.workspaceButton.toolTip != "Research workspace" {
+                failures.append("hovering over the workspace name did not show its full name")
+            }
             settle()
             for adding in [true, false] {
                 let neighbor = existing[1].view

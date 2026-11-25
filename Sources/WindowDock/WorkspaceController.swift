@@ -59,7 +59,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     var name: String {
         didSet {
             window.title = name
-            workspace.workspaceButton.title = name
+            workspace.setWorkspaceName(name)
         }
     }
     var onClose: ((WorkspaceController) -> Void)?
@@ -95,7 +95,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     private func buildWindow() {
         window.title = name
-        workspace.workspaceButton.title = name
+        workspace.setWorkspaceName(name)
         window.minSize = NSSize(width: 720, height: 480)
         window.isReleasedWhenClosed = false
         window.isOpaque = false
