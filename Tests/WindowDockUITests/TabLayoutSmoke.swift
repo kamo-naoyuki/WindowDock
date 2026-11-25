@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import WindowDockCore
 
 private final class TabLayoutDragInfo: NSObject, NSDraggingInfo {
@@ -38,6 +39,16 @@ private final class TitlebarControlProbe: NSButton {
     }
 }
 
+private final class TabBarTrackingEvent: NSEvent {
+    var area: NSTrackingArea?
+    override var trackingArea: NSTrackingArea? { area }
+}
+
+private final class TabCloseProbe: NSObject {
+    var remove: (Int) -> Void = { _ in }
+    @objc func click(_ sender: NSButton) { remove(sender.tag) }
+}
+
 private final class PaneCellProbe: NSView {
     var mouseDownCount = 0
 
@@ -68,6 +79,281 @@ private final class FrameChangeProbe: WorkspaceBackgroundView {
 @main
 enum TabLayoutSmoke {
     @MainActor
+    private static func checkCloseSlotsAndWrapping() -> [String] {
+        let host = WorkspaceWindow(contentRect: NSRect(x: 100, y: 100, width: 930, height: 600),
+                                   styleMask: .borderless, backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        let chrome = WorkspaceChromeView(frame: .zero)
+        host.contentView = chrome
+        host.orderBack(nil)
+        defer { host.close() }
+        var failures: [String] = []
+        let click = TabCloseProbe()
+        let tracking = TabBarTrackingEvent()
+        tracking.area = chrome.addButton.superview?.trackingAreas.first { $0.owner === chrome }
+        guard tracking.area != nil else { return ["missing tab bar pointer tracking"] }
+        let all = (0 ..< 27).map {
+            WorkspaceTabItem(id: UUID(), title: $0.isMultiple(of: 2) ? "A" : "A longer title", selected: $0 == 0)
+        }
+        var items = all
+        var groups: [WorkspaceChromeView.Tab] = []
+        func layout() {
+            chrome.layoutSubtreeIfNeeded()
+            chrome.tabs.window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        func settle() {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.24))
+            layout()
+        }
+        func render() {
+            groups = chrome.setTabs(items)
+            for (index, tab) in groups.enumerated() {
+                tab.select.tag = index
+                tab.close.tag = index
+                tab.close.target = click
+                tab.close.action = #selector(TabCloseProbe.click(_:))
+            }
+            if let first = groups.first { chrome.revealTab(first.view) }
+            layout()
+        }
+        click.remove = { items.remove(at: $0); render() }
+        defer { click.remove = { _ in } }
+        func screenPoint(_ view: NSView, x: CGFloat? = nil) -> NSPoint {
+            view.window!
+                .convertPoint(toScreen: view.convert(NSPoint(x: x ?? view.bounds.midX, y: view.bounds.midY), to: nil))
+        }
+        func closeTwice(at slot: Int) {
+            let point = screenPoint(groups[slot].close)
+            let viewport = chrome.tabs.visibleRect
+            chrome.mouseEntered(with: tracking)
+            for _ in 0 ..< 2 {
+                let next = groups[slot + 1].id
+                let hit = chrome.hitTest(host.convertPoint(fromScreen: point))
+                if hit !== groups[slot].close {
+                    failures.append("slot \(slot): repeated click missed × at \(point)")
+                    break
+                }
+                (hit as? NSButton)?.performClick(nil)
+                let center = screenPoint(groups[slot].close)
+                if groups[slot].id != next || abs(center.x - point.x) > 1 || abs(center.y - point.y) > 1
+                    || chrome.tabs.visibleRect != viewport {
+                    failures
+                        .append(
+                            "slot \(slot): next × moved from \(point) to \(center), viewport \(viewport) → \(chrome.tabs.visibleRect)")
+                }
+            }
+        }
+        for (count, scroll) in [(7, false), (all.count, true)] {
+            items = Array(all.prefix(count))
+            render()
+            settle()
+            if scroll { chrome.revealTab(groups[count - 1].view) }
+            let slot = scroll ? count - 4 : 2
+            let width = groups[slot].view.bounds.width
+            closeTwice(at: slot)
+            chrome.mouseExited(with: tracking)
+            layout()
+            if !scroll, groups[slot].view.bounds.width <= width + 1 {
+                failures.append("leaving the tab bar did not redistribute freed space")
+            }
+        }
+
+        chrome.wrapsCrowdedTabs = true
+        for position: TabBarPosition in [.top, .bottom] {
+            chrome.setTabBarPosition(position)
+            items = all
+            render()
+            settle()
+            guard let split = chrome.tabs.secondRow, split < groups.count else {
+                failures.append("\(position): overflow did not wrap")
+                continue
+            }
+            let second = groups[split]
+            let topFrame = groups[0].view.frame, lower = second.view.frame
+            if lower.maxY > topFrame.minY || lower.minX != topFrame.minX || abs(lower.width - topFrame.width) > 1
+                || chrome.tabs.visibleRect.width >= chrome.tabs.bounds.width {
+                failures.append("\(position): crowded rows did not align or scroll together: \(topFrame), \(lower)")
+            }
+            let point = screenPoint(second.view, x: 1)
+            if chrome.tabInsertionIndex(at: point) != split || chrome
+                .hitTest(host.convertPoint(fromScreen: screenPoint(second.close))) !== second.close {
+                failures.append("\(position): could not target the first tab in the second row")
+            }
+            chrome.showWindowDropTarget(at: point, requiresPermission: false)
+            if let preview = chrome.windowDropPreview as? WorkspaceTabGroup,
+               chrome.tabs.arrangedSubviews.firstIndex(of: preview) == split,
+               let title = preview.arrangedSubviews.first as? NSButton, title.alignment == .left {
+                if abs(preview.frame.width - second.view.frame.width) >
+                    1 { failures.append("drop preview width differs") }
+            } else { failures.append("\(position): window preview did not follow the target row") }
+            chrome.hideWindowDropTarget()
+            layout()
+            let board = NSPasteboard.withUniqueName()
+            defer { board.releaseGlobally() }
+            board.setString("across-rows", forType: workspaceTabDragType)
+            let source = groups[0].select, destination = screenPoint(groups[split + 1].select)
+            var reordered: [Int]?
+            chrome.onReorderTabs = { reordered = $0 }
+            chrome.beginTabDrag(source: source, token: "across-rows")
+            if !chrome.performTabReorder(pasteboard: board, source: source, screenPoint: destination)
+                || reordered?[split + 1] != 0 { failures.append("\(position): drag failed to reorder across rows") }
+            chrome.setAutoHideTabBar(true)
+            chrome.setAutoHiddenToolbarVisible(true)
+            layout()
+            if (chrome.autoHiddenToolbarPanel?.frame.height ?? 0) < chrome.tabs.bounds.height {
+                failures.append("\(position): auto-hidden bar clipped its second row")
+            }
+            chrome.setAutoHideTabBar(false)
+            chrome.mouseExited(with: tracking)
+            let capacity =
+                Int((chrome.tabs.visibleRect.width + chrome.tabs.spacing) / (topFrame.width + chrome.tabs.spacing))
+            items = Array(all.prefix(capacity + 2))
+            render()
+            settle()
+            guard let boundary = chrome.tabs.secondRow, boundary >= 1, boundary + 1 < groups.count else {
+                failures.append("\(position): second row was not available for repeated closes")
+                continue
+            }
+            closeTwice(at: boundary - 1)
+            if chrome.tabs.secondRow != boundary { failures.append("\(position): row collapsed under the pointer") }
+            chrome.mouseExited(with: tracking)
+            settle()
+            if chrome.tabs.secondRow != nil || chrome.tabs.visibleRect.height >= 64 {
+                failures
+                    .append(
+                        "\(position): wrapping did not collapse: split=\(String(describing: chrome.tabs.secondRow)), strip=\(chrome.tabs.bounds), visible=\(chrome.tabs.visibleRect), widths=\(groups.map { $0.view.frame.width })")
+            }
+        }
+        return failures
+    }
+
+    @MainActor
+    private static func checkTabStripFeedback() -> [String] {
+        let host = WorkspaceWindow(contentRect: NSRect(x: 100, y: 100, width: 960, height: 640),
+                                   styleMask: .borderless, backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        let chrome = WorkspaceChromeView(frame: .zero)
+        host.contentView = chrome
+        host.orderBack(nil)
+        defer { host.close() }
+        var failures: [String] = []
+        let first = WorkspaceTabItem(id: UUID(), title: "First", selected: true, displayed: true, pinned: true,
+                                     tabSwitchTarget: true)
+        let middle = WorkspaceTabItem(id: UUID(), title: "Middle", selected: false)
+        let last = WorkspaceTabItem(id: UUID(), title: "Last", selected: false)
+        func settle() {
+            chrome.layoutSubtreeIfNeeded()
+            CATransaction.flush()
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.24))
+        }
+        for vertical in [false, true] {
+            chrome.setTabBarPosition(vertical ? .left : .top)
+            let existing = chrome.setTabs([first, last])
+            settle()
+            for adding in [true, false] {
+                let neighbor = existing[1].view
+                func position(_ view: NSView, presented: Bool) -> CGFloat {
+                    guard let layer = view.layer, let root = chrome.addButton.superview?.layer else { return .nan }
+                    let current = presented ? layer.presentation() ?? layer : layer
+                    let target = presented ? root.presentation() ?? root : root
+                    let frame = current.convert(current.bounds, to: target)
+                    return vertical ? frame.midY : frame.midX
+                }
+                let before = position(neighbor, presented: false)
+                let firstBefore = position(existing[0].view, presented: false)
+                let plusBefore = position(chrome.addButton, presented: false)
+                let next = chrome.setTabs(adding ? [first, middle, last] : [first, last])
+                chrome.revealTab(next[0].view)
+                func between(_ value: CGFloat, _ a: CGFloat, _ b: CGFloat) -> Bool {
+                    value.isFinite && value > min(a, b) + 1 && value < max(a, b) - 1
+                }
+                var samples: [(first: CGFloat, last: CGFloat, plus: CGFloat)] = []
+                var entry: [(center: CGFloat, width: CGFloat)] = []
+                let end = Date(timeIntervalSinceNow: 0.24)
+                repeat {
+                    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.009))
+                    samples.append((position(existing[0].view, presented: true), position(neighbor, presented: true),
+                                    position(chrome.addButton, presented: true)))
+                    if adding, let layer = next[1].view.layer?.presentation(), layer.opacity > 0.05 {
+                        entry.append((position(next[1].view, presented: true), layer.frame.width))
+                    }
+                } while Date() < end
+                let after = position(neighbor, presented: false)
+                let firstAfter = position(existing[0].view, presented: false)
+                let plusAfter = position(chrome.addButton, presented: false)
+                let sawSlide = samples
+                    .contains { between($0.last, before, after) || between($0.first, firstBefore, firstAfter) }
+                let sawPlus = samples.contains { between($0.plus, plusBefore, plusAfter) }
+                let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                if adding {
+                    let center = position(next[1].view, presented: false)
+                    let width = next[1].view.frame.width
+                    if entry.isEmpty || entry.contains(where: { abs($0.center - center) > 1.5 })
+                        || entry.contains(where: { $0.width < width - 1 }) == reduce {
+                        failures
+                            .append(
+                                "vertical=\(vertical): new tab should pop at \(center), not fly in: \(entry.prefix(4))")
+                    }
+                }
+                if next.last?.view !== neighbor || max(abs(before - after), abs(firstBefore - firstAfter)) < 25
+                    || sawSlide == reduce || (!vertical && (sawPlus == reduce || abs(plusBefore - plusAfter) < 25)) {
+                    failures
+                        .append(
+                            "vertical=\(vertical) add=\(adding): first \(firstBefore)→\(firstAfter), last \(before)→\(after), slide=\(sawSlide); + \(plusBefore)→\(plusAfter), slide=\(sawPlus); reduce=\(reduce), samples=\(samples.prefix(4))")
+                }
+            }
+        }
+        let groups = chrome.setTabs([first, last]).map(\.view)
+        for group in groups {
+            guard group.trackingAreas.contains(where: {
+                $0.owner === group && $0.options.contains([.mouseEnteredAndExited, .inVisibleRect])
+            }), let enter = NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [],
+                                                   timestamp: 0, windowNumber: host.windowNumber,
+                                                   context: nil, eventNumber: 1, trackingNumber: 0, userData: nil),
+                let exit = NSEvent.enterExitEvent(with: .mouseExited, location: .zero, modifierFlags: [],
+                                                  timestamp: 0, windowNumber: host.windowNumber,
+                                                  context: nil, eventNumber: 2, trackingNumber: 0, userData: nil)
+            else { return failures + ["missing tab-wide mouse tracking"] }
+            group.mouseExited(with: exit)
+            let base = group.layer?.backgroundColor
+            let border = group.layer?.borderColor
+            group.mouseEntered(with: enter)
+            if group.layer?.backgroundColor == base || group.layer?.borderColor != border {
+                failures.append("hover did not change the tab fill independently of the selection border")
+            }
+            guard let close = group.arrangedSubviews.last as? NSButton,
+                  close.trackingAreas.contains(where: { $0.options.contains(.mouseEnteredAndExited) })
+            else { return failures + ["the close button does not track its own hover"] }
+            let tabFill = group.layer?.backgroundColor
+            close.mouseEntered(with: enter)
+            if (close.layer?.backgroundColor?.alpha ?? 0) < 0.22 || group.layer?.backgroundColor != tabFill {
+                failures.append("the × did not gain a stronger local highlight over the hovered tab")
+            }
+            close.mouseExited(with: exit)
+            if (close.layer?.backgroundColor?.alpha ?? 0) != 0 || group.layer?.backgroundColor != tabFill {
+                failures.append("leaving × did not clear just its highlight")
+            }
+            group.mouseExited(with: exit)
+            if group.layer?.backgroundColor != base { failures.append("tab remained highlighted after mouse exit") }
+        }
+        for closesWindow in [false, true] {
+            chrome.closesWindowsOnRelease = closesWindow
+            let close = chrome.setTabs([first, last])[0].close
+            chrome.layoutSubtreeIfNeeded()
+            let label = closesWindow ? L("ウィンドウを閉じる") : L("元の位置に戻してタブから解除")
+            guard let cell = close.cell else { return failures + ["missing close button cell"] }
+            if close.image == nil || cell.imageRect(forBounds: close.bounds).intersection(close.bounds).isEmpty
+                || !cell.titleRect(forBounds: close.bounds).isEmpty {
+                failures.append("the tab close button did not draw just its × for \(label)")
+            }
+            if close.toolTip != label || close.accessibilityLabel() != label {
+                failures.append("the tab close button lost its action description for \(label)")
+            }
+        }
+        return failures
+    }
+
+    @MainActor
     static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -78,7 +364,7 @@ enum TabLayoutSmoke {
         let chrome = WorkspaceChromeView(frame: .zero)
         host.contentView = chrome
         chrome.workspaceButton.title = "Workspace"
-        var failures: [String] = []
+        var failures = checkTabStripFeedback() + checkCloseSlotsAndWrapping()
 
         func settle() {
             for _ in 0 ..< 4 {
@@ -108,7 +394,7 @@ enum TabLayoutSmoke {
                     failures.append("\(label): tab button missing")
                     continue
                 }
-                if group.isHidden || tab.isHidden || tab.bounds.width < 47.5 || tab.bounds.height < 28 {
+                if group.isHidden || tab.isHidden || tab.bounds.width < 21.5 || tab.bounds.height < 28 {
                     failures.append("\(label): tab has no usable size")
                 }
             }
@@ -122,19 +408,17 @@ enum TabLayoutSmoke {
         checkVisible("mixed title lengths")
         let shortWidth = shortTitle.select.bounds.width
         let longWidth = longTitle.select.bounds.width
-        let shortPreferred = min(200, max(48, ceil(shortTitle.select.intrinsicContentSize.width)))
-        let iconPreferred = min(200, max(48, ceil(iconTitle.select.intrinsicContentSize.width)))
-        if abs(shortWidth - shortPreferred) > 0.5 || abs(iconTitle.select.bounds.width - iconPreferred) > 0.5
-            || longWidth <= shortWidth + 40
-        {
-            failures.append("short tabs did not fit their text/icon content independently of long titles")
+        if abs(shortWidth - longWidth) > 1 || abs(iconTitle.select.bounds.width - longWidth) > 1
+            || [shortTitle, iconTitle, longTitle].contains(where: { $0.select.alignment != .left }) {
+            failures.append("titles with and without icons did not share equal-width, left-aligned slots")
         }
         for _ in 0 ..< 5 {
             chrome.appendTab(title: String(repeating: "Another long window ", count: 4), selected: false)
         }
         checkVisible("mixed title lengths when crowded")
-        if longTitle.select.bounds.width >= longWidth || abs(shortTitle.select.bounds.width - shortWidth) > 0.5 {
-            failures.append("crowding did not shrink long tabs while preserving the short tab's preferred width")
+        if longTitle.select.bounds
+            .width >= longWidth || abs(shortTitle.select.bounds.width - longTitle.select.bounds.width) > 1 {
+            failures.append("crowded tabs did not shrink together")
         }
         chrome.clearTabs()
         settle()
@@ -169,6 +453,9 @@ enum TabLayoutSmoke {
             chrome.appendTab(title: "Application \(index)", selected: false)
         }
         checkVisible("twenty tabs")
+        if single.view.frame.width > 56.5 || single.close.frame.width < 18 {
+            failures.append("crowded tabs did not compact to 56 points while keeping the close button")
+        }
         chrome.workspaceButton.title = String(repeating: "Long workspace name ", count: 6)
         checkVisible("long workspace name with crowded tabs")
         if chrome.workspaceButton.frame.width > 49 {
@@ -182,6 +469,17 @@ enum TabLayoutSmoke {
             chrome.revealTab(last)
             if !chrome.tabs.visibleRect.contains(last.frame) {
                 failures.append("last tab could not be revealed")
+            }
+            let divider = chrome.workspaceButton.superview?.subviews.compactMap { $0 as? NSBox }.first {
+                $0.boxType == .separator
+            }
+            guard let scroll = chrome.tabs.enclosingScrollView else { fatalError("missing tab scroll view") }
+            if divider?.isHidden != false || abs((divider?.frame.midX ?? 0) - scroll.frame.minX) > 4 {
+                failures.append("scrolling hid the leading tabs without marking the workspace-name boundary")
+            }
+            chrome.revealTab(single.view)
+            if divider?.isHidden != true {
+                failures.append("returning to the first tab left a spurious clipping divider")
             }
         }
         chrome.clearTabs()

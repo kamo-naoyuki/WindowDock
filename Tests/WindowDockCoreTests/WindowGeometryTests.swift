@@ -3,16 +3,19 @@ import XCTest
 @testable import WindowDockCore
 
 final class WindowGeometryTests: XCTestCase {
-    func testShortTabsKeepPreferredWidthWhileLongTabsShareRemainingSpace() {
-        XCTAssertEqual(WindowGeometry.tabWidths(preferredWidths: [60, 200, 200], available: 300), [60, 120, 120])
-        XCTAssertEqual(WindowGeometry.tabWidths(preferredWidths: [200, 60, 200], available: 300), [120, 60, 120])
-        XCTAssertEqual(WindowGeometry.tabWidths(preferredWidths: [60, 130, 200], available: 1000), [60, 130, 200])
-    }
-
-    func testTabsPreserveMinimumSizeForScrollingAndCapLongTitles() {
-        XCTAssertEqual(WindowGeometry.tabWidths(preferredWidths: [10, 260], available: 30), [48, 48])
-        XCTAssertEqual(WindowGeometry.tabWidths(preferredWidths: [10, 260], available: 1000), [48, 200])
-        XCTAssertEqual(WindowGeometry.tabWidths(preferredWidths: [], available: 0), [])
+    func testTabsShareAvailableWidthAndOnlyWrapOnOverflow() {
+        func rows(_ n: Int, available: CGFloat = 288, wrap: Bool = true)
+            -> (contentWidth: CGFloat, secondRow: Int?, viewport: CGFloat) {
+            WindowGeometry.horizontalTabRows(count: n, available: available, chrome: 34, spacing: 2, wrap: wrap)
+        }
+        XCTAssertEqual(rows(0).viewport, 0)
+        XCTAssertEqual(rows(1).contentWidth, 200)
+        XCTAssertEqual(rows(2).contentWidth, 109)
+        XCTAssertNil(rows(5).secondRow)
+        XCTAssertEqual(rows(6).secondRow, 5)
+        XCTAssertEqual(rows(11).secondRow, 6)
+        XCTAssertEqual(rows(11).contentWidth, 22)
+        XCTAssertNil(rows(6, wrap: false).secondRow)
     }
 
     private let insertionTabs = [

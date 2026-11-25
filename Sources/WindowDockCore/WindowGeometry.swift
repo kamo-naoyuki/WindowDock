@@ -54,17 +54,18 @@ public enum WindowGeometry {
         return min(max(visibleMinX, x), visibleMaxX - lineWidth)
     }
 
-    public static func tabWidths(preferredWidths: [CGFloat], available: CGFloat) -> [CGFloat] {
-        let preferred = preferredWidths.map { min(200, max(48, ceil($0))) }
-        var remaining = max(available, CGFloat(preferred.count) * 48)
-        for (index, width) in preferred.sorted().enumerated() {
-            let limit = remaining / CGFloat(preferred.count - index)
-            if width >= limit {
-                return preferred.map { min($0, limit) }
-            }
-            remaining -= width
-        }
-        return preferred
+    public static let minimumTabContentWidth: CGFloat = 22
+
+    /// Fill one row before opening a second. Beyond two full rows, scroll both together.
+    public static func horizontalTabRows(
+        count: Int, available: CGFloat, chrome: CGFloat, spacing: CGFloat, wrap: Bool
+    ) -> (contentWidth: CGFloat, secondRow: Int?, viewport: CGFloat) {
+        guard count > 0 else { return (0, nil, 0) }
+        let capacity = max(1, Int((available + spacing) / (minimumTabContentWidth + chrome + spacing)))
+        let columns = wrap && count > capacity ? max(capacity, (count + 1) / 2) : count
+        let fixed = chrome * CGFloat(columns) + spacing * CGFloat(columns - 1)
+        let width = min(200, max(minimumTabContentWidth, (available - fixed) / CGFloat(columns)))
+        return (width, columns < count ? columns : nil, min(available, fixed + CGFloat(columns) * width))
     }
 
     // Water-fill proportional lengths around hard minimums without changing the saved ratios.

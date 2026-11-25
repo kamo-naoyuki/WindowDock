@@ -347,6 +347,9 @@ final class WindowEventObserver {
 }
 
 struct WindowAccessClient {
+    var isTrusted: () -> Bool = { WindowAccess.isTrusted }
+    var requestPermission: () -> Void = WindowAccess.requestPermission
+    var scan: () -> WindowScan = WindowAccess.scan
     var requireWritable: (AXUIElement, String) throws -> Void = WindowAccess.requireWritable
     var frame: (AXUIElement) throws -> CGRect = WindowAccess.frame
     var setFrame: (AXUIElement, CGRect) throws -> Void = WindowAccess.setFrame
@@ -363,6 +366,7 @@ struct WindowAccessClient {
     /// Reads the title while checking whether the element is still available.
     var probe: (AXUIElement) -> WindowProbeResult = WindowAccess.probe
     var applicationWindows: (NSRunningApplication) -> [WindowCandidate]? = WindowAccess.applicationWindows
+    var requestNewWindow: (NSRunningApplication) async throws -> Void = WindowAccess.requestNewWindow
 }
 
 struct WindowProbeResult {
@@ -492,6 +496,53 @@ extension WindowAccess {
         windowElements(application)?.compactMap { try? candidate($0, application: application) }
     }
 
+    /// Press the target process's menu item, without activating its previous window or sending a global keystroke.
+    static func requestNewWindow(_ app: NSRunningApplication) async throws {
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.5)
+        let bar = try value(element, kAXMenuBarAttribute)
+        guard CFGetTypeID(bar) == AXUIElementGetTypeID(),
+              let menus = try value(bar as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement]
+        else { throw WindowAccessError(operation: L("新規ウィンドウの作成"), code: .noValue) }
+        // The standard shortcut is language independent for these apps. Don't execute an unrelated ⌘N
+        // (e.g. New Playlist) in an unknown app.
+        let standardShortcut = ["com.apple.finder", "org.mozilla.firefox", "com.google.Chrome", "com.mitchellh.ghostty"]
+            .contains(app.bundleIdentifier ?? "")
+        let titles: Set<String> = [
+            "New Window", "New Finder Window", "新規ウインドウ", "新規ウィンドウ", "新しいウィンドウ", "新規Finderウインドウ",
+            "新建窗口", "新建访达窗口", "새로운 윈도우", "새 창", "Nueva ventana", "Nueva ventana del Finder",
+        ]
+        var shortcut: AXUIElement?
+        var named: AXUIElement?
+        search: for top in menus {
+            try Task.checkCancellation()
+            guard let submenus = try? value(top, kAXChildrenAttribute) as? [AXUIElement] else { continue }
+            for submenu in submenus {
+                guard let items = try? value(submenu, kAXChildrenAttribute) as? [AXUIElement] else { continue }
+                for item in items {
+                    if let title = try? value(item, kAXTitleAttribute) as? String, titles.contains(title) {
+                        named = item
+                        break search
+                    }
+                    if standardShortcut, shortcut == nil,
+                       (try? value(item, kAXMenuItemCmdCharAttribute) as? String)?.lowercased() == "n",
+                       (try? value(item, kAXMenuItemCmdModifiersAttribute) as? Int) == 0 {
+                        shortcut = item
+                    }
+                }
+            }
+        }
+        guard let item = named ?? shortcut, try value(item, kAXEnabledAttribute) as? Bool == true else {
+            throw WindowAccessError(operation: L("「新規ウィンドウ」メニューの取得"), code: .actionUnsupported)
+        }
+        try Task.checkCancellation()
+        let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
+        // Some apps time out after accepting the action; poll for the result rather than issuing it twice.
+        guard result == .success || result == .cannotComplete else {
+            throw WindowAccessError(operation: L("新規ウィンドウの作成"), code: result)
+        }
+    }
+
     /// Picks the live window for a cached element that went stale (e.g. after a login-window round trip).
     /// Windows that any workspace already manages are never taken, even when they are the app's only other window.
     static func reresolve(
@@ -504,7 +555,12 @@ extension WindowAccess {
     }
 
     private static func candidate(_ window: AXUIElement, application: NSRunningApplication) throws -> WindowCandidate? {
-        guard try value(window, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole else { return nil }
+        // Finder includes its desktop scroll area in AXWindows. No subrole means it isn't a standard window.
+        do {
+            guard try value(window, kAXSubroleAttribute) as? String == kAXStandardWindowSubrole else { return nil }
+        } catch let error as WindowAccessError where error.code == .noValue || error.code == .attributeUnsupported {
+            return nil
+        }
         var title: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title)
         guard result == .success || result == .noValue || result == .attributeUnsupported else {

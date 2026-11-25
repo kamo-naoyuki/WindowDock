@@ -66,6 +66,7 @@ When you find or are asked to fix a bug, follow this order:
 | Pane grid layout (`WorkspaceGridSize` up to 4×4, `WorkspaceGridView`) | `WorkspaceGridView.swift` |
 | Ctrl+Tab shortcut context, registered-window check for window drags (`WorkspaceWindowDragRegistration`) | `WorkspaceInput.swift` |
 | "Add windows" sheet | `WindowPicker.swift` |
+| Saved-tab restore (collect selections before registering any windows), inline thumbnail page shared with + | `WorkspaceRestore.swift`, `NewTabPage.swift` (`run-smoke.sh --restore-only` uses fixture windows and isolated defaults) |
 | Persisted last session (`SavedWorkspace`, `SavedLayout`, stored in UserDefaults key `lastWindows`) | `SavedLayout.swift` |
 | `L()` string lookup, en/zh/ko/es tables (Japanese text is the key) | `Localization.swift` |
 

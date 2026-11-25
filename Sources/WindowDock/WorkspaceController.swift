@@ -1,4 +1,6 @@
 import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
 import WindowDockCore
 
 /// One workspace: a workspace window together with the session that manages its registered windows.
@@ -8,7 +10,16 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     let window: WorkspaceWindow
     private let workspace = WorkspaceChromeView(frame: .zero)
     private var picker: WindowPicker?
-    private var tabIDs: [UUID] = []
+    private struct RestorePrompt {
+        let id = UUID()
+        let workspace: SavedWorkspace
+        let excluding: [WindowCandidate]
+        let completion: ([WindowCandidate]) -> Void
+    }
+
+    private var restorePrompt: RestorePrompt?
+    private var startPages: [UUID: NSHostingView<NewTabPage>] = [:]
+    private var tabIDs: [UUID] { session.tabIDs }
     private var windowObservers: [pid_t: WindowEventObserver] = [:]
     private var windowRaisePending = false
     private var windowRaiseScheduled = false
@@ -100,13 +111,20 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         window.center()
 
         workspace.addButton.target = self
-        workspace.addButton.action = #selector(showPicker)
+        workspace.addButton.action = #selector(newTab)
         workspace.permissionButton.target = self
         workspace.permissionButton.action = #selector(openPermission)
     }
 
     private func wireSession() {
         session.isClaimedElsewhere = { [weak self] candidate in self?.isRegisteredElsewhere?(candidate) ?? false }
+        session.onFocusStartPage = { [weak self] in
+            guard let self, !self.quitting else { return }
+            if !NSApp.isActive, !WindowAccess.activateFrontWindowOnly(ProcessInfo.processInfo.processIdentifier) {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            self.window.makeKeyAndOrderFront(nil)
+        }
         window.onWorkspaceFrameChange = { [weak self] in self?.syncIfVisible() }
         workspace.onFrameInteractionEnd = { [weak self] in self?.scheduleSelectedWindowRaise(activate: true) }
         session.targetFrames = { [weak self] in self?.targetFrames() ?? [:] }
@@ -190,7 +208,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.session.reorderWindows(order.map { self.tabIDs[$0] })
         }
         workspace.onTabDragBegin = { [weak self] index, token, button in
-            guard let self, self.tabIDs.indices.contains(index) else { return }
+            guard let self, self.restorePrompt == nil, self.tabIDs.indices.contains(index) else { return }
             self.onTabDragBegin?(self.tabIDs[index], token, button)
         }
         workspace.onTabDragEnd = { [weak self] token, board, point, cancelled in
@@ -217,6 +235,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         session.onChange = { [weak self] in
             guard let self else { return }
+            if let prompt = self.restorePrompt, !self.session.isStartPage(prompt.id) {
+                // The tab's ×, ⌘W and bulk release dismiss the same prompt as Skip.
+                self.finishRestore(prompt.id, choosing: [])
+            }
             self.renderTabs()
             self.onSessionChange?(self)
             self.scheduleEmptyWorkspaceDeletion()
@@ -294,12 +316,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             workspace.setGrid(session.gridSize, activeCell: session.activeCell)
         }
         workspace.setPaneIndicators(switchTargetCell: session.tabSwitchCell, pinnedCells: session.pinnedCells)
-        workspace.clearTabs()
-        tabIDs = session.windows.map(\.id)
-        var selectedTab: NSView?
-        for (index, managed) in session.windows.enumerated() {
-            let selected = managed.id == session.selectedID
-            let cell = session.cellIndex(for: managed.id)
+        let items = tabIDs.map { id in
+            let selected = id == session.selectedID
+            let cell = session.cellIndex(for: id)
             let displayed = session.isSplit && cell != nil
             let side =
                 session.isSplit
@@ -308,30 +327,83 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
                             ? L("%d行%d列 · ", $0 / session.gridSize.columns + 1, $0 % session.gridSize.columns + 1)
                             : L("ペイン %d", $0 + 1) + " · "
                     } ?? "" : ""
-            let candidate = managed.candidate
-            let title = candidate.title.isEmpty ? candidate.application.localizedName ?? "App" : candidate.title
+            let candidate = session.managedByID[id]?.candidate
+            let title = candidate.map { $0.title.isEmpty ? $0.application.localizedName ?? "App" : $0.title }
+                ?? L("新しいタブ")
             let pinned = cell.map { session.isPanePinned($0) } ?? false
-            let tab = workspace.appendTab(
-                id: managed.id,
+            return WorkspaceTabItem(
+                id: id,
                 title: side + title,
-                toolTip: side + candidate.label + (pinned ? " · " + L("固定中") : ""),
-                icon: candidate.application.icon,
+                toolTip: side + (candidate?.label ?? title) + (pinned ? " · " + L("固定中") : ""),
+                icon: candidate?.application.icon,
                 selected: selected,
                 displayed: displayed,
                 pinned: pinned,
                 tabSwitchTarget: cell == session.tabSwitchCell
             )
+        }
+        let tabs = workspace.setTabs(items)
+        for (index, tab) in tabs.enumerated() {
             tab.select.target = self
             tab.select.action = #selector(selectTab(_:))
             tab.select.tag = index
             tab.close.target = self
             tab.close.action = #selector(removeTab(_:))
             tab.close.tag = index
-            if selected { selectedTab = tab.view }
         }
-        workspace.showManagedWindows(!session.windows.isEmpty)
-        if let selectedTab { workspace.revealTab(selectedTab) }
+        workspace.showManagedWindows(!tabIDs.isEmpty)
+        updateStartPages()
+        if let selected = tabs.first(where: { $0.id == session.selectedID }) { workspace.revealTab(selected.view) }
         window.invalidateShadow()
+    }
+
+    private func updateStartPages() {
+        let visible = Set(session.cells.compactMap { $0 }.filter(session.isStartPage))
+        for (id, page) in startPages where !visible.contains(id) {
+            page.removeFromSuperview()
+            startPages.removeValue(forKey: id)
+        }
+        for id in visible {
+            guard let cell = session.cellIndex(for: id) else { continue }
+            let area = workspace.gridAreas[cell]
+            let prompt = restorePrompt.flatMap { $0.id == id ? $0 : nil }
+            let page = startPages[id] ?? NSHostingView(rootView: NewTabPage(
+                restoration: prompt.map {
+                    NewTabPage.Restoration(workspace: $0.workspace, skip: { [weak self] in
+                        self?.finishRestore(id, choosing: [])
+                    })
+                },
+                access: session.access,
+                isAvailable: { [weak self] candidate in
+                    guard let self, !self.quitting else { return false }
+                    return !self.session.contains(candidate) && !self.session.isClaimedElsewhere(candidate)
+                        && !(prompt?.excluding.contains { $0.isSameWindow(as: candidate) } ?? false)
+                },
+                launch: { [weak self] url in
+                    guard let self, !self.quitting else { throw CancellationError() }
+                    return try await self.session.launchWindows(at: url, from: id)
+                },
+                choose: { [weak self] candidates in
+                    guard let self, !self.quitting, self.session.cellIndex(for: id) != nil else { return false }
+                    if prompt != nil { return self.finishRestore(id, choosing: candidates) }
+                    return self.session.fillStartPage(id, with: candidates)
+                },
+                browse: { [weak self] launch in self?.chooseApplication(launch) }
+            ))
+            if page.superview !== area {
+                // The pane owns the viewport size, not the scroll view's ideal content size.
+                page.sizingOptions = []
+                page.translatesAutoresizingMaskIntoConstraints = false
+                area.addSubview(page)
+                NSLayoutConstraint.activate([
+                    page.leadingAnchor.constraint(equalTo: area.leadingAnchor),
+                    page.trailingAnchor.constraint(equalTo: area.trailingAnchor),
+                    page.topAnchor.constraint(equalTo: area.topAnchor),
+                    page.bottomAnchor.constraint(equalTo: area.bottomAnchor),
+                ])
+                startPages[id] = page
+            }
+        }
     }
 
     private func refreshWindowObservers() {
@@ -463,6 +535,13 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     var tabBarPosition: TabBarPosition { workspace.tabBarPosition }
 
+    func setWrapsCrowdedTabs(_ enabled: Bool) {
+        guard workspace.wrapsCrowdedTabs != enabled else { return }
+        workspace.wrapsCrowdedTabs = enabled
+        workspace.layoutSubtreeIfNeeded()
+        syncIfVisible()
+    }
+
     func setTabBarPosition(_ position: TabBarPosition) {
         guard position != tabBarPosition else { return }
         workspace.setTabBarPosition(position)
@@ -580,6 +659,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     /// Closes only the workspace UI; its managed windows must already have been restored or transferred.
     func finishClosing() {
         quitting = true
+        if let prompt = restorePrompt { finishRestore(prompt.id, choosing: []) }
         workspace.hideAutoHiddenToolbar()
         window.delegate = nil
         window.orderOut(nil)
@@ -587,8 +667,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     private func scheduleEmptyWorkspaceDeletion() {
-        if !session.windows.isEmpty { hasContainedWindows = true }
-        guard deletesWhenEmpty, hasContainedWindows, session.windows.isEmpty, !quitting,
+        // A restore prompt isn't a user-created tab. Skipping it must not delete the saved workspace.
+        if tabIDs.contains(where: { $0 != restorePrompt?.id }) { hasContainedWindows = true }
+        guard deletesWhenEmpty, hasContainedWindows, tabIDs.isEmpty, !quitting,
               picker == nil, !emptyDeletionScheduled
         else { return }
         emptyDeletionScheduled = true
@@ -597,7 +678,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.emptyDeletionScheduled = false
-                guard self.deletesWhenEmpty, self.hasContainedWindows, self.session.windows.isEmpty,
+                guard self.deletesWhenEmpty, self.hasContainedWindows, self.tabIDs.isEmpty,
                       !self.quitting, self.picker == nil, let onAutoDelete = self.onAutoDelete
                 else { return }
                 self.hasContainedWindows = false
@@ -616,51 +697,64 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     @objc func maximizeWorkspace() { window.toggleMaximize() }
 
-    @objc func showPicker() { presentPicker(restoring: nil, completion: nil) }
+    @objc func newTab() {
+        guard !quitting, restorePrompt == nil, window.attachedSheet == nil else { return }
+        session.newTab()
+    }
 
-    /// With `restoring`, the matching windows start out selected. With `collect`, the chosen windows are handed
-    /// over instead of being added, and `excluding` hides windows already chosen for another workspace.
-    /// `completion` runs once the sheet is gone.
-    func presentPicker(
-        restoring saved: [SavedWindow]?,
-        excluding: [WindowCandidate] = [],
-        collect: (([WindowCandidate]) -> Void)? = nil,
-        completion: (() -> Void)?
-    ) {
-        guard picker == nil else {
-            completion?()
-            return
-        }
-        guard WindowAccess.isTrusted else {
-            defer { completion?() }
-            WindowAccess.requestPermission()
-            showNotice(.attention(L("システム設定 → プライバシーとセキュリティ → アクセシビリティで WindowDock を許可し、もう一度追加してください。")))
-            return
-        }
-        let scan = WindowAccess.scan()
+    func collectRestoration(_ saved: SavedWorkspace, excluding: [WindowCandidate],
+                            completion: @escaping ([WindowCandidate]) -> Void) {
+        guard !quitting, restorePrompt == nil, picker == nil, ensureWindowAccess() else { return completion([]) }
+        let prompt = RestorePrompt(workspace: saved, excluding: excluding, completion: completion)
+        restorePrompt = prompt
+        session.newTab(id: prompt.id)
+    }
+
+    @discardableResult
+    private func finishRestore(_ id: UUID, choosing candidates: [WindowCandidate]) -> Bool {
+        guard let prompt = restorePrompt, prompt.id == id else { return false }
+        restorePrompt = nil
+        if session.isStartPage(id) { session.remove(id, closeWindow: false) }
+        // Let removal/closing finish before presenting the next workspace or registering any AX windows.
+        DispatchQueue.main.async { prompt.completion(candidates) }
+        return true
+    }
+
+    private func ensureWindowAccess() -> Bool {
+        guard !session.access.isTrusted() else { return true }
+        session.access.requestPermission()
+        showNotice(.attention(L("システム設定 → プライバシーとセキュリティ → アクセシビリティで WindowDock を許可し、もう一度追加してください。")))
+        return false
+    }
+
+    @objc func showPicker() {
+        guard !quitting, picker == nil, restorePrompt == nil, ensureWindowAccess() else { return }
+        let scan = session.access.scan()
         let candidates = scan.windows.filter { candidate in
             !session.contains(candidate) && !(isRegisteredElsewhere?(candidate) ?? false)
-                && !excluding.contains { $0.isSameWindow(as: candidate) }
         }
         var selected: [WindowCandidate]?
-        picker = WindowPicker(
-            candidates: candidates,
-            failedApplications: scan.failedApplications,
-            suggested: saved.map { SavedLayout.suggest($0, among: candidates) } ?? []
-        ) { candidates in
-            if let collect {
-                collect(candidates)
-                return
-            }
-            selected = candidates
-        }
+        picker = WindowPicker(candidates: candidates, failedApplications: scan.failedApplications) { selected = $0 }
         picker?.present(on: window) { [weak self] in
             self?.picker = nil
             // Add before checking emptiness, but only after the sheet has left the screen.
             if let selected { self?.session.add(selected) }
-            if collect == nil { self?.scheduleSelectedWindowRaise(activate: true) }
-            completion?()
+            self?.scheduleSelectedWindowRaise(activate: true)
             self?.scheduleEmptyWorkspaceDeletion()
+        }
+    }
+
+    private func chooseApplication(_ launch: @escaping (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.title = L("起動するアプリを選択")
+        panel.prompt = L("起動")
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.beginSheetModal(for: window) { response in
+            if response == .OK, let url = panel.url { launch(url) }
         }
     }
 
@@ -748,13 +842,14 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     var canHandleShortcut: Bool {
-        !session.windows.isEmpty && picker == nil && !suspended && !window.isMiniaturized && !NSApp.isHidden
+        !tabIDs.isEmpty && picker == nil && window.attachedSheet == nil && !suspended && !window
+            .isMiniaturized && !NSApp.isHidden
             && !quitting
     }
 
     var acceptsWindowDrag: Bool {
-        picker == nil && !suspended && !quitting && window.isVisible && window.isOnActiveSpace && !window.isMiniaturized
-            && !NSApp.isHidden
+        restorePrompt == nil && picker == nil && !suspended && !quitting && window.isVisible
+            && window.isOnActiveSpace && !window.isMiniaturized && !NSApp.isHidden
     }
 
     var windowDropPanelNumber: Int? { workspace.windowDropPanel?.windowNumber }

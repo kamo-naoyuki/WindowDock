@@ -2,7 +2,7 @@ import AppKit
 import WindowDockCore
 
 struct ManagedWindow {
-    let id = UUID()
+    let id: UUID
     var candidate: WindowCandidate
     let originalFrame: CGRect
     let originallyMinimized: Bool
@@ -33,7 +33,12 @@ final class WindowSession {
     private static let framePositionTolerance: CGFloat = 1
     private static let constraintRecoveryDelay: TimeInterval = 3
 
-    private(set) var windows: [ManagedWindow] = []
+    // Every tab has a position and a pane assignment. Start pages don't own an AX window.
+    private(set) var tabIDs: [UUID] = []
+    private(set) var managedByID: [UUID: ManagedWindow] = [:]
+    var windows: [ManagedWindow] { tabIDs.compactMap { managedByID[$0] } }
+    var onFocusStartPage: (() -> Void)?
+    var onAddedApplication: ((NSRunningApplication) -> Void)?
     // The last regular-grid preset; customLayout takes precedence when present.
     private(set) var gridSize = WorkspaceGridSize.single
     private(set) var customLayout: PaneLayout?
@@ -53,7 +58,7 @@ final class WindowSession {
     var secondaryTargetFrame: (() -> CGRect?)?
     var targetFrames: (() -> [Int: CGRect])?
     var fitMinimumSizes: (([Int: CGSize]) -> Bool)?
-    private let access: WindowAccessClient
+    let access: WindowAccessClient
     private var requestedFrames: [UUID: CGRect] = [:]
     private var suspendedWindowIDs: Set<UUID> = []
     private var assignments: [UUID: Int] = [:]
@@ -66,6 +71,7 @@ final class WindowSession {
     private var alignedFrames: [UUID: CGRect] = [:]
     private var isSynchronizing = false
     private var resyncRequested = false
+    private var pendingWindowLaunches: [UUID: (page: UUID, pid: pid_t)] = [:]
 
     init(access: WindowAccessClient = WindowAccessClient()) {
         self.access = access
@@ -121,7 +127,7 @@ final class WindowSession {
             activeCell: activeCell,
             newColumns: customLayout == nil ? size.columns : size.cellCount,
             newRows: customLayout == nil ? size.rows : 1,
-            windowIDs: windows.map(\.id),
+            windowIDs: tabIDs,
             assignments: assignments)
         cells = result.cells
         activeCell = result.activeCell
@@ -139,7 +145,7 @@ final class WindowSession {
         let result = GridReflow.reflow(
             oldColumns: cells.count, oldCells: cells, activeCell: activeCell,
             newColumns: layout.paneCount, newRows: 1,
-            windowIDs: windows.map(\.id), assignments: assignments)
+            windowIDs: tabIDs, assignments: assignments)
         pinnedCells = Set(pinnedCells.filter { $0 < layout.paneCount })
         applyPaneLayout(layout, reflow: result)
     }
@@ -160,7 +166,7 @@ final class WindowSession {
               let split = layout.splittingPane(at: index, axis: axis),
               let result = PaneReflow.split(
                   cells: cells, activeCell: activeCell, at: index,
-                  windowIDs: windows.map(\.id), assignments: assignments)
+                  windowIDs: tabIDs, assignments: assignments)
         else { return .failure(.layout) }
         if !minimumSizes.isEmpty {
             let bounds = currentTargets().values.reduce(CGRect.null) { $0.union($1) }
@@ -279,6 +285,10 @@ final class WindowSession {
 
     func observeFocusedWindow(_ element: AXUIElement) {
         guard let window = windows.first(where: { CFEqual($0.candidate.element, element) }) else { return }
+        // A running app can briefly focus its old window before the requested new one appears.
+        guard !pendingWindowLaunches.values.contains(where: {
+            $0.pid == window.candidate.application.processIdentifier && cells.contains($0.page)
+        }) else { return }
         let id = window.id
         let previousAssignment = assignments[id]
         var changed = false
@@ -332,11 +342,128 @@ final class WindowSession {
     }
 
     func contains(_ candidate: WindowCandidate) -> Bool {
-        windows.contains { $0.candidate.isSameWindow(as: candidate) }
+        managedByID.values.contains { $0.candidate.isSameWindow(as: candidate) }
+    }
+
+    func isStartPage(_ id: UUID) -> Bool { managedByID[id] == nil && tabIDs.contains(id) }
+
+    func launchWindows(at url: URL, from page: UUID) async throws -> [WindowCandidate] {
+        try Task.checkCancellation()
+        guard isStartPage(page), cells.contains(page) else { throw CancellationError() }
+        let bundleID = Bundle(url: url)?.bundleIdentifier
+        let instances = (bundleID.map(NSRunningApplication.runningApplications(withBundleIdentifier:))
+            ?? NSWorkspace.shared.runningApplications).filter { !$0.isTerminated }
+        let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+        let matchingURL = instances.first { $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == canonical }
+        // Launch Services can resolve another path to the same live instance. Don't reopen it and focus its old tab.
+        if let app = matchingURL ?? (bundleID == nil ? nil : instances.first) {
+            return try await launchCandidates(for: app, from: page, alreadyRunning: true)
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false
+        let app = try await NSWorkspace.shared.openApplication(at: url, configuration: config)
+        return try await launchCandidates(for: app, from: page, alreadyRunning: false)
+    }
+
+    func launchCandidates(for app: NSRunningApplication, from page: UUID,
+                          alreadyRunning: Bool) async throws -> [WindowCandidate] {
+        try Task.checkCancellation()
+        guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            throw WindowAccessError(operation: L("新規ウィンドウの作成"), code: .actionUnsupported)
+        }
+        guard isStartPage(page), cells.contains(page) else { throw CancellationError() }
+        let token = UUID()
+        pendingWindowLaunches[token] = (page, app.processIdentifier)
+        defer { pendingWindowLaunches.removeValue(forKey: token) }
+
+        var priorElements: [AXUIElement] = []
+        var priorNumbers: Set<CGWindowID> = []
+        let number = access.windowID
+        if alreadyRunning {
+            let elements = access.windowElements
+            (priorElements, priorNumbers) = try await Task.detached {
+                guard let old = elements(app) else {
+                    throw WindowAccessError(operation: L("ウィンドウ一覧の取得"), code: .cannotComplete)
+                }
+                return (old, Set(old.compactMap(number)))
+            }.value
+            try Task.checkCancellation()
+            try await access.requestNewWindow(app)
+        }
+        let list = access.applicationWindows
+        var previous: [WindowCandidate] = []
+        var stable = 0
+        for _ in 0 ..< 40 {
+            try Task.checkCancellation()
+            guard isStartPage(page), cells.contains(page) else { throw CancellationError() }
+            guard !app.isTerminated else { return [] }
+            let fresh = await Task.detached { [priorElements, priorNumbers] in
+                (list(app) ?? []).filter { candidate in
+                    !priorElements.contains { CFEqual($0, candidate.element) }
+                        && (priorNumbers.isEmpty || number(candidate.element).map(priorNumbers.contains) != true)
+                }
+            }.value
+            let windows = fresh.filter { !contains($0) && !isClaimedElsewhere($0) }
+            if !windows.isEmpty, windows.count == previous.count,
+               windows.allSatisfy({ window in previous.contains { $0.isSameWindow(as: window) } }) {
+                stable += 1
+                if stable >= 3 { return windows }
+            } else {
+                stable = 0
+            }
+            previous = windows
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return previous
+    }
+
+    func newTab(id: UUID = UUID()) {
+        tabIDs.append(id)
+        let cell = tabSwitchCell ?? activeCell
+        let displaced = cells[cell]
+        cells[cell] = id
+        assignments[id] = cell
+        activeCell = cell
+        replacePresentation(of: displaced, with: id)
+        select(id, activate: true)
+    }
+
+    private struct UnavailableWindow: LocalizedError {
+        let label: String
+        var errorDescription: String? { L("追加できなくなったウィンドウ: %@", label) }
+    }
+
+    @discardableResult
+    func fillStartPage(_ id: UUID, with candidates: [WindowCandidate]) -> Bool {
+        guard isStartPage(id), let index = tabIDs.firstIndex(of: id), let cell = cellIndex(for: id) else {
+            onMessage?(.attention(L("このタブまたはウィンドウは利用できなくなりました。")))
+            return false
+        }
+        var added = 0
+        var errors: [Error] = []
+        for candidate in candidates {
+            guard !contains(candidate), !isClaimedElsewhere(candidate) else {
+                errors.append(UnavailableWindow(label: candidate.label))
+                continue
+            }
+            do {
+                let window = try register(candidate, id: added == 0 ? id : UUID())
+                if added > 0 {
+                    tabIDs.insert(window.id, at: index + added)
+                    assignments[window.id] = cell
+                }
+                added += 1
+            } catch {
+                errors.append(error)
+            }
+        }
+        if added > 0 { select(id, activate: true) }
+        report(errors)
+        return added > 0
     }
 
     func add(_ candidate: WindowCandidate, originalFrame: CGRect? = nil, at insertionIndex: Int? = nil) {
-        if let insertionIndex, !(0 ... windows.count).contains(insertionIndex) {
+        if let insertionIndex, !(0 ... tabIDs.count).contains(insertionIndex) {
             onMessage?(.attention(L("タブを移動できませんでした。移動先と対象ウィンドウを確認してください。")))
             return
         }
@@ -347,28 +474,31 @@ final class WindowSession {
         add(candidates, originalFrame: nil)
     }
 
+    private func register(_ candidate: WindowCandidate, id: UUID,
+                          originalFrame: CGRect? = nil) throws -> ManagedWindow {
+        for attribute in [kAXPositionAttribute, kAXSizeAttribute, kAXMinimizedAttribute] {
+            try access.requireWritable(candidate.element, attribute)
+        }
+        let window = ManagedWindow(
+            id: id, candidate: candidate, originalFrame: try originalFrame ?? access.frame(candidate.element),
+            originallyMinimized: try access.isMinimized(candidate.element))
+        managedByID[id] = window
+        onAddedApplication?(candidate.application)
+        return window
+    }
+
     private func add(_ candidates: [WindowCandidate], originalFrame: CGRect?, at insertionIndex: Int? = nil) {
         var added: [ManagedWindow] = []
         var errors: [Error] = []
         for candidate in candidates where !contains(candidate) {
             do {
-                for attribute in [kAXPositionAttribute, kAXSizeAttribute, kAXMinimizedAttribute] {
-                    try access.requireWritable(candidate.element, attribute)
-                }
-                let window = ManagedWindow(
-                    candidate: candidate,
-                    originalFrame: try originalFrame ?? access.frame(candidate.element),
-                    originallyMinimized: try access.isMinimized(candidate.element))
-                windows.append(window)
+                let window = try register(candidate, id: UUID(), originalFrame: originalFrame)
+                tabIDs.insert(window.id, at: insertionIndex ?? tabIDs.count)
                 added.append(window)
                 assignments[window.id] = activeCell
             } catch {
                 errors.append(error)
             }
-        }
-        if let insertionIndex, let window = added.first {
-            windows.removeAll { $0.id == window.id }
-            windows.insert(window, at: insertionIndex)
         }
         for window in added.dropLast() {
             do {
@@ -391,7 +521,7 @@ final class WindowSession {
     }
 
     func select(_ id: UUID, activate: Bool = false) {
-        guard windows.contains(where: { $0.id == id }) else { return }
+        guard tabIDs.contains(id) else { return }
         var displaced: UUID?
         if let index = cellIndex(for: id) {
             activeCell = index
@@ -409,12 +539,13 @@ final class WindowSession {
         }
         replacePresentation(of: displaced, with: id)
         onChange?()
-        if activate { focus(id) }
+        if activate, managedByID[id] != nil { focus(id) }
         presentVisibleWindows()
+        if activate, isStartPage(id) { onFocusStartPage?() }
     }
 
     private func select(_ id: UUID, inCell cell: Int, activate: Bool) {
-        guard windows.contains(where: { $0.id == id }), cells.indices.contains(cell),
+        guard tabIDs.contains(id), cells.indices.contains(cell),
               !pinnedCells.contains(cell), cellIndex(for: id) == nil || cellIndex(for: id) == cell
         else { return }
         let displaced = cells[cell]
@@ -424,21 +555,22 @@ final class WindowSession {
         lastUnpinnedCell = cell
         replacePresentation(of: displaced, with: id)
         onChange?()
-        if activate { focus(id) }
+        if activate, managedByID[id] != nil { focus(id) }
         presentVisibleWindows()
+        if activate, isStartPage(id) { onFocusStartPage?() }
     }
 
     /// Focuses a window; if its AX element went stale, re-resolves it once and retries.
     private func focus(_ id: UUID) {
-        guard let index = windows.firstIndex(where: { $0.id == id }) else { return }
+        guard let window = managedByID[id] else { return }
         do {
-            try access.focus(windows[index].candidate.element, windows[index].candidate.application)
+            try access.focus(window.candidate.element, window.candidate.application)
         } catch let error as WindowAccessError where error.code == .invalidUIElement {
-            guard let fresh = reresolve(windows[index]) else {
+            guard let fresh = reresolve(window) else {
                 report(error)
                 return
             }
-            windows[index].candidate = fresh
+            managedByID[id]?.candidate = fresh
             onChange?()
             do {
                 try access.focus(fresh.element, fresh.application)
@@ -451,7 +583,7 @@ final class WindowSession {
     }
 
     func moveWindow(_ id: UUID, toCell destination: Int) {
-        guard windows.contains(where: { $0.id == id }), cells.indices.contains(destination) else { return }
+        guard tabIDs.contains(id), cells.indices.contains(destination) else { return }
         if let source = cellIndex(for: id) {
             guard source != destination else { return }
             cells.swapAt(source, destination)
@@ -470,15 +602,9 @@ final class WindowSession {
     }
 
     func reorderWindows(_ orderedIDs: [UUID]) {
-        let currentIDs = Set(windows.map(\.id))
-        guard orderedIDs.count == windows.count,
-              Set(orderedIDs).count == windows.count,
-              Set(orderedIDs) == currentIDs
+        guard orderedIDs.count == tabIDs.count, Set(orderedIDs) == Set(tabIDs), orderedIDs != tabIDs
         else { return }
-        let windowsByID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
-        let reordered = orderedIDs.compactMap { windowsByID[$0] }
-        guard reordered.map(\.id) != windows.map(\.id) else { return }
-        windows = reordered
+        tabIDs = orderedIDs
         onChange?()
     }
 
@@ -486,18 +612,19 @@ final class WindowSession {
     func transferWindow(_ id: UUID, to destination: WindowSession, at insertionIndex: Int? = nil, cell: Int? = nil)
         -> Bool
     {
-        let insertion = insertionIndex ?? destination.windows.count
+        let insertion = insertionIndex ?? destination.tabIDs.count
         let targetCell = cell ?? destination.activeCell
-        guard self !== destination, let index = windows.firstIndex(where: { $0.id == id }),
-              !destination.contains(windows[index].candidate),
-              (0 ... destination.windows.count).contains(insertion),
+        guard self !== destination, let index = tabIDs.firstIndex(of: id),
+              managedByID[id].map({ !destination.contains($0.candidate) }) ?? true,
+              (0 ... destination.tabIDs.count).contains(insertion),
               destination.cells.indices.contains(targetCell)
         else {
             onMessage?(.attention(L("タブを移動できませんでした。移動先と対象ウィンドウを確認してください。")))
             return false
         }
-        let window = windows.remove(at: index)
-        destination.windows.insert(window, at: insertion)
+        tabIDs.remove(at: index)
+        destination.tabIDs.insert(id, at: insertion)
+        destination.managedByID[id] = managedByID.removeValue(forKey: id)
         destination.minimumSizes[id] = minimumSizes.removeValue(forKey: id)
         if constraintWarningIDs.remove(id) != nil { destination.constraintWarningIDs.insert(id) }
         cancelConstraintRecovery(for: id)
@@ -506,7 +633,7 @@ final class WindowSession {
         assignments.removeValue(forKey: id)
         pendingClosedIDs.remove(id)
         if !isSplit, cells[0] == id {
-            cells[0] = windows.isEmpty ? nil : windows[min(index, windows.count - 1)].id
+            cells[0] = tabIDs.isEmpty ? nil : tabIDs[min(index, tabIDs.count - 1)]
         }
         reconcilePanes()
         destination.cells[targetCell] = id
@@ -539,14 +666,14 @@ final class WindowSession {
 
     func cycle(_ offset: Int) {
         guard let cell = tabSwitchCell else { return }
-        let candidates = windows.filter { window in
-            guard let index = cellIndex(for: window.id) else { return true }
+        let candidates = tabIDs.filter { id in
+            guard let index = cellIndex(for: id) else { return true }
             return index == cell
         }
         guard candidates.count > 1 else { return }
-        let index = candidates.firstIndex { cellIndex(for: $0.id) == cell } ?? (offset > 0 ? -1 : 0)
+        let index = candidates.firstIndex { cellIndex(for: $0) == cell } ?? (offset > 0 ? -1 : 0)
         let next = ((index + offset) % candidates.count + candidates.count) % candidates.count
-        select(candidates[next].id, inCell: cell, activate: true)
+        select(candidates[next], inCell: cell, activate: true)
     }
 
     func sync() {
@@ -629,7 +756,8 @@ final class WindowSession {
 
     func raiseSelected(activate: Bool = false) {
         let order = presentationOrder.filter { !access.isFullScreen($0.candidate.element) }
-        guard !activate else {
+        let selectingStartPage = selectedID.map(isStartPage) == true
+        guard !activate || selectingStartPage else {
             // Front-window-only activation brings one window per call above other apps, so every visible
             // window takes its turn, ending with the selected one.
             for window in order { focus(window.id) }
@@ -644,6 +772,7 @@ final class WindowSession {
             }
         }
         report(errors)
+        if activate, selectingStartPage { onFocusStartPage?() }
     }
 
     private var presentationOrder: [ManagedWindow] {
@@ -928,37 +1057,37 @@ final class WindowSession {
 
     @discardableResult
     func remove(_ id: UUID, closeWindow: Bool) -> Bool {
-        guard let index = windows.firstIndex(where: { $0.id == id }) else { return true }
-        if closeWindow {
-            let window = windows[index]
+        guard let index = tabIDs.firstIndex(of: id) else { return true }
+        if let window = managedByID[id], closeWindow {
             let number = access.windowID(window.candidate.element) ?? kCGNullWindowID
             do {
                 try access.close(window.candidate.element)
             } catch {
                 // A timeout can mean the press was delivered, e.g. while an app opens a modal save dialog.
-                if (error as? WindowAccessError)?.code == .cannotComplete { windows[index].closingWindowID = number }
+                if (error as? WindowAccessError)?.code == .cannotComplete { managedByID[id]?.closingWindowID = number }
                 report(error)
                 return false
             }
-            windows[index].closingWindowID = number
+            managedByID[id]?.closingWindowID = number
             // A successful AX press isn't proof of closure: the owner may ask to save or veto closing.
             guard window.candidate.application.isTerminated || access.probe(window.candidate.element)
                 .error == .invalidUIElement
             else { return true }
-        } else {
+        } else if let window = managedByID[id] {
             // Stop showing the window through its pane before moving it back to its original frame.
             withdrawPresentation(of: id)
             do {
-                try windows[index].restore(using: access)
+                try window.restore(using: access)
             } catch {
                 report(error)
                 synchronize(bringToFront: true)
                 return false
             }
         }
-        windows.remove(at: index)
+        managedByID.removeValue(forKey: id)
+        tabIDs.remove(at: index)
         if !isSplit, cells[0] == id {
-            cells[0] = windows.isEmpty ? nil : windows[min(index, windows.count - 1)].id
+            cells[0] = tabIDs.isEmpty ? nil : tabIDs[min(index, tabIDs.count - 1)]
         }
         requestedFrames.removeValue(forKey: id)
         suspendedWindowIDs.remove(id)
@@ -995,8 +1124,7 @@ final class WindowSession {
         var closedIDs: Set<UUID> = []
         var listedByPID: [pid_t: [AXUIElement]] = [:]
         var titleChanged = false
-        for index in windows.indices {
-            let window = windows[index]
+        for window in windows {
             if window.candidate.application.isTerminated {
                 closedIDs.insert(window.id)
                 continue
@@ -1015,15 +1143,15 @@ final class WindowSession {
                     closedIDs.insert(window.id)
                 }
             }
-            if let title = probe.title, windows[index].candidate.title != title {
-                windows[index].candidate.title = title
+            if let title = probe.title, window.candidate.title != title {
+                managedByID[window.id]?.candidate.title = title
                 titleChanged = true
             }
             // A busy app still owns its window; only a stale element is looked up again.
             if probe.error == .invalidUIElement {
                 if let fresh = reresolve(window) {
                     titleChanged = titleChanged || window.candidate.title != fresh.title
-                    windows[index].candidate = fresh
+                    managedByID[window.id]?.candidate = fresh
                     WindowAccess.logger.notice("prune re-resolved \(fresh.label, privacy: .public)")
                 } else {
                     closedIDs.insert(window.id)
@@ -1039,7 +1167,8 @@ final class WindowSession {
         }
         WindowAccess.logger.notice("prune removing \(confirmed.count) windows")
         let ids = confirmed
-        windows.removeAll { ids.contains($0.id) }
+        for id in ids { managedByID.removeValue(forKey: id) }
+        tabIDs.removeAll { ids.contains($0) }
         requestedFrames = requestedFrames.filter { !ids.contains($0.key) }
         suspendedWindowIDs.subtract(ids)
         assignments = assignments.filter { !ids.contains($0.key) }
@@ -1052,15 +1181,15 @@ final class WindowSession {
     }
 
     private func reconcilePanes() {
-        let ids = Set(windows.map(\.id))
+        let ids = Set(tabIDs)
         for index in cells.indices {
             if let id = cells[index], !ids.contains(id) {
                 cells[index] = nil
-                cells[index] = windows.first(where: { !cells.contains($0.id) })?.id
+                cells[index] = tabIDs.first(where: { !cells.contains($0) })
             }
             if let id = cells[index] { assignments[id] = index }
         }
-        if windows.count <= 1, customLayout == nil { configureGrid(.single) }
+        if tabIDs.count <= 1, customLayout == nil { configureGrid(.single) }
         clearPresentation()
     }
 

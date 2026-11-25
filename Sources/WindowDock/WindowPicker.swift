@@ -1,4 +1,5 @@
 import AppKit
+import WindowDockCore
 
 @MainActor
 final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -15,7 +16,7 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let onSelect: ([WindowCandidate]) -> Void
 
     init(
-        candidates: [WindowCandidate], failedApplications: [String], suggested: [Int] = [],
+        candidates: [WindowCandidate], failedApplications: [String],
         onSelect: @escaping ([WindowCandidate]) -> Void
     ) {
         self.candidates = candidates
@@ -53,7 +54,7 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             note = L("ウィンドウを選んで追加。フルスクリーンは事前に解除してください。")
         }
         if !candidates.isEmpty {
-            note += L("\nCommand + クリックで複数選択 / Shift + クリックで範囲選択")
+            note += "\n" + L("Command + クリックで複数選択 / Shift + クリックで範囲選択")
         }
         let label = NSTextField(wrappingLabelWithString: note)
         label.textColor = .secondaryLabelColor
@@ -72,10 +73,7 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             scroll.widthAnchor.constraint(equalTo: content.widthAnchor),
             label.widthAnchor.constraint(equalTo: content.widthAnchor),
         ])
-        if !suggested.isEmpty {
-            table.selectRowIndexes(IndexSet(suggested), byExtendingSelection: false)
-            table.scrollRowToVisible(suggested[0])
-        } else if !candidates.isEmpty {
+        if !candidates.isEmpty {
             table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
         updateAddButton()
@@ -107,9 +105,9 @@ final class WindowPicker: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     @objc private func selectAllOfApps() {
-        let pids = Set(table.selectedRowIndexes.map { candidates[$0].application.processIdentifier })
-        let rows = candidates.indices.filter { pids.contains(candidates[$0].application.processIdentifier) }
-        table.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
+        let rows = table.selectedRowIndexes
+            .includingWindowsOfSelectedApps(in: candidates.map(\.application.processIdentifier))
+        table.selectRowIndexes(rows, byExtendingSelection: false)
     }
 
     @objc private func add() {

@@ -116,7 +116,8 @@ final class WorkspaceGridView: NSView {
         areas = (0 ..< (customLayout?.paneCount ?? gridSize.cellCount)).map { index in
             let cell = WorkspaceGridCell()
             cell.wantsLayer = true
-            cell.translatesAutoresizingMaskIntoConstraints = false
+            // layoutCells() owns the frame. Expose it to Auto Layout for content pinned inside the cell.
+            cell.translatesAutoresizingMaskIntoConstraints = true
             cell.onClick = { [weak self] in self?.onActivate?(index) }
             cell.makeMenu = { [weak self] in self?.menuForPane?(index) }
             addSubview(cell)

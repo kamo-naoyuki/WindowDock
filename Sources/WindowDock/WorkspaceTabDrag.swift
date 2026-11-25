@@ -61,8 +61,44 @@ extension NSDraggingInfo {
     }
 }
 
+private extension NSView {
+    func trackTabHover() {
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+}
+
+final class WorkspaceTabCloseButton: NSButton {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        trackTabHover()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard (superview as? WorkspaceTabGroup)?.isFloating != true else { return }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.30).cgColor
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        // The pointer may still be inside the tab; don't forward this button's exit to the group's responder.
+        layer?.backgroundColor = nil
+    }
+}
+
 final class WorkspaceTabGroup: NSStackView {
-    var isFloating = false
+    var isFloating = false {
+        didSet { if isFloating { hovered = false } }
+    }
+    private var selected: Bool?
+    private var hovered = false {
+        didSet { if oldValue != hovered { updateBackground() } }
+    }
     var acceptsTabDrop: ((NSPasteboard, NSButton?) -> Bool)?
     var updateTabDrop: ((NSPasteboard, NSButton?, NSPoint) -> Bool)?
     var performTabDrop: ((NSPasteboard, NSButton?, NSPoint) -> Bool)?
@@ -76,6 +112,35 @@ final class WorkspaceTabGroup: NSStackView {
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         registerForDraggedTypes([workspaceTabDragType])
+    }
+
+    func setSelectedAppearance(_ value: Bool) {
+        if selected == nil {
+            trackTabHover()
+        }
+        selected = value
+        updateBackground()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if !isFloating { hovered = true }
+    }
+
+    override func mouseExited(with event: NSEvent) { hovered = false }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBackground()
+    }
+
+    private func updateBackground() {
+        guard let selected else { return } // Drop previews have their own appearance.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let base = selected ? NSColor.controlBackgroundColor
+                : NSColor.unemphasizedSelectedContentBackgroundColor.withAlphaComponent(0.35)
+            let color = hovered ? base.blended(withFraction: 0.13, of: .controlAccentColor) ?? base : base
+            layer?.backgroundColor = color.cgColor
+        }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -430,12 +495,12 @@ final class WorkspaceTabTransfer {
         if !cancelled, drag.source.acceptsWindowDrag {
             if let destination = self.destination(at: point, from: drag.source) {
                 _ = destination.completeTabDrop(pasteboard: pasteboard, source: drag.button, at: point)
-            } else if drag.source.session.windows.contains(where: { $0.id == drag.id }) {
+            } else if drag.source.session.tabIDs.contains(drag.id) {
                 hideTargets()
                 switch outsideDropAction() {
                 case .release:
                     if drag.source.session.remove(drag.id),
-                       !drag.source.session.windows.contains(where: { $0.id == drag.id })
+                       !drag.source.session.tabIDs.contains(drag.id)
                     {
                         onRelease(drag.source)
                     }

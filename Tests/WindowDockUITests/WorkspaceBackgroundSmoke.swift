@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import SwiftUI
 import WindowDockCore
 
 private final class TabDragInfo: NSObject, NSDraggingInfo {
@@ -48,6 +49,35 @@ enum WorkspaceBackgroundSmoke {
         }
         let previous = NSWorkspace.shared.frontmostApplication
         application.setActivationPolicy(.accessory)
+        if CommandLine.arguments.contains("--finder-scan-only") {
+            // Finder also publishes its desktop scroll area in AXWindows. Never move or open a user's window here.
+            guard WindowAccess.isTrusted,
+                  let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first,
+                  let elements = WindowAccess.windowElements(finder)
+            else { fputs("FAIL: Finder scan needs Accessibility permission and a running Finder\n", stderr); exit(1) }
+            let expected = elements.filter {
+                (try? WindowAccess.value($0, kAXSubroleAttribute) as? String) == kAXStandardWindowSubrole
+            }
+            let scan = WindowAccess.scan()
+            let found = scan.windows.filter { $0.application.processIdentifier == finder.processIdentifier }
+            guard !scan.failedApplications.contains(finder.localizedName ?? "App"),
+                  found.count == expected.count,
+                  expected.allSatisfy({ element in found.contains { CFEqual(element, $0.element) } })
+            else { fputs("FAIL: Finder scan warned or lost an ordinary folder window\n", stderr); exit(1) }
+            print("PASS: Finder scan returned \(found.count) ordinary windows without a false warning")
+            return
+        }
+        if CommandLine.arguments.contains("--new-window-only") {
+            Task { @MainActor in
+                let failures = await WindowSessionSmoke.runNewWindowLaunchCheck()
+                for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
+                if failures
+                    .isEmpty { print("PASS: launch creates a fresh window without switching to an existing tab") }
+                exit(failures.isEmpty ? 0 : 1)
+            }
+            application.run()
+            return
+        }
         DispatchQueue.main.async {
             let focused = CommandLine.arguments.contains("--tab-move-only")
             let dropOnly = CommandLine.arguments.contains("--window-drop-only")
@@ -60,7 +90,9 @@ enum WorkspaceBackgroundSmoke {
             let enhancedUIOnly = CommandLine.arguments.contains("--enhanced-ui-only")
             let emptyWorkspaceOnly = CommandLine.arguments.contains("--empty-workspace-only")
             let failures: [String]
-            if emptyWorkspaceOnly {
+            if CommandLine.arguments.contains("--new-tab-only") {
+                failures = WindowSessionSmoke.runNewTabChecks() + checkThumbnailSelection()
+            } else if emptyWorkspaceOnly {
                 failures = WindowSessionSmoke.runEmptyWorkspaceDeletionChecks() + checkWindowPicker()
             } else if enhancedUIOnly {
                 failures = WindowSessionSmoke.runEnhancedUIFrameChecks()
@@ -94,7 +126,9 @@ enum WorkspaceBackgroundSmoke {
                         + WindowSessionSmoke.runTabTransferKeyChecks() + WindowSessionSmoke.runActivationRefitChecks()
             } else {
                 failures =
-                    WindowSessionSmoke.runChecks() + checkWindowPicker() + runChecks() + checkCompactLayout()
+                    WindowSessionSmoke
+                        .runChecks() + checkWindowPicker() + checkThumbnailSelection() + runChecks() +
+                        checkCompactLayout()
                         + checkGridLayout() + checkTabMoveRouting() + checkNativeWindowDrops()
             }
             if let previous {
@@ -103,7 +137,9 @@ enum WorkspaceBackgroundSmoke {
             }
             if failures.isEmpty {
                 print(
-                    emptyWorkspaceOnly
+                    CommandLine.arguments.contains("--new-tab-only")
+                        ? "PASS: inline start pages, selection, replacement, failure and closing"
+                        : emptyWorkspaceOnly
                         ? "PASS: empty-workspace deletion, last-tab transfer and deferred cleanup"
                         : nestedOnly
                         ? "PASS: nested pane menus, layout, resizing, persistence, tab reflow and routing"
@@ -245,6 +281,80 @@ enum WorkspaceBackgroundSmoke {
             failures.append("native window drop check failed: \(error.localizedDescription)")
         }
         return failures
+    }
+
+    @MainActor
+    private static func checkThumbnailSelection() -> [String] {
+        let candidates = (0 ..< 3).map {
+            WindowCandidate(
+                element: AXUIElementCreateApplication(pid_t(910_000 + $0)),
+                application: .current,
+                title: "Choice \($0)")
+        }
+        var submitted: [[String]] = []
+        let grid = WindowChoiceGrid(windows: candidates, previews: nil) {
+            submitted.append($0.map(\.title))
+            return true
+        }
+        let host = NSHostingView(rootView: grid.frame(width: 640, height: 400)
+            .environment(\.accessibilityEnabled, true))
+        let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 640, height: 400),
+                              styleMask: .titled, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+
+        // SwiftUI's lazy grid exposes the AX selectors without adopting NSAccessibilityProtocol.
+        func findButton(_ name: String, in nodes: [Any]) -> AnyObject? {
+            for node in nodes.map({ $0 as AnyObject }) {
+                if node.accessibilityRole?() == .button,
+                   node.accessibilityLabel?() == name || node.accessibilityTitle?() == name { return node }
+                if let match = findButton(name, in: node.accessibilityChildren?() ?? []) { return match }
+            }
+            return nil
+        }
+        func button(_ name: String) -> AnyObject? {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            return findButton(name, in: host.accessibilityChildren() ?? [])
+        }
+        func press(_ name: String) -> Bool {
+            guard let button = button(name), button.isAccessibilityEnabled?() == true else { return false }
+            return button.accessibilityPerformPress?() == true
+        }
+        func click(_ index: Int, with flags: NSEvent.ModifierFlags) -> Bool {
+            guard let frame = button(candidates[index].label)?.accessibilityFrame?(),
+                  !frame.isEmpty else { return false }
+            let point = window.convertPoint(fromScreen: NSPoint(x: frame.midX, y: frame.midY))
+            // Send these only through the fixture's own AppKit queue, not to the system pointer.
+            for type in [NSEvent.EventType.leftMouseUp, .leftMouseDown] {
+                guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags,
+                                                     timestamp: ProcessInfo.processInfo.systemUptime,
+                                                     windowNumber: window.windowNumber, context: nil,
+                                                     eventNumber: 1, clickCount: 1, pressure: 1) else { return false }
+                NSApp.postEvent(event, atStart: true)
+            }
+            while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp], until: .distantPast,
+                                              inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+            return true
+        }
+        guard press(L("複数選択")), button(L("%d件を追加", 0))?.isAccessibilityEnabled?() == false, press(candidates[1].label),
+              press(L("選択したアプリの全ウィンドウを選択")), press(candidates[1].label),
+              submitted.isEmpty, press(L("%d件を追加", 2)), submitted == [["Choice 0", "Choice 2"]]
+        else {
+            return ["thumbnail controls didn't select an app, deselect a card and submit the checked windows in order"]
+        }
+        guard press(L("キャンセル")), press(candidates[1].label), submitted.last == ["Choice 1"], submitted.count == 2
+        else { return ["cancelling thumbnail selection didn't restore one-click add"] }
+        guard click(2, with: .shift), button(L("%d件を追加", 1)) != nil, click(0, with: .shift),
+              button(L("%d件を追加", 3)) != nil, click(1, with: .shift), button(L("%d件を追加", 2)) != nil,
+              click(2, with: .command), press(L("%d件を追加", 1)), submitted.last == ["Choice 1"], submitted.count == 3
+        else { return ["Shift-click did not select/shrink a range, or Command-click didn't toggle a thumbnail"] }
+        return []
     }
 
     @MainActor

@@ -78,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Setting.controlTabSwitching.rawValue: true,
             Setting.addWindowsByDragging.rawValue: true,
             Setting.autoHideNewWorkspaces.rawValue: false,
+            Setting.wrapCrowdedTabs.rawValue: false,
             Setting.returnDisplacedWindows.rawValue: true,
             Setting.returnFullScreenWindows.rawValue: false,
             Setting.deleteEmptyWorkspaces.rawValue: false,
@@ -152,9 +153,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         NSApp.activate(ignoringOtherApps: true)
-        let saved = chooseWorkspacesToRestore(SavedLayout.load().filter { !$0.windows.isEmpty })
-        let first = addWorkspace(name: saved.first?.name)
-        if !saved.isEmpty { restore(saved[...], in: first) }
+        let layouts = SavedLayout.load().filter { !$0.windows.isEmpty }
+        RecentApplications().seedIfNeeded(from: layouts.flatMap { $0.windows.map(\.bundleID) })
+        let saved = chooseWorkspacesToRestore(layouts)
+        WorkspaceRestore.start(saved) { self.addWorkspace(name: $0) }
     }
 
     /// Lets the user pick which saved workspaces to bring back; a single workspace needs no question.
@@ -199,33 +201,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return menu
     }
 
-    /// Asks for every workspace's windows first and adds them all afterwards, so that activating one workspace's
-    /// windows never covers the dialog of the next workspace.
-    private func restore(
-        _ workspaces: ArraySlice<SavedWorkspace>, in controller: WorkspaceController,
-        chosen: [(WorkspaceController, [WindowCandidate], SavedWorkspace)] = []) {
-        guard let workspace = workspaces.first else { return }
-        var chosen = chosen
-        var picked: [WindowCandidate] = []
-        controller.setAutoHideTabs(workspace.autoHideTabs ?? isSettingEnabled(.autoHideNewWorkspaces))
-        controller.presentPicker(
-            restoring: workspace.windows,
-            excluding: chosen.flatMap { $0.1 },
-            collect: { picked = $0 }) { [weak self] in
-                guard let self else { return }
-                chosen.append((controller, picked, workspace))
-                if let next = workspaces.dropFirst().first {
-                    self.restore(workspaces.dropFirst(), in: self.addWorkspace(name: next.name), chosen: chosen)
-                    return
-                }
-                for (controller, candidates, saved) in chosen.reversed() {
-                    controller.restoreLayout(saved)
-                    if !candidates.isEmpty { controller.session.add(candidates) }
-                }
-                chosen.first?.0.present()
-        }
-    }
-
     // MARK: Menu
 
     private enum Setting: String {
@@ -233,13 +208,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case controlTabSwitching = "controlTabSwitching"
         case addWindowsByDragging = "addWindowsByDragging"
         case autoHideNewWorkspaces = "autoHideNewWorkspaces"
+        case wrapCrowdedTabs
         case returnDisplacedWindows = "returnDraggedWindowsToPanes"
         case returnFullScreenWindows = "returnFullScreenWindowsToPanes"
         case deleteEmptyWorkspaces = "deleteEmptyWorkspaces"
 
         var defaultValue: Bool {
             switch self {
-            case .closeOnRelease, .autoHideNewWorkspaces, .returnFullScreenWindows, .deleteEmptyWorkspaces: false
+            case .closeOnRelease, .autoHideNewWorkspaces, .returnFullScreenWindows, .deleteEmptyWorkspaces,
+                 .wrapCrowdedTabs: false
             case .controlTabSwitching, .addWindowsByDragging, .returnDisplacedWindows: true
             }
         }
@@ -269,6 +246,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for controller in controllers { controller.returnsFullScreenWindows = enabled }
         case .deleteEmptyWorkspaces:
             for controller in controllers { controller.deletesWhenEmpty = enabled }
+        case .wrapCrowdedTabs:
+            for controller in controllers { controller.setWrapsCrowdedTabs(enabled) }
         case .autoHideNewWorkspaces:
             break
         }
@@ -356,6 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateTabMenu(_ menu: NSMenu) {
         menu.removeAllItems()
+        menu.addItem(withTitle: L("新しいタブ"), action: #selector(newTab), keyEquivalent: "t")
         menu.addItem(withTitle: L("ウィンドウを追加…"), action: #selector(showPicker), keyEquivalent: "o")
         let releaseTitle = isSettingEnabled(.closeOnRelease) ? L("選択中のタブのウィンドウを閉じる") : L("選択中のタブを解除")
         menu.addItem(withTitle: releaseTitle, action: #selector(removeSelected), keyEquivalent: "w")
@@ -370,7 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         previousTab.keyEquivalentModifierMask = [.control, .shift]
         previousTab.isEnabled = controlTabEnabled
         nextTab.isEnabled = controlTabEnabled
-        let populatedWorkspaces = controllers.filter { !$0.session.windows.isEmpty }
+        let populatedWorkspaces = controllers.filter { !$0.session.tabIDs.isEmpty }
         guard !populatedWorkspaces.isEmpty else { return }
         menu.addItem(.separator())
         for controller in populatedWorkspaces {
@@ -378,14 +358,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 withTitle: "\(controller.name) — " + L("%d個のウィンドウ", controller.session.windows.count),
                 action: nil, keyEquivalent: "")
             workspaceItem.isEnabled = false
-            for managed in controller.session.windows {
+            for id in controller.session.tabIDs {
                 let item = menu.addItem(
-                    withTitle: managed.candidate.label, action: #selector(showWorkspaceWindow(_:)),
+                    withTitle: controller.session.managedByID[id]?.candidate.label ?? L("新しいタブ"),
+                    action: #selector(showWorkspaceWindow(_:)),
                     keyEquivalent: "")
                 item.target = self
                 item.indentationLevel = 1
-                item.representedObject = WorkspaceWindowRef(controller: controller, id: managed.id)
-                item.state = controller.session.selectedID == managed.id ? .mixed : .off
+                item.representedObject = WorkspaceWindowRef(controller: controller, id: id)
+                item.state = controller.session.selectedID == id ? .mixed : .off
             }
         }
     }
@@ -418,6 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.returnFullScreenWindows, "フルスクリーンのウィンドウもペインに戻す"),
             (.deleteEmptyWorkspaces, "空になったワークスペースを自動的に削除する"),
             (.autoHideNewWorkspaces, "新しいワークスペースではタブバーを自動的に隠す"),
+            (.wrapCrowdedTabs, "タブが収まらないときは2段にする"),
         ]
         for (setting, title) in settings {
             let item = menu.addItem(withTitle: L(title), action: #selector(toggleSetting(_:)), keyEquivalent: "")
@@ -459,9 +441,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let name = sender.representedObject as? String,
               let workspace = SavedLayout.load().first(where: { $0.name == name })
         else { return }
-        let controller = addWorkspace(name: workspace.name)
-        controller.restoreLayout(workspace)
-        controller.presentPicker(restoring: workspace.windows, completion: nil)
+        if workspace.windows.isEmpty {
+            let controller = addWorkspace(name: name)
+            controller.restoreLayout(workspace)
+            controller.showPicker()
+        } else {
+            WorkspaceRestore.start([workspace]) { self.addWorkspace(name: $0) }
+        }
     }
 
     @objc private func deleteSavedWorkspace(_ sender: NSMenuItem) {
@@ -501,11 +487,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @discardableResult
     private func addWorkspace(name: String? = nil, dropPoint: NSPoint? = nil) -> WorkspaceController {
         let controller = WorkspaceController(name: name ?? nextWorkspaceName())
+        controller.session.onAddedApplication = { app in
+            if let id = app.bundleIdentifier { RecentApplications().record(id) }
+        }
         controller.session.closesWindowsOnRelease = isSettingEnabled(.closeOnRelease)
         controller.returnsDisplacedWindows = isSettingEnabled(.returnDisplacedWindows)
         controller.returnsFullScreenWindows = isSettingEnabled(.returnFullScreenWindows)
         controller.deletesWhenEmpty = isSettingEnabled(.deleteEmptyWorkspaces)
         controller.setAutoHideTabs(isSettingEnabled(.autoHideNewWorkspaces))
+        controller.setWrapsCrowdedTabs(isSettingEnabled(.wrapCrowdedTabs))
         controller.onClose = { [weak self] in self?.close($0) }
         controller.onSessionChange = { [weak self] controller in
             guard let self, !self.quitting else { return }
@@ -651,6 +641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Menu actions for the active workspace
 
     @objc private func showPicker() { activeController?.showPicker() }
+    @objc private func newTab() { activeController?.newTab() }
     @objc private func removeSelected() { activeController?.removeSelected() }
     @objc private func selectNextTab() { activeController?.cycleTabs(1) }
     @objc private func selectPreviousTab() { activeController?.cycleTabs(-1) }

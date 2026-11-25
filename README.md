@@ -19,13 +19,22 @@ bash build-app.sh
 open dist/WindowDock.app
 ```
 
-On first launch, allow WindowDock to move and resize windows in **System Settings → Privacy & Security → Accessibility**. Screen Recording permission is not required. Click **+** in the tab bar to choose windows, or drag a window onto the tab bar.
+On first launch, allow WindowDock to move and resize windows in **System Settings → Privacy & Security → Accessibility**.
+
+Click **+** (or press **⌘T** in WindowDock) to open a new tab. Pick an existing window by its preview, app icon and title, or click one of your ten most recently added apps to open a **new window**. For other apps, use **Choose Another App to Launch…**. If the app is already running, it needs a New Window command; WindowDock won't reuse an old window instead. The new window takes the place of the new tab.
+
+To add several windows as separate tabs, **⌘-click** individual thumbnails or **Shift-click** the first and last thumbnails of a range, then click **Add**. You can also click **Select Multiple** and check thumbnails without holding a key. To include every available window of an app, check one of its thumbnails and click **Select All Windows of App** before adding.
+
+Window previews are still images, not live video. Screen Recording permission is optional: without it, pick by app icon and window title. You can also use **⌘O** to add multiple windows at once, or drag a window onto the tab bar.
+
+On startup, choose which saved workspaces to reopen if there is more than one. Each workspace shows an inline tab with matching open windows checked in saved tab order. Adjust the selection and click **Restore**, or skip the workspace’s tabs without erasing its saved layout. WindowDock adds the selected windows after you review the last workspace, using each workspace’s saved panes and pins. With no saved workspaces selected, you start in an empty workspace.
 
 When dragging a window onto a tab bar, the bar comes to the front and a translucent tab shows where it will be added.
 
 ## Using a workspace
 
-- Click a tab to switch windows. The tab highlight updates as its window is brought forward. Use **Control+Tab** for the next tab or **Control+Shift+Tab** for the previous one.
+- Hover over a tab to highlight it; hovering directly over **×** highlights the close button more strongly. Click the tab to switch windows. When tabs open or close, the others slide into place unless **Reduce motion** is enabled in macOS. Use **Control+Tab** for the next tab or **Control+Shift+Tab** for the previous one.
+- Tabs share the available width equally, with titles aligned to the left. When you click **×**, the next tab slides its **×** under the pointer; widths adjust once the pointer leaves the bar. Enable **Settings → Wrap crowded tabs into two rows** to use a second row before scrolling in a top or bottom tab bar.
 - Bringing a managed window to the front outside WindowDock also selects its tab. In a split workspace, a window not currently shown replaces the Control+Tab target pane; pinned panes stay in place.
 - Right-click a displayed tab or pane to open **Pane** options. With two or more panes, choose **Pin Pane** to keep its window in place while Control+Tab switches the last selected unpinned pane. Other displayed panes are skipped, so the target is unambiguous in layouts with three or more panes. Pinned panes show a pin icon; the tab-switch target has a highlighted outline.
 - Right-click a displayed tab and choose **Pane → Split Left and Right / Split Top and Bottom** to split just that pane, up to four subdivisions in each direction. If an app’s window won’t fit in a pane, its name appears beside the disabled direction or in the warning when WindowDock returns to 1×1. The same actions are available on an empty pane or under **View → Pane**. Drag each divider to resize; **Close Pane** keeps its windows as tabs. The column/row controls return to a regular grid; custom layouts, divider positions, and pinned panes are saved.

@@ -61,15 +61,24 @@ enum SavedLayout {
     }
 
     /// Titles change easily, so the app is the hard requirement and title/position only rank candidates.
-    static func suggest(_ saved: [SavedWindow], among candidates: [WindowCandidate]) -> [Int] {
+    static func suggest(
+        _ saved: [SavedWindow], among candidates: [WindowCandidate],
+        frameOf: (AXUIElement) throws -> CGRect = WindowAccess.frame
+    ) -> [Int] {
+        var matches: [Int] = []
         var claimed = Set<Int>()
+        let bundles = Set(saved.map(\.bundleID))
+        let frames = candidates.map { candidate -> CGRect? in
+            guard let id = candidate.application.bundleIdentifier, bundles.contains(id) else { return nil }
+            return try? frameOf(candidate.element)
+        }
         for entry in saved {
             var best: (index: Int, score: Int)?
             for (index, candidate) in candidates.enumerated()
                 where !claimed.contains(index) && candidate.application.bundleIdentifier == entry.bundleID {
                 var score = 0
                 if !entry.title.isEmpty, candidate.title == entry.title { score += 4 }
-                if let frame = try? WindowAccess.frame(candidate.element) {
+                if let frame = frames[index] {
                     let distance =
                         abs(frame.minX - entry.frame.minX) + abs(frame.minY - entry.frame.minY)
                             + abs(frame.width - entry.frame.width) + abs(frame.height - entry.frame.height)
@@ -77,8 +86,23 @@ enum SavedLayout {
                 }
                 if best == nil || score > best!.score { best = (index, score) }
             }
-            if let best { claimed.insert(best.index) }
+            if let best {
+                claimed.insert(best.index)
+                matches.append(best.index)
+            }
         }
-        return claimed.sorted()
+        return matches
+    }
+
+    /// Matched thumbnails lead in saved tab order; any extras keep scan order.
+    static func restoreChoices(
+        _ saved: [SavedWindow],
+        among candidates: [WindowCandidate],
+        frameOf: (AXUIElement) throws -> CGRect
+    ) -> (windows: [WindowCandidate], checked: IndexSet) {
+        let matches = suggest(saved, among: candidates, frameOf: frameOf)
+        let matched = IndexSet(matches)
+        return ((matches + candidates.indices.filter { !matched.contains($0) }).map { candidates[$0] },
+                IndexSet(integersIn: 0 ..< matches.count))
     }
 }

@@ -1436,11 +1436,69 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    @MainActor private final class NewWindowTarget: NSObject {
+        @objc func newWindow(_ sender: Any?) {
+            let window = NSWindow(contentRect: NSRect(x: 240, y: 220, width: 360, height: 240),
+                                  styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.title = "New helper window"
+            window.orderFront(nil)
+        }
+    }
+
+    static func runNewWindowLaunchCheck() async -> [String] {
+        let helper: ActivationHelperProcess
+        switch ActivationHelperProcess.launch(resizable: true) {
+        case .success(let launched): helper = launched
+        case .failure(let failure): return [failure.message]
+        }
+        defer { helper.terminate() }
+        guard let app = NSRunningApplication(processIdentifier: helper.pid),
+              let existing = WindowAccess.applicationWindows(app), existing.count == 3
+        else { return ["couldn't list the helper's three existing windows"] }
+        var client = WindowAccessClient()
+        var onRequest: @MainActor () -> Void = {}
+        client.requestNewWindow = { app in
+            await onRequest()
+            try await WindowAccess.requestNewWindow(app)
+        }
+        let session = WindowSession(access: client)
+        let old = existing[0].element
+        guard let oldFrame = try? WindowAccess.frame(old) else { return ["could not read the helper frame"] }
+        session.targetFrame = { oldFrame }
+        session.add(existing[0])
+        guard let oldTab = session.selectedID else { return ["could not register the helper's old window"] }
+        session.newTab()
+        guard let page = session.selectedID else { return ["no start page"] }
+        onRequest = { [weak session] in session?.observeFocusedWindow(old) }
+        do {
+            let windows = try await session.launchCandidates(for: app, from: page, alreadyRunning: true)
+            guard windows.count == 1, windows[0].title == "New helper window",
+                  let number = WindowAccess.windowID(of: windows[0].element), !helper.windows.contains(Int(number)),
+                  WindowAccess.applicationWindows(app)?.count == existing.count + 1, session.selectedID == page
+            else { return ["launch returned \(windows.count) candidates instead of creating one new window"] }
+            session.observeFocusedWindow(old)
+            guard session.selectedID == oldTab else { return ["old window focus still suppressed after launch"] }
+            return []
+        } catch { return ["new window in running app: \(error.localizedDescription)"] }
+    }
+
     /// Child process for `runFrontWindowOnlyActivationChecks`: an inactive app with three windows.
     static func runActivationHelper(_ application: NSApplication, resizable: Bool = false) {
         // Regular apps activate themselves at launch; becoming regular afterwards keeps this one in the background.
         application.setActivationPolicy(.accessory)
         DispatchQueue.main.async { application.setActivationPolicy(.regular) }
+        let target = NewWindowTarget()
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Smoke", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Smoke")
+        let file = NSMenu(title: "File")
+        menu.addItem(withTitle: "File", action: nil, keyEquivalent: "").submenu = file
+        let create = file.addItem(
+            withTitle: "New Window",
+            action: #selector(NewWindowTarget.newWindow(_:)),
+            keyEquivalent: "n")
+        create.target = target
+        application.mainMenu = menu
         let windows = (0 ..< 3).map { index in
             let window = NSWindow(
                 contentRect: NSRect(x: 300 + index * 40, y: 300 + index * 40, width: 300, height: 200),
@@ -1456,6 +1514,7 @@ enum WindowSessionSmoke {
                 .map(String.init).joined(separator: " "))
         fflush(stdout)
         DispatchQueue.global().async {
+            defer { withExtendedLifetime(target) {} }
             while let line = readLine() {
                 if line.hasPrefix("raise "), let index = Int(line.dropFirst(6)) {
                     DispatchQueue.main.async { windows[index].orderFrontRegardless() }
@@ -2779,8 +2838,96 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    static func runNewTabChecks() -> [String] {
+        var failures: [String] = []
+        let (session, model) = fixture(registering: [0, 1])
+        let original = session.tabIDs
+        session.setSplit(true)
+        let pinned = session.cells[0]
+        session.setPanePinned(true, at: 0)
+        session.newTab()
+        guard let blank = session.selectedID, session.isStartPage(blank),
+              session.tabIDs == original + [blank], session.cells == [pinned, blank],
+              model.paneFrames[blank] == nil else { return ["new tab didn't preserve the pinned pane"] }
+        session.newTab()
+        guard let other = session.selectedID, other != blank else { return ["+ reused the existing blank tab"] }
+        session.cycle(-1)
+        guard session.selectedID == blank else { return ["couldn't cycle between start pages"] }
+        session.reorderWindows([other, blank] + original)
+        let candidate = WindowCandidate(element: model.windows[2].element, application: .current, title: "Chosen")
+        var added = 0
+        session.onAddedApplication = { _ in added += 1 }
+        model.failedRegistrations.insert(2)
+        _ = session.fillStartPage(blank, with: [candidate])
+        session.isClaimedElsewhere = { _ in true }
+        model.failedRegistrations.removeAll()
+        _ = session.fillStartPage(blank, with: [candidate])
+        if !session.isStartPage(blank) || added != 0 { failures.append("failed/claimed window consumed start page") }
+        session.isClaimedElsewhere = { _ in false }
+        let extra = WindowCandidate(element: model.windows[3].element, application: .current, title: "Another")
+        _ = session.fillStartPage(blank, with: [session.windows[0].candidate, candidate, extra])
+        guard let extraID = session.windows.first(where: { $0.candidate.isSameWindow(as: extra) })?.id else {
+            return failures + ["multi-select didn't register the other window"]
+        }
+        if added != 2 || session.tabIDs != [other, blank, extraID] + original || session.selectedID != blank
+            || session.selected?.candidate.title != "Chosen" || session.cells != [pinned, blank] {
+            failures.append("choosing a window didn't replace just the originating tab in place")
+        }
+        session.remove(other, closeWindow: true)
+        if !model.closeRequests.isEmpty || session.tabIDs.contains(other) { failures.append("closing blank used AX") }
+        let controller = WorkspaceController(name: "New tab smoke", access: access(for: model))
+        defer { controller.finishClosing() }
+        controller.session.onFocusStartPage = {}
+        guard let chrome = controller.window.contentView as? WorkspaceChromeView
+        else { return failures + ["no chrome"] }
+        controller.window.orderBack(nil)
+        chrome.addButton.performClick(nil)
+        if controller.window.attachedSheet != nil || chrome.tabs.arrangedSubviews.count != 1
+            || chrome.gridAreas[0].subviews.isEmpty {
+            failures.append("+ did not create an inline page")
+        }
+        func checkVisiblePage(_ stage: String) {
+            chrome.layoutSubtreeIfNeeded()
+            controller.window.displayIfNeeded()
+            let pane = chrome.gridAreas[0]
+            guard let page = pane.subviews.first, page.visibleRect.width > 200, page.visibleRect.height > 150,
+                  page.frame == pane.bounds else {
+                failures
+                    .append(
+                        "\(stage): start page not filling visible pane (grid \(chrome.stage.bounds), pane \(pane.frame), page \(String(describing: pane.subviews.first?.frame)))")
+                return
+            }
+            // Look for the first heading, not the tab label, border or permission-dependent window previews.
+            let header = NSRect(x: 16, y: pane.bounds.maxY - 50, width: 174, height: 40)
+            guard let rep = pane.bitmapImageRepForCachingDisplay(in: header) else {
+                failures.append("\(stage): couldn't render the new-tab heading")
+                return
+            }
+            pane.cacheDisplay(in: header, to: rep)
+            var darkest: CGFloat = 1, lightest: CGFloat = 0
+            for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
+                for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
+                    guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceGray),
+                          color.alphaComponent > 0.9 else { continue }
+                    darkest = min(darkest, color.whiteComponent)
+                    lightest = max(lightest, color.whiteComponent)
+                }
+            }
+            if lightest - darkest < 0.25 { failures.append("\(stage): new-tab heading rendered blank") }
+        }
+        checkVisiblePage("new tab")
+        controller.window.setContentSize(NSSize(width: 780, height: 510))
+        checkVisiblePage("resized tab")
+        controller.session.splitPane(at: 0, axis: .horizontal)
+        checkVisiblePage("split pane")
+        controller.removeSelected()
+        if !chrome.gridAreas[0].subviews.isEmpty { failures.append("closing tab left page mounted") }
+        return failures
+    }
+
     static func runChecks() -> [String] {
         var failures: [String] = []
+        failures += runNewTabChecks()
         failures += runNestedPaneChecks()
         failures += runPanePinChecks()
         failures += runTabSelectionFeedbackChecks()

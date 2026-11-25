@@ -120,6 +120,14 @@ private let translations: [String: [String]] = [
     ],
     "WindowDock を終了": ["Quit WindowDock", "退出 WindowDock", "WindowDock 종료", "Salir de WindowDock"],
     "タブ": ["Tabs", "标签页", "탭", "Pestañas"],
+    "「%@」のタブを復元": ["Restore Tabs in “%@”", "恢复“%@”的标签页", "‘%@’의 탭 복원", "Restaurar pestañas en «%@»"],
+    "前回のタブに一致するウィンドウが選択されています。復元するウィンドウを確認してください。": [
+        "Windows matching your previous tabs are checked. Choose which windows to restore.",
+        "已勾选与上次标签页匹配的窗口。请选择要恢复的窗口。",
+        "이전 탭과 일치하는 창이 선택되어 있습니다. 복원할 창을 선택하세요.",
+        "Se han marcado las ventanas que coinciden con sus pestañas anteriores. Elija cuáles restaurar.",
+    ],
+    "%d件を復元": ["Restore %d", "恢复 %d 项", "%d개 복원", "Restaurar %d"],
     "表示": ["View", "视图", "보기", "Ver"],
     "ウィンドウを追加…": ["Add Window…", "添加窗口…", "창 추가…", "Añadir ventana…"],
     "選択中のタブを解除": ["Release Selected Tab", "解除所选标签页", "선택한 탭 해제", "Liberar pestaña seleccionada"],
@@ -127,6 +135,10 @@ private let translations: [String: [String]] = [
         "Automatically Hide Tab Bar", "自动隐藏标签栏", "탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas",
     ],
     "タブバーの位置": ["Tab Bar Position", "标签栏位置", "탭 막대 위치", "Posición de la barra de pestañas"],
+    "タブが収まらないときは2段にする": [
+        "Wrap crowded tabs into two rows", "标签页放不下时分为两行", "탭이 모두 들어가지 않으면 두 줄로 표시",
+        "Usar dos filas cuando no quepan las pestañas",
+    ],
     "タブを解除": ["Release Tab", "解除标签页", "탭 해제", "Liberar pestaña"],
     "ウィンドウを閉じる": ["Close Window", "关闭窗口", "창 닫기", "Cerrar ventana"],
     "選択中のタブのウィンドウを閉じる": [
@@ -264,6 +276,49 @@ private let translations: [String: [String]] = [
     "タブに追加するウィンドウ": ["Windows to Add as Tabs", "要添加为标签页的窗口", "탭에 추가할 창", "Ventanas para añadir como pestañas"],
     "アプリ / ウィンドウ": ["App / Window", "应用 / 窗口", "앱 / 창", "App / Ventana"],
     "キャンセル": ["Cancel", "取消", "취소", "Cancelar"],
+    "新しいタブ": ["New Tab", "新标签页", "새 탭", "Nueva pestaña"],
+    "複数選択": ["Select Multiple", "多选", "여러 개 선택", "Seleccionar varias"],
+    "追加できなくなったウィンドウ: %@": [
+        "Window no longer available: %@", "窗口已不可添加：%@", "더 이상 추가할 수 없는 창: %@", "Ventana ya no disponible: %@",
+    ],
+    "開いているウィンドウ": ["Open Windows", "已打开的窗口", "열려 있는 창", "Ventanas abiertas"],
+    "一覧を更新": ["Refresh Windows", "刷新窗口列表", "창 목록 새로 고침", "Actualizar ventanas"],
+    "画面収録を許可してプレビューを表示…": [
+        "Allow Screen Recording for Previews…", "允许录屏以显示预览…", "미리보기를 위해 화면 기록 허용…",
+        "Permitir la grabación de pantalla para ver vistas previas…",
+    ],
+    "最近追加したアプリ": ["Recently Added Apps", "最近添加的应用", "최근 추가한 앱", "Apps añadidas recientemente"],
+    "ウィンドウを追加すると、ここにアプリが表示されます。": [
+        "Add a window to see its app here.", "添加窗口后，其应用会显示在这里。", "창을 추가하면 해당 앱이 여기에 표시됩니다.",
+        "Añade una ventana para ver su app aquí.",
+    ],
+    "その他のアプリを選んで起動…": [
+        "Choose Another App to Launch…", "选择其他应用并启动…", "다른 앱을 선택하여 실행…", "Elegir otra app para abrir…",
+    ],
+    "このタブまたはウィンドウは利用できなくなりました。": [
+        "This tab or window is no longer available.", "此标签页或窗口已不可用。", "이 탭 또는 창은 더 이상 사용할 수 없습니다.",
+        "Esta pestaña o ventana ya no está disponible.",
+    ],
+    "追加できるウィンドウがありません。": [
+        "No windows available to add.", "没有可添加的窗口。", "추가할 수 있는 창이 없습니다.", "No hay ventanas para añadir.",
+    ],
+    "起動するアプリを選択": ["Choose an App to Launch", "选择要启动的应用", "실행할 앱 선택", "Elegir una app para abrir"],
+    "起動": ["Launch", "启动", "실행", "Abrir"],
+    "新規ウィンドウの作成": ["opening a new window", "创建新窗口", "새 창 열기", "abrir una ventana nueva"],
+    "ウィンドウ一覧の取得": ["listing windows", "获取窗口列表", "창 목록 가져오기", "obtener la lista de ventanas"],
+    "「新規ウィンドウ」メニューの取得": [
+        "finding an enabled New Window command", "查找可用的新建窗口命令", "사용 가능한 새 창 명령 찾기",
+        "encontrar el comando Nueva ventana disponible",
+    ],
+    "%@を起動できませんでした: %@": [
+        "Could not launch %@: %@", "无法启动 %@：%@", "%@을(를) 실행할 수 없습니다: %@", "No se pudo abrir %@: %@",
+    ],
+    "アプリは起動しましたが、追加できるウィンドウが見つかりませんでした。": [
+        "The app launched, but no window was available to add.",
+        "应用已启动，但没有找到可添加的窗口。",
+        "앱이 실행되었지만 추가할 수 있는 창을 찾지 못했습니다.",
+        "La app se abrió, pero no se encontró ninguna ventana para añadir.",
+    ],
     "取得できなかったアプリ: %@": ["Apps that could not be read: %@", "无法读取的应用：%@", "가져오지 못한 앱: %@", "Apps no legibles: %@"],
     "、": [", ", "、", ", ", ", "],
     "追加できるウィンドウがありません。別のアプリで通常のウィンドウを開いてください。": [
@@ -278,11 +333,11 @@ private let translations: [String: [String]] = [
         "추가할 창을 선택하세요. 전체 화면은 미리 해제하세요.",
         "Seleccione ventanas para añadir. Salga antes del modo de pantalla completa.",
     ],
-    "\nCommand + クリックで複数選択 / Shift + クリックで範囲選択": [
-        "\nCommand-click to select multiple / Shift-click to select a range",
-        "\nCommand + 点按多选 / Shift + 点按范围选择",
-        "\nCommand + 클릭으로 다중 선택 / Shift + 클릭으로 범위 선택",
-        "\nCommand + clic: selección múltiple / Shift + clic: rango",
+    "Command + クリックで複数選択 / Shift + クリックで範囲選択": [
+        "Command-click to select multiple / Shift-click to select a range",
+        "Command + 点按多选 / Shift + 点按范围选择",
+        "Command + 클릭으로 다중 선택 / Shift + 클릭으로 범위 선택",
+        "Command + clic: selección múltiple / Shift + clic: rango",
     ],
     "選択したアプリの全ウィンドウを選択": [
         "Select All Windows of App", "选择该应用的所有窗口", "앱의 모든 창 선택", "Seleccionar todas las ventanas de la app",
