@@ -110,6 +110,10 @@ private let translations: [String: [String]] = [
         "Also return full-screen windows to their panes", "也将全屏窗口放回窗格",
         "전체 화면 창도 패널로 되돌리기", "Devolver también a su panel las ventanas a pantalla completa",
     ],
+    "空になったワークスペースを自動的に削除する": [
+        "Automatically delete workspaces when they become empty", "自动删除变为空的工作区",
+        "비게 된 작업 공간 자동 삭제", "Eliminar automáticamente los espacios de trabajo cuando queden vacíos",
+    ],
     "新しいワークスペースではタブバーを自動的に隠す": [
         "Automatically hide the tab bar in new workspaces", "在新工作区中自动隐藏标签栏",
         "새 작업 공간에서 탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas en espacios de trabajo nuevos",

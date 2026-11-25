@@ -52,8 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         transfer.createWorkspace = { [weak self] point in self?.addWorkspace(dropPoint: point) }
         transfer.discardWorkspace = { [weak self] controller in
             self?.controllers.removeAll { $0 === controller }
-            controller.window.delegate = nil
-            controller.window.close()
+            controller.finishClosing()
         }
         transfer.onRelease = { [weak self] source in
             guard let self else { return }
@@ -81,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Setting.autoHideNewWorkspaces.rawValue: false,
             Setting.returnDisplacedWindows.rawValue: true,
             Setting.returnFullScreenWindows.rawValue: false,
+            Setting.deleteEmptyWorkspaces.rawValue: false,
         ])
         buildMenu()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [
@@ -235,10 +235,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case autoHideNewWorkspaces = "autoHideNewWorkspaces"
         case returnDisplacedWindows = "returnDraggedWindowsToPanes"
         case returnFullScreenWindows = "returnFullScreenWindowsToPanes"
+        case deleteEmptyWorkspaces = "deleteEmptyWorkspaces"
 
         var defaultValue: Bool {
             switch self {
-            case .closeOnRelease, .autoHideNewWorkspaces, .returnFullScreenWindows: false
+            case .closeOnRelease, .autoHideNewWorkspaces, .returnFullScreenWindows, .deleteEmptyWorkspaces: false
             case .controlTabSwitching, .addWindowsByDragging, .returnDisplacedWindows: true
             }
         }
@@ -266,6 +267,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for controller in controllers { controller.returnsDisplacedWindows = enabled }
         case .returnFullScreenWindows:
             for controller in controllers { controller.returnsFullScreenWindows = enabled }
+        case .deleteEmptyWorkspaces:
+            for controller in controllers { controller.deletesWhenEmpty = enabled }
         case .autoHideNewWorkspaces:
             break
         }
@@ -413,6 +416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.addWindowsByDragging, "ウィンドウをドラッグしてワークスペースに追加する"),
             (.returnDisplacedWindows, "移動・最大化・最小化したウィンドウをペインに戻す"),
             (.returnFullScreenWindows, "フルスクリーンのウィンドウもペインに戻す"),
+            (.deleteEmptyWorkspaces, "空になったワークスペースを自動的に削除する"),
             (.autoHideNewWorkspaces, "新しいワークスペースではタブバーを自動的に隠す"),
         ]
         for (setting, title) in settings {
@@ -500,6 +504,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.session.closesWindowsOnRelease = isSettingEnabled(.closeOnRelease)
         controller.returnsDisplacedWindows = isSettingEnabled(.returnDisplacedWindows)
         controller.returnsFullScreenWindows = isSettingEnabled(.returnFullScreenWindows)
+        controller.deletesWhenEmpty = isSettingEnabled(.deleteEmptyWorkspaces)
         controller.setAutoHideTabs(isSettingEnabled(.autoHideNewWorkspaces))
         controller.onClose = { [weak self] in self?.close($0) }
         controller.onSessionChange = { [weak self] controller in
@@ -509,6 +514,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         controller.onRename = { [weak self] in self?.rename($0) }
         controller.onDelete = { [weak self] in self?.delete($0) }
+        controller.onAutoDelete = { [weak self] controller in
+            guard let self, !self.quitting, self.controllers.contains(where: { $0 === controller }) else { return }
+            self.tabTransfer.clear()
+            self.controllers.removeAll { $0 === controller }
+        }
         controller.onSuspend = { [weak self] in
             self?.shortcutContext.reset()
             self?.cancelWindowDrag()
@@ -634,9 +644,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         controllers.removeAll { $0 === controller }
         if forget { SavedLayout.remove(named: controller.name) }
-        controller.window.delegate = nil
-        controller.window.orderOut(nil)
-        controller.window.close()
+        controller.finishClosing()
         controllers.last?.present()
     }
 
@@ -763,7 +771,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// A Dock click brings back only the last used workspace; others are reachable from the Dock menu.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        activation.reopen()
+        if controllers.isEmpty {
+            addWorkspace()
+        } else {
+            activation.reopen()
+        }
         return false
     }
 

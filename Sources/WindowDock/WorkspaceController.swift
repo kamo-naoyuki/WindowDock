@@ -22,6 +22,11 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private(set) var suspended = false
     private(set) var autoHideTabs = false
     var quitting = false
+    var deletesWhenEmpty = false {
+        didSet { scheduleEmptyWorkspaceDeletion() }
+    }
+    private var hasContainedWindows = false
+    private var emptyDeletionScheduled = false
     /// Whether windows moved, resized, maximized or minimized outside WindowDock go back to their panes.
     var returnsDisplacedWindows = true {
         didSet {
@@ -50,6 +55,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     var onRename: ((WorkspaceController) -> Void)?
     var onSessionChange: ((WorkspaceController) -> Void)?
     var onDelete: ((WorkspaceController) -> Void)?
+    var onAutoDelete: ((WorkspaceController) -> Void)?
     var onTabDragBegin: ((UUID, String, NSButton) -> Void)?
     var onTabDragMove: ((String, NSPasteboard, NSButton, NSPoint) -> Void)? {
         didSet { workspace.onTabDragMove = onTabDragMove }
@@ -213,6 +219,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             guard let self else { return }
             self.renderTabs()
             self.onSessionChange?(self)
+            self.scheduleEmptyWorkspaceDeletion()
         }
         session.onMessage = { [weak self] message in self?.showNotice(message) }
         session.onConstraintWarningCleared = { [weak self] text in
@@ -570,6 +577,37 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     func requestClose() { onClose?(self) }
 
+    /// Closes only the workspace UI; its managed windows must already have been restored or transferred.
+    func finishClosing() {
+        quitting = true
+        workspace.hideAutoHiddenToolbar()
+        window.delegate = nil
+        window.orderOut(nil)
+        window.close()
+    }
+
+    private func scheduleEmptyWorkspaceDeletion() {
+        if !session.windows.isEmpty { hasContainedWindows = true }
+        guard deletesWhenEmpty, hasContainedWindows, session.windows.isEmpty, !quitting,
+              picker == nil, !emptyDeletionScheduled
+        else { return }
+        emptyDeletionScheduled = true
+        // A tab transfer still presents the destination and saves both workspaces after its source becomes empty.
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.emptyDeletionScheduled = false
+                guard self.deletesWhenEmpty, self.hasContainedWindows, self.session.windows.isEmpty,
+                      !self.quitting, self.picker == nil, let onAutoDelete = self.onAutoDelete
+                else { return }
+                self.hasContainedWindows = false
+                SavedLayout.remove(named: self.name)
+                onAutoDelete(self)
+                self.finishClosing()
+            }
+        }
+    }
+
     @objc private func renameFromMenu() { onRename?(self) }
 
     @objc private func deleteFromMenu() { onDelete?(self) }
@@ -604,22 +642,25 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             !session.contains(candidate) && !(isRegisteredElsewhere?(candidate) ?? false)
                 && !excluding.contains { $0.isSameWindow(as: candidate) }
         }
+        var selected: [WindowCandidate]?
         picker = WindowPicker(
             candidates: candidates,
             failedApplications: scan.failedApplications,
             suggested: saved.map { SavedLayout.suggest($0, among: candidates) } ?? []
-        ) { [weak self] candidates in
-            // Wait until the sheet has left the screen before raising the selected window.
+        ) { candidates in
             if let collect {
                 collect(candidates)
                 return
             }
-            DispatchQueue.main.async { self?.session.add(candidates) }
+            selected = candidates
         }
         picker?.present(on: window) { [weak self] in
             self?.picker = nil
+            // Add before checking emptiness, but only after the sheet has left the screen.
+            if let selected { self?.session.add(selected) }
             if collect == nil { self?.scheduleSelectedWindowRaise(activate: true) }
             completion?()
+            self?.scheduleEmptyWorkspaceDeletion()
         }
     }
 

@@ -58,8 +58,11 @@ enum WorkspaceBackgroundSmoke {
             let refitOnly = CommandLine.arguments.contains("--window-refit-only")
             let constraintOnly = CommandLine.arguments.contains("--constraint-notice-only")
             let enhancedUIOnly = CommandLine.arguments.contains("--enhanced-ui-only")
+            let emptyWorkspaceOnly = CommandLine.arguments.contains("--empty-workspace-only")
             let failures: [String]
-            if enhancedUIOnly {
+            if emptyWorkspaceOnly {
+                failures = WindowSessionSmoke.runEmptyWorkspaceDeletionChecks() + checkWindowPicker()
+            } else if enhancedUIOnly {
                 failures = WindowSessionSmoke.runEnhancedUIFrameChecks()
             } else if constraintOnly {
                 failures = WindowSessionSmoke.runConstraintNoticeChecks()
@@ -100,7 +103,9 @@ enum WorkspaceBackgroundSmoke {
             }
             if failures.isEmpty {
                 print(
-                    nestedOnly
+                    emptyWorkspaceOnly
+                        ? "PASS: empty-workspace deletion, last-tab transfer and deferred cleanup"
+                        : nestedOnly
                         ? "PASS: nested pane menus, layout, resizing, persistence, tab reflow and routing"
                         : constraintOnly
                         ? "PASS: window constraint notices"

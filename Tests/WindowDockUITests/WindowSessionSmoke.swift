@@ -2165,6 +2165,139 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    static func runEmptyWorkspaceDeletionChecks() -> [String] {
+        var failures: [String] = []
+        var controllers: [WorkspaceController] = []
+        defer {
+            for controller in controllers {
+                controller.quitting = true
+                controller.window.orderOut(nil)
+                SavedLayout.remove(named: controller.name)
+            }
+        }
+        func makeController(_ name: String, model: Model) -> WorkspaceController {
+            let controller = WorkspaceController(name: "\(name)-\(UUID())", access: access(for: model))
+            controller.returnsDisplacedWindows = false
+            controllers.append(controller)
+            return controller
+        }
+        func candidate(_ model: Model, _ index: Int = 0) -> WindowCandidate {
+            WindowCandidate(element: model.windows[index].element, application: .current, title: "Empty probe \(index)")
+        }
+        func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
+
+        let model = Model(windowCount: 2)
+        let controller = makeController("Empty policy", model: model)
+        var deletions = 0
+        controller.onAutoDelete = { _ in deletions += 1 }
+        controller.session.add(candidate(model))
+        controller.removeSelected()
+        SavedLayout.upsert([SavedWorkspace(name: controller.name, windows: [])])
+        settle()
+        if deletions != 0 || !SavedLayout.load().contains(where: { $0.name == controller.name }) {
+            failures.append("empty-workspace deletion was enabled by default")
+        }
+
+        controller.deletesWhenEmpty = true
+        controller.session.add(candidate(model))
+        settle()
+        if deletions != 0 { failures.append("a refilled workspace was deleted by a queued empty-state check") }
+        controller.session.add(candidate(model, 1))
+        controller.removeSelected()
+        settle()
+        if deletions != 0 { failures.append("a workspace was deleted while it still had a tab") }
+        controller.removeSelected()
+        if deletions != 0 { failures.append("empty-workspace deletion ran before tab removal completed") }
+        controller.deletesWhenEmpty = false
+        settle()
+        if deletions != 0 { failures.append("disabling auto-delete did not cancel its queued deletion") }
+        controller.deletesWhenEmpty = true
+        settle()
+        if deletions != 1 || !controller.session.windows.isEmpty
+            || SavedLayout.load().contains(where: { $0.name == controller.name })
+        {
+            failures.append("an emptied workspace was not deleted when the option was enabled")
+        }
+        let previousDeletions = deletions
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        settle()
+        if deletions != previousDeletions { failures.append("an empty workspace requested deletion more than once") }
+
+        let transferModel = Model(windowCount: 1)
+        let source = makeController("Empty transfer source", model: transferModel)
+        let destination = makeController("Empty transfer destination", model: transferModel)
+        source.deletesWhenEmpty = true
+        destination.deletesWhenEmpty = true
+        source.window.orderFrontRegardless()
+        destination.window.orderFrontRegardless()
+        var transferFinished = false
+        var sourceDeleted = false
+        source.onAutoDelete = { _ in
+            if !transferFinished { failures.append("the source was deleted before tab transfer finished") }
+            sourceDeleted = true
+        }
+        destination
+            .onAutoDelete = { _ in failures.append("a fresh empty workspace or the transfer destination was deleted") }
+        destination.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        settle()
+        source.session.add(candidate(transferModel))
+        let transferred = source.session.windows[0]
+        guard source.session.transferWindow(transferred.id, to: destination.session) else {
+            return failures + ["empty-workspace fixture could not transfer its last tab"]
+        }
+        SavedLayout.upsert([
+            SavedWorkspace(name: source.name, windows: []),
+            SavedWorkspace(name: destination.name, windows: [
+                SavedWindow(bundleID: "test.empty-workspace", title: "Transferred", frame: transferred.originalFrame)
+            ]),
+        ])
+        transferFinished = true
+        settle()
+        if !sourceDeleted || source.window.isVisible || !destination.window.isVisible
+            || destination.session.windows.first?.id != transferred.id
+            || destination.session.windows.first?.originalFrame != transferred.originalFrame
+            || !transferModel.closeRequests.isEmpty
+            || SavedLayout.load().contains(where: { $0.name == source.name })
+            || !SavedLayout.load().contains(where: { $0.name == destination.name && $0.windows.count == 1 })
+        {
+            failures.append("last-tab transfer did not delete only the source and preserve the transferred window")
+        }
+
+        let closingModel = Model(windowCount: 1)
+        let closing = makeController("Empty after close", model: closingModel)
+        closing.deletesWhenEmpty = true
+        var closedDeletions = 0
+        closing.onAutoDelete = { _ in closedDeletions += 1 }
+        closing.session.add(candidate(closingModel))
+        let id = closing.session.windows[0].id
+        closingModel.failedMinimizations.insert(0)
+        closing.session.remove(id, closeWindow: false)
+        settle()
+        if closedDeletions != 0 || closing.session.windows.isEmpty {
+            failures.append("a failed release deleted the workspace or its last tab")
+        }
+        closingModel.failedMinimizations.removeAll()
+        closingModel.listedWindows = [0]
+        closing.session.remove(id, closeWindow: true)
+        settle()
+        if closedDeletions != 0 || closing.session.windows.isEmpty {
+            failures.append("a close awaiting a save decision deleted the workspace")
+        }
+        closingModel.probeErrors[0] = .invalidUIElement
+        closingModel.listedWindows = []
+        closing.session.pruneClosedWindows()
+        settle()
+        if closedDeletions != 0 { failures.append("a single missing-window sample deleted the workspace") }
+        closing.session.pruneClosedWindows()
+        settle()
+        if closedDeletions != 1 { failures.append("a workspace whose last window closed was not deleted") }
+
+        destination.session.remove(transferred.id, closeWindow: false)
+        destination.quitting = true
+        settle()
+        return failures
+    }
+
     static func runDisplacedWindowChecks() -> [String] {
         let (session, model) = fixture(registering: [0, 1, 3])
         session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
@@ -2658,6 +2791,7 @@ enum WindowSessionSmoke {
         failures += runRemovalApertureChecks()
         failures += runCloseOnReleaseChecks()
         failures += runDisplacedWindowChecks()
+        failures += runEmptyWorkspaceDeletionChecks()
         failures += runWindowEventRefitChecks()
         failures += runWindowEventReturnPolicyChecks()
         failures += runReresolveChecks()
