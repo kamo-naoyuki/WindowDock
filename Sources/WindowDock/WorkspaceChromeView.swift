@@ -365,6 +365,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             defer: false)
         panel.level = .floating
         panel.hidesOnDeactivate = false
+        panel.allowsToolTipsWhenApplicationIsInactive = true
         panel.isReleasedWhenClosed = false
         panel.isExcludedFromWindowsMenu = true
         panel.collectionBehavior = [.transient, .ignoresCycle]

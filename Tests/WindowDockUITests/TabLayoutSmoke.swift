@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 import QuartzCore
 import WindowDockCore
 
@@ -78,6 +79,59 @@ private final class FrameChangeProbe: WorkspaceBackgroundView {
 
 @main
 enum TabLayoutSmoke {
+    /// Standalone smoke: leave the pointer still while each fixture places a control underneath it.
+    @MainActor
+    private static func checkBackgroundHoverHelp(detached: Bool, workspaceName: Bool) -> String? {
+        let name = "Hover fixture workspace"
+        let controller = WorkspaceController(name: name)
+        guard let chrome = controller.window.contentView as? WorkspaceChromeView else { return "missing chrome" }
+        let host = controller.window
+        host.delegate = nil
+        defer {
+            controller.quitting = true
+            chrome.setAutoHideTabBar(false)
+            host.orderOut(nil)
+        }
+        let appAndTitle = "Fixture App — Hover document"
+        let tab = chrome.appendTab(title: "Hover document", toolTip: appAndTitle, selected: true)
+        func pump(for seconds: TimeInterval, until done: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !done(), Date() < deadline {
+                if let event = NSApp.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 0.02),
+                                               inMode: .default, dequeue: true) {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        host.orderFrontRegardless()
+        pump(for: 0.15)
+        chrome.setAutoHideTabBar(detached)
+        let view = workspaceName ? chrome.workspaceButton : tab.select
+        let expected = workspaceName ? name : appAndTitle
+        guard let window = view.window else { return "missing toolbar window" }
+        window.contentView?.layoutSubtreeIfNeeded()
+        let center = window
+            .convertPoint(toScreen: view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil))
+        let mouse = NSEvent.mouseLocation
+        host.setFrameOrigin(NSPoint(x: host.frame.minX + mouse.x - center.x, y: host.frame.minY + mouse.y - center.y))
+        chrome.updateToolbarPanelFrame()
+        chrome.setAutoHiddenToolbarVisible(detached)
+        var shown = false
+        var lastTip = ""
+        pump(for: 2.5) {
+            shown = NSApp.windows.contains { tip in
+                guard tip is NSPanel, tip !== window, tip.isVisible, let content = tip.contentView else { return false }
+                // Native tooltips draw text without a text field; read what the visible panel actually painted.
+                lastTip = PDFDocument(data: content.dataWithPDF(inside: content.bounds))?.string ?? ""
+                return lastTip.contains(expected)
+            }
+            return shown
+        }
+        if shown, !NSApp.isActive { return nil }
+        let hit = window.contentView?.superview?.hitTest(window.mouseLocationOutsideOfEventStream)
+        return "Expected inactive tooltip ‘\(expected)’ (detached=\(detached), hit=\((hit as? NSButton)?.title ?? "-"), displayed=\(lastTip))"
+    }
+
     @MainActor
     private static func checkCloseSlotsAndWrapping() -> [String] {
         let host = WorkspaceWindow(contentRect: NSRect(x: 100, y: 100, width: 930, height: 600),
@@ -363,8 +417,21 @@ enum TabLayoutSmoke {
 
     @MainActor
     static func main() {
+        let hoverOnly = CommandLine.arguments.contains("--hover-help-only")
+        if hoverOnly {
+            UserDefaults.standard
+                .setVolatileDomain(["NSInitialToolTipDelay": 100], forName: UserDefaults.argumentDomain) }
         let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(hoverOnly ? .prohibited : .accessory)
+        if hoverOnly {
+            app.finishLaunching()
+            let failures = [false, true].flatMap { detached in
+                [true, false].compactMap { checkBackgroundHoverHelp(detached: detached, workspaceName: $0) }
+            }
+            for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
+            if failures.isEmpty { print("PASS: visible tab and workspace help while another app stays active") }
+            exit(failures.isEmpty ? 0 : 1)
+        }
         let host = WorkspaceWindow(
             contentRect: NSRect(x: 100, y: 100, width: 1120, height: 760),
             styleMask: [.borderless, .resizable], backing: .buffered, defer: false)

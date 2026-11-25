@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds and runs the AppKit smoke harnesses against real windows (not SwiftPM targets).
-# Usage: Tests/WindowDockUITests/run-smoke.sh [--restore-only | --finder-scan-only | --new-window-only | --new-tab-only | --tab-layout-only | --tab-move-only | --window-drop-only | --activation-only | --shortcut-only | --nested-split-only | --focus-sync-only | --window-refit-only | --constraint-notice-only | --enhanced-ui-only | --empty-workspace-only]
+# Usage: Tests/WindowDockUITests/run-smoke.sh [--restore-only | --finder-scan-only | --new-window-only | --new-tab-only | --tab-layout-only | --hover-help-only | --tab-move-only | --window-drop-only | --activation-only | --shortcut-only | --nested-split-only | --focus-sync-only | --window-refit-only | --constraint-notice-only | --enhanced-ui-only | --empty-workspace-only]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -40,8 +40,8 @@ build Tests/WindowDockUITests/WorkspaceBackgroundSmoke.swift Tests/WindowDockUIT
   Tests/WindowDockUITests/WorkspaceActivationSmoke.swift -o "$OUT/workspace-smoke"
 build Tests/WindowDockUITests/TabLayoutSmoke.swift -o "$OUT/tab-layout-smoke"
 
-if [[ "${1:-}" == --tab-layout-only ]]; then
-  "$OUT/tab-layout-smoke"
+if [[ "${1:-}" == --tab-layout-only || "${1:-}" == --hover-help-only ]]; then
+  "$OUT/tab-layout-smoke" "$@"
 else
   "$OUT/workspace-smoke" "$@"
 fi

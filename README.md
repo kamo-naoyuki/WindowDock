@@ -33,7 +33,7 @@ When dragging a window onto a tab bar, the bar comes to the front and a transluc
 
 ## Using a workspace
 
-- Hover over a tab to highlight it; hovering directly over **×** highlights the close button more strongly. Click the tab to switch windows. When tabs open or close, the others slide into place unless **Reduce motion** is enabled in macOS. Use **Control+Tab** for the next tab or **Control+Shift+Tab** for the previous one.
+- Rest the pointer on a tab to see the app name and full window title, or on the workspace name to read it in full. No click is needed, even while working in another app. Hovering over **×** highlights the close button. Click a tab to switch windows; use **Control+Tab** for the next tab or **Control+Shift+Tab** for the previous one. When tabs open or close, the others slide into place unless **Reduce motion** is enabled in macOS.
 - Tabs share the available width equally, with titles aligned to the left. When you click **×**, the next tab slides its **×** under the pointer; widths adjust once the pointer leaves the bar. Enable **Settings → Wrap crowded tabs into two rows** to use a second row before scrolling in a top or bottom tab bar.
 - Bringing a managed window to the front outside WindowDock also selects its tab. In a split workspace, a window not currently shown replaces the Control+Tab target pane; pinned panes stay in place.
 - Right-click a displayed tab or pane to open **Pane** options. With two or more panes, choose **Pin Pane** to keep its window in place while Control+Tab switches the last selected unpinned pane. Other displayed panes are skipped, so the target is unambiguous in layouts with three or more panes. Pinned panes show a pin icon; the tab-switch target has a highlighted outline.

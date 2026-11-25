@@ -96,6 +96,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private func buildWindow() {
         window.title = name
         workspace.setWorkspaceName(name)
+        // The selected window normally keeps its own application active.
+        window.allowsToolTipsWhenApplicationIsInactive = true
         window.minSize = NSSize(width: 720, height: 480)
         window.isReleasedWhenClosed = false
         window.isOpaque = false
