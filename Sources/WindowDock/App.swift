@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Setting.controlTabSwitching.rawValue: true,
             Setting.addWindowsByDragging.rawValue: true,
             Setting.autoHideNewWorkspaces.rawValue: false,
+            Setting.returnDraggedWindows.rawValue: true,
         ])
         buildMenu()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [
@@ -219,11 +220,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case controlTabSwitching = "controlTabSwitching"
         case addWindowsByDragging = "addWindowsByDragging"
         case autoHideNewWorkspaces = "autoHideNewWorkspaces"
+        case returnDraggedWindows = "returnDraggedWindowsToPanes"
 
         var defaultValue: Bool {
             switch self {
             case .closeOnRelease, .autoHideNewWorkspaces: false
-            case .controlTabSwitching, .addWindowsByDragging: true
+            case .controlTabSwitching, .addWindowsByDragging, .returnDraggedWindows: true
             }
         }
     }
@@ -246,7 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             shortcutContext.reset()
         case .addWindowsByDragging:
             windowDrop.isEnabled = enabled
-        case .autoHideNewWorkspaces:
+        case .autoHideNewWorkspaces, .returnDraggedWindows:
             break
         }
     }
@@ -389,6 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.closeOnRelease, "タブを解除するときにウィンドウも閉じる"),
             (.controlTabSwitching, "Control+Tabでワークスペースのタブを切り替える"),
             (.addWindowsByDragging, "ウィンドウをドラッグしてワークスペースに追加する"),
+            (.returnDraggedWindows, "ドラッグで動かしたウィンドウをペインに戻す"),
             (.autoHideNewWorkspaces, "新しいワークスペースではタブバーを自動的に隠す"),
         ]
         for (setting, title) in settings {
@@ -678,6 +681,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func finishLeftMousePress() {
         guard let start = leftMouseDownLocation else { return }
         leftMouseDownLocation = nil
+        guard isSettingEnabled(.returnDraggedWindows) else { return }
         let end = NSEvent.mouseLocation
         let dx = end.x - start.x
         let dy = end.y - start.y

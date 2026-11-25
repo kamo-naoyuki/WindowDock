@@ -82,6 +82,10 @@ private let translations: [String: [String]] = [
         "Add windows to a workspace by dragging", "通过拖动窗口将其添加到工作区",
         "창을 드래그하여 작업 공간에 추가", "Añadir ventanas al espacio de trabajo arrastrándolas",
     ],
+    "ドラッグで動かしたウィンドウをペインに戻す": [
+        "Return dragged windows to their panes", "将拖动过的窗口放回窗格",
+        "드래그한 창을 패널로 되돌리기", "Devolver las ventanas arrastradas a su panel",
+    ],
     "新しいワークスペースではタブバーを自動的に隠す": [
         "Automatically hide the tab bar in new workspaces", "在新工作区中自动隐藏标签栏",
         "새 작업 공간에서 탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas en espacios de trabajo nuevos",
