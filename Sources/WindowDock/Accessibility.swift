@@ -410,6 +410,238 @@ final class WindowCreationObserver {
     }
 }
 
+/// A window's Chromium tab strip, as Accessibility shows it.
+enum BrowserWindowTabs: Equatable {
+    case tabs([BrowserTabAudio])
+    /// Not a Chromium browser window: another app's, or a browser's popup, DevTools or picture-in-picture window.
+    case noTabStrip
+    case gone
+    /// The app didn't answer.
+    case unavailable
+}
+
+/// Reads browser tabs for `AudioPlaybackMonitor`; tests replace it.
+struct BrowserTabSource {
+    /// Reads the windows' tabs and calls back on the main thread with one result per window, in order.
+    var read: ([AXUIElement], @escaping @MainActor @Sendable ([BrowserWindowTabs]) -> Void) -> Void
+    /// Returns an object that reports, on the main thread, changes that may concern the app's tabs until it's
+    /// released.
+    var observe: (pid_t, @escaping @MainActor @Sendable () -> Void) -> AnyObject?
+    /// Drops what's remembered about the windows.
+    var forget: ([AXUIElement]) -> Void
+
+    static func accessibility() -> BrowserTabSource {
+        let reader = BrowserTabStripReader()
+        return BrowserTabSource(
+            read: reader.read, observe: { BrowserTabObserver(pid: $0, onChange: $1) }, forget: reader.forget)
+    }
+}
+
+/// Reads Chromium browsers' tab strips off the main thread, as a busy browser answers slowly. Finding a window's
+/// strip takes a few dozen calls, so it's remembered; reading the tabs then takes about one call per tab.
+final class BrowserTabStripReader: @unchecked Sendable {
+    private enum Strip {
+        case found(AXUIElement)
+        case missing(since: TimeInterval)
+    }
+
+    private enum Search {
+        case found(AXUIElement)
+        case missing
+        case gone
+        case unavailable
+    }
+
+    /// A window may get a strip later, such as when it leaves full screen.
+    private static let missingStripRecheck: TimeInterval = 10
+    private let queue = DispatchQueue(label: "WindowDock.BrowserTabStrips")
+    /// Only used on `queue`.
+    private var strips: [AXUIElement: Strip] = [:]
+
+    func read(_ windows: [AXUIElement], completion: @escaping @MainActor @Sendable ([BrowserWindowTabs]) -> Void) {
+        queue.async { [self] in
+            let tabs = windows.map(tabs(of:))
+            let runLoop = CFRunLoopGetMain()
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) {
+                MainActor.assumeIsolated { completion(tabs) }
+            }
+            CFRunLoopWakeUp(runLoop)
+        }
+    }
+
+    func forget(_ windows: [AXUIElement]) {
+        queue.async { [self] in
+            for window in windows {
+                strips[window] = nil
+            }
+        }
+    }
+
+    private func tabs(of window: AXUIElement) -> BrowserWindowTabs {
+        let now = ProcessInfo.processInfo.systemUptime
+        switch strips[window] {
+        case let .found(strip):
+            if let tabs = Self.tabs(in: strip), !tabs.isEmpty { return .tabs(tabs) }
+        case let .missing(since) where now - since < Self.missingStripRecheck:
+            return .noTabStrip
+        default:
+            break
+        }
+        strips[window] = nil
+        switch Self.findStrip(in: window) {
+        case let .found(strip):
+            guard let tabs = Self.tabs(in: strip) else { return .unavailable }
+            // Safari's tab strip, for one, has no Chromium tabs.
+            guard !tabs.isEmpty else {
+                strips[window] = .missing(since: now)
+                return .noTabStrip
+            }
+            strips[window] = .found(strip)
+            return .tabs(tabs)
+        case .missing:
+            strips[window] = .missing(since: now)
+            return .noTabStrip
+        case .gone:
+            return .gone
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    /// Searches the window's groups for a tab group. Chrome names its views in AXDOMClassList; groups named after
+    /// tabs are searched first, which reaches the strip in a few calls without listing the page's contents.
+    private static func findStrip(in window: AXUIElement) -> Search {
+        var frontier: [(element: AXUIElement, depth: Int, preferred: Bool)] = [(window, 0, true)]
+        var calls = 0
+        while calls < 200, let next = frontier.firstIndex(where: \.preferred) ?? frontier.indices.first {
+            let node = frontier.remove(at: next)
+            let (error, found) = values(of: node.element, [kAXChildrenAttribute])
+            calls += 1
+            if node.depth == 0, error == .invalidUIElement { return .gone }
+            if error == .cannotComplete { return .unavailable }
+            for child in found.first.flatMap({ $0 as? [AXUIElement] }) ?? [] {
+                let (error, info) = values(of: child, [kAXRoleAttribute, "AXDOMClassList"])
+                calls += 1
+                if error == .cannotComplete { return .unavailable }
+                guard error == .success else { continue }
+                let role = info[0] as? String
+                if role == kAXTabGroupRole { return .found(child) }
+                guard role == kAXGroupRole, node.depth < 12 else { continue }
+                let classes = info[1] as? [String] ?? []
+                frontier.append((child, node.depth + 1, classes.contains { $0.contains("Tab") }))
+            }
+        }
+        return .missing
+    }
+
+    /// The Chromium tabs in a tab group, or nil if it can't be read.
+    private static func tabs(in strip: AXUIElement) -> [BrowserTabAudio]? {
+        let (error, found) = values(of: strip, [kAXChildrenAttribute])
+        guard error == .success else { return nil }
+        var tabs: [BrowserTabAudio] = []
+        for element in found[0] as? [AXUIElement] ?? [] {
+            let (error, tab) = values(
+                of: element,
+                [
+                    kAXSubroleAttribute,
+                    "AXDOMClassList",
+                    kAXTitleAttribute,
+                    kAXDescriptionAttribute,
+                    kAXChildrenAttribute
+                ])
+            if error == .cannotComplete { return nil }
+            guard error == .success, tab[0] as? String == "AXTabButton",
+                  (tab[1] as? [String])?.contains("Tab") == true
+            else { continue }
+            let title = tab[2] as? String ?? ""
+            tabs.append(BrowserTabAudio(name: title.isEmpty ? tab[3] as? String ?? "" : title) {
+                // Chrome shows this button only while the tab has an alert; narrow tabs may hide it.
+                (tab[4] as? [AXUIElement] ?? []).contains { child in
+                    let classes = values(of: child, ["AXDOMClassList"]).values.first.flatMap { $0 as? [String] }
+                    return classes?.contains("AlertIndicatorButton") == true
+                }
+            })
+        }
+        return tabs
+    }
+
+    /// Reads attributes in one call; those the element lacks are nil. The error is the element's, such as
+    /// `.invalidUIElement` once it's gone or `.cannotComplete` when the app doesn't answer.
+    private static func values(
+        of element: AXUIElement, _ attributes: [String]) -> (error: AXError, values: [CFTypeRef?]) {
+        AXUIElementSetMessagingTimeout(element, 0.5)
+        var result: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(element, attributes as CFArray, [], &result)
+        guard error == .success, let values = result as? [CFTypeRef], values.count == attributes.count else {
+            return (error == .success ? .failure : error, [])
+        }
+        var elementError = AXError.success
+        let found = values.map { value -> CFTypeRef? in
+            guard CFGetTypeID(value) == AXValueGetTypeID(), AXValueGetType(value as! AXValue) == .axError else {
+                return value
+            }
+            var attributeError = AXError.success
+            if AXValueGetValue(value as! AXValue, .axError, &attributeError),
+               attributeError == .invalidUIElement || attributeError == .cannotComplete {
+                elementError = attributeError
+            }
+            return nil
+        }
+        return (elementError, found)
+    }
+}
+
+private final class BrowserTabContext {
+    let onChange: @MainActor @Sendable () -> Void
+    init(onChange: @escaping @MainActor @Sendable () -> Void) { self.onChange = onChange }
+}
+
+private func browserTabCallback(
+    _ observer: AXObserver, _ element: AXUIElement, _ notification: CFString, _ refcon: UnsafeMutableRawPointer?) {
+    guard let refcon else { return }
+    let context = Unmanaged<BrowserTabContext>.fromOpaque(refcon).takeUnretainedValue()
+    MainActor.assumeIsolated { context.onChange() }
+}
+
+/// Reports renamed elements of an app. Chrome renames a tab when it starts or stops playing or gets another alert, and
+/// renames the window when its tabs change.
+final class BrowserTabObserver {
+    private let observer: AXObserver
+    private let applicationElement: AXUIElement
+    private let context: BrowserTabContext
+    private let runLoopSource: CFRunLoopSource
+
+    /// The handler is called on the main thread.
+    init?(pid: pid_t, onChange: @escaping @MainActor @Sendable () -> Void) {
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        var createdObserver: AXObserver?
+        let createError = AXObserverCreate(pid, browserTabCallback, &createdObserver)
+        guard createError == .success, let createdObserver else {
+            WindowAccess.logger.debug("Could not observe tabs for PID \(pid): \(createError.rawValue)")
+            return nil
+        }
+        let context = BrowserTabContext(onChange: onChange)
+        let error = AXObserverAddNotification(
+            createdObserver, appElement, kAXTitleChangedNotification as CFString,
+            Unmanaged.passUnretained(context).toOpaque())
+        guard error == .success || error == .notificationAlreadyRegistered else {
+            WindowAccess.logger.debug("Could not register title changes for PID \(pid): \(error.rawValue)")
+            return nil
+        }
+        observer = createdObserver
+        applicationElement = appElement
+        self.context = context
+        runLoopSource = AXObserverGetRunLoopSource(createdObserver)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+    }
+
+    deinit {
+        AXObserverRemoveNotification(observer, applicationElement, kAXTitleChangedNotification as CFString)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+    }
+}
+
 struct WindowAccessClient {
     var isTrusted: () -> Bool = { WindowAccess.isTrusted }
     var requestPermission: () -> Void = WindowAccess.requestPermission

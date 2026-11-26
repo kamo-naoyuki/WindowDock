@@ -1,3 +1,4 @@
+import ApplicationServices
 import CoreAudio
 import Darwin
 import Foundation
@@ -5,7 +6,8 @@ import OSLog
 import WindowDockCore
 
 /// Tracks which applications are playing audio, for the speaker on their tabs. Core Audio reports audio per process,
-/// so all windows of an application count as playing.
+/// so the windows of an application count as playing, except that a Chromium browser window plays only if one of its
+/// tabs may be playing.
 @MainActor
 final class AudioPlaybackMonitor {
     static let shared = AudioPlaybackMonitor()
@@ -16,12 +18,17 @@ final class AudioPlaybackMonitor {
     private var recent: RecentlyAudibleApplications
     private let playingApplications: () -> Set<pid_t>
     private let processes: CoreAudioProcesses?
+    private let browserTabs: BrowserTabSource
+    /// The windows asked about in each audible application.
+    private var browsers: [pid_t: BrowserWindows] = [:]
     private var started = false
     private var refreshScheduled = false
     private var holdTimer: Timer?
 
     /// `playingApplications` replaces Core Audio in tests; call `refresh()` to report changes to its output.
-    init(hold: TimeInterval = 2, playingApplications: (() -> Set<pid_t>)? = nil) {
+    init(
+        hold: TimeInterval = 2, playingApplications: (() -> Set<pid_t>)? = nil,
+        browserTabs: BrowserTabSource? = nil) {
         recent = RecentlyAudibleApplications(hold: hold)
         if let playingApplications {
             processes = nil
@@ -31,6 +38,7 @@ final class AudioPlaybackMonitor {
             self.processes = processes
             self.playingApplications = { processes.playingApplications() }
         }
+        self.browserTabs = browserTabs ?? .accessibility()
     }
 
     func start() {
@@ -52,9 +60,103 @@ final class AudioPlaybackMonitor {
             RunLoop.main.add(timer, forMode: .common)
             holdTimer = timer
         }
+        for pid in browsers.keys {
+            if audible.contains(pid) { scheduleRead(of: pid, after: 0) } else { untrack(pid) }
+        }
         guard audible != audibleApplications else { return }
         audibleApplications = audible
         NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+
+    /// Whether the window may be playing audio: its application is, and if it's a Chromium browser window, one of its
+    /// tabs is or shows another alert. A window doesn't count until its tabs have been read, so that the speaker
+    /// doesn't appear on every window of a browser first.
+    func isPlaying(_ window: WindowCandidate) -> Bool {
+        let pid = window.application.processIdentifier
+        guard audibleApplications.contains(pid) else { return false }
+        let browser = browsers[pid] ?? track(pid)
+        guard let tabs = browser.tabs[window.element] else {
+            if browser.windows.insert(window.element).inserted { scheduleRead(of: pid, after: 0) }
+            return false
+        }
+        return Self.plays(tabs)
+    }
+
+    fileprivate static func plays(_ tabs: BrowserWindowTabs) -> Bool {
+        guard case let .tabs(tabs) = tabs else { return true }
+        return tabs.contains { $0.mayBePlaying }
+    }
+
+    private func track(_ pid: pid_t) -> BrowserWindows {
+        let browser = BrowserWindows()
+        // Chrome renames tabs in bursts; read them once.
+        browser.observer = browserTabs.observe(pid) { [weak self] in self?.scheduleRead(of: pid, after: 0.25) }
+        browsers[pid] = browser
+        return browser
+    }
+
+    private func untrack(_ pid: pid_t) {
+        guard let browser = browsers.removeValue(forKey: pid) else { return }
+        browser.timer?.invalidate()
+        browser.observer = nil
+        browserTabs.forget(Array(browser.windows))
+    }
+
+    private func scheduleRead(of pid: pid_t, after delay: TimeInterval) {
+        guard let browser = browsers[pid], !browser.windows.isEmpty else { return }
+        guard !browser.reading else {
+            browser.readAgain = true
+            return
+        }
+        if let timer = browser.timer, timer.isValid, timer.fireDate.timeIntervalSinceNow <= delay { return }
+        browser.timer?.invalidate()
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.read(pid) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        browser.timer = timer
+    }
+
+    private func read(_ pid: pid_t) {
+        guard let browser = browsers[pid] else { return }
+        browser.timer = nil
+        browser.reading = true
+        let windows = Array(browser.windows)
+        browserTabs.read(windows) { [weak self, weak browser] tabs in
+            guard let self, let browser, browsers[pid] === browser else { return }
+            apply(tabs, of: windows, to: browser, pid: pid)
+        }
+    }
+
+    private func apply(_ tabs: [BrowserWindowTabs], of windows: [AXUIElement], to browser: BrowserWindows, pid: pid_t) {
+        browser.reading = false
+        let playing = browser.playingWindows
+        for (window, tabs) in zip(windows, tabs) {
+            switch tabs {
+            case .tabs, .noTabStrip:
+                browser.tabs[window] = tabs
+            case .gone:
+                browser.windows.remove(window)
+                browser.tabs[window] = nil
+            case .unavailable:
+                // Keep what was read before, or count the window as its application does.
+                if browser.tabs[window] == nil { browser.tabs[window] = .noTabStrip }
+            }
+        }
+        if browser.readAgain {
+            browser.readAgain = false
+            scheduleRead(of: pid, after: 0)
+        } else if browser.tabs.values.contains(where: Self.showsOtherAlert) {
+            // Chrome tells nothing when an alert icon finishes fading out.
+            scheduleRead(of: pid, after: 1)
+        }
+        guard browser.playingWindows != playing else { return }
+        NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+
+    private static func showsOtherAlert(_ tabs: BrowserWindowTabs) -> Bool {
+        guard case let .tabs(tabs) = tabs else { return false }
+        return tabs.contains(.otherAlert)
     }
 
     /// Core Audio notifies several properties for one change; read them once.
@@ -68,6 +170,22 @@ final class AudioPlaybackMonitor {
             }
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+}
+
+/// The windows asked about in an audible application, and their tabs once read.
+@MainActor
+private final class BrowserWindows {
+    var windows = Set<AXUIElement>()
+    var tabs: [AXUIElement: BrowserWindowTabs] = [:]
+    var observer: AnyObject?
+    var timer: Timer?
+    var reading = false
+    /// Tabs changed while they were being read.
+    var readAgain = false
+
+    var playingWindows: Set<AXUIElement> {
+        Set(tabs.filter { AudioPlaybackMonitor.plays($0.value) }.keys)
     }
 }
 

@@ -197,7 +197,7 @@ private let translations: [String: [String]] = [
     "ペイン": ["Pane", "窗格", "패널", "Panel"],
     "ペインを固定": ["Pin Pane", "固定窗格", "패널 고정", "Fijar panel"],
     "固定中": ["Pinned", "已固定", "고정됨", "Fijado"],
-    "アプリが音声を再生中": ["App is playing audio", "应用正在播放音频", "앱에서 오디오 재생 중", "La app está reproduciendo audio"],
+    "音声を再生中": ["Playing audio", "正在播放音频", "오디오 재생 중", "Reproduciendo audio"],
     "ペイン %d": ["Pane %d", "窗格 %d", "패널 %d", "Panel %d"],
     "左右に分割": ["Split Left and Right", "左右分割", "좌우로 분할", "Dividir a izquierda y derecha"],
     "上下に分割": ["Split Top and Bottom", "上下分割", "상하로 분할", "Dividir arriba y abajo"],

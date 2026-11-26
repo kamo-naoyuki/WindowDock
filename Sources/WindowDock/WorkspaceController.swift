@@ -436,14 +436,12 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             let title = candidate.map { $0.title.isEmpty ? $0.application.localizedName ?? "App" : $0.title }
                 ?? L("新しいタブ")
             let pinned = cell.map { session.isPanePinned($0) } ?? false
-            let playingAudio = candidate.map {
-                audio.audibleApplications.contains($0.application.processIdentifier)
-            } ?? false
+            let playingAudio = candidate.map { audio.isPlaying($0) } ?? false
             return WorkspaceTabItem(
                 id: id,
                 title: side + title,
                 toolTip: side + (candidate?.label ?? title) + (pinned ? " · " + L("固定中") : "")
-                    + (playingAudio ? " · " + L("アプリが音声を再生中") : ""),
+                    + (playingAudio ? " · " + L("音声を再生中") : ""),
                 icon: candidate?.application.icon,
                 selected: selected,
                 displayed: displayed,

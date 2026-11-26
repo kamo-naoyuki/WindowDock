@@ -54,6 +54,7 @@ Write development and improvement plans in Japanese as `development/<plan-name>.
   - `WorkspaceTabDragRoute.swift` – decides whether a dragged tab stays in its workspace, transfers to another, or does nothing.
   - `WindowHitTesting.swift` – recognizes a click on an own window that just activated the app.
   - `AudioPlayback.swift` – which applications a process playing audio counts for (itself, its responsible process, their ancestors), and how long a stopped application stays audible.
+  - `BrowserTabAudio.swift` – classifies a Chromium tab's accessibility label as playing, muted, another alert, or silent (playing/muted markers for every Chrome UI language).
 - `WindowDock` (`Sources/WindowDock`): the app (depends on Core and Sparkle).
 
 ## Where things are (`Sources/WindowDock`)
@@ -64,11 +65,11 @@ Write development and improvement plans in Japanese as `development/<plan-name>.
 | Which workspace comes forward on app activation, Dock click/menu or Workspace menu, and sending the other workspaces back (`WorkspaceActivation`) | `WorkspaceActivation.swift` |
 | One workspace = one `WorkspaceController` (owns the NSWindow, wires `WindowSession` ↔ views, NSWindowDelegate, picker, drop handling, returns moved/zoomed/minimized windows via `WindowEventObserver`; returning full-screen windows is opt-in) | `WorkspaceController.swift` |
 | Model/state of a workspace: managed windows, grid cells, selection, sync/align/raise, suspend/resume, restore originals | `WindowSession.swift` |
-| All Accessibility API calls (`WindowAccess`), `WindowAccessClient` (injectable for tests), `WindowCandidate`, window scanning, window-server list | `Accessibility.swift` |
+| All Accessibility API calls (`WindowAccess`), `WindowAccessClient` (injectable for tests), `WindowCandidate`, window scanning, window-server list, Chromium tab-strip reading (`BrowserTabSource`, injectable) | `Accessibility.swift` |
 | Workspace NSWindow (`WorkspaceWindow`), resize/drag background view, coverage | `WorkspaceBackgroundView.swift` |
 | Tab bar, grid selectors, notices, drop-target UI, tab context menu (`WorkspaceChromeView`), `WorkspaceNotice`, `WorkspaceSplitLayout` | `WorkspaceChromeView.swift` |
-| Tab button (including its speaker while the app plays audio), tab-move drag session, per-pane tab drop overlay | `WorkspaceTabDrag.swift` |
-| Applications playing audio, from Core Audio process objects (macOS 14.4+; notification-driven, no polling), for tab speakers (`AudioPlaybackMonitor`) | `AudioPlaybackMonitor.swift` |
+| Tab button (including its speaker while its window plays audio), tab-move drag session, per-pane tab drop overlay | `WorkspaceTabDrag.swift` |
+| Applications playing audio, from Core Audio process objects (macOS 14.4+; notification-driven, no polling), narrowed to windows for Chromium browsers by reading their tab strips while audible; `isPlaying(_:)` drives tab speakers (`AudioPlaybackMonitor`) | `AudioPlaybackMonitor.swift` |
 | Pane grid layout (`WorkspaceGridSize` up to 4×4, `WorkspaceGridView`) | `WorkspaceGridView.swift` |
 | Ctrl+Tab shortcut context, registered-window check for window drags (`WorkspaceWindowDragRegistration`) | `WorkspaceInput.swift` |
 | "Add windows" sheet | `WindowPicker.swift` |

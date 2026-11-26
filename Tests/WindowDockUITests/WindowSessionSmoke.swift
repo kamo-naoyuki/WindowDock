@@ -393,15 +393,35 @@ enum WindowSessionSmoke {
         return failures
     }
 
-    /// Speakers follow the applications playing audio, through tab re-renders and during a tab drag.
+    /// Speakers follow the windows playing audio, through tab re-renders and during a tab drag. A browser window plays
+    /// only while one of its tabs may play; other windows play with their application.
     static func runAudioIndicatorChecks() -> [String] {
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
             return ["audio indicator fixture needs the Dock as a second application"]
         }
+        final class Observation {
+            let onChange: @MainActor @Sendable () -> Void
+            init(_ onChange: @escaping @MainActor @Sendable () -> Void) { self.onChange = onChange }
+        }
         var failures: [String] = []
-        let model = Model(windowCount: 2)
+        let model = Model(windowCount: 3)
         var playing: Set<pid_t> = []
-        let audio = AudioPlaybackMonitor(hold: 0, playingApplications: { playing })
+        var browserTabs: [Int: BrowserWindowTabs] = [:]
+        var observations: [pid_t: Observation] = [:]
+        weak var observedSelf: Observation?
+        let tabSource = BrowserTabSource(
+            read: { windows, completion in
+                completion(windows.map { window in
+                    (try? model.index(of: window)).flatMap { browserTabs[$0] } ?? .noTabStrip
+                })
+            },
+            observe: { pid, onChange in
+                let observation = Observation(onChange)
+                observations[pid] = observation
+                return observation
+            },
+            forget: { _ in })
+        let audio = AudioPlaybackMonitor(hold: 0, playingApplications: { playing }, browserTabs: tabSource)
         let controller = WorkspaceController(name: "Audio indicator", access: access(for: model), audio: audio)
         defer {
             controller.quitting = true
@@ -411,42 +431,58 @@ enum WindowSessionSmoke {
             return ["audio indicator fixture could not find its chrome"]
         }
         controller.session.add([
-            WindowCandidate(element: model.windows[0].element, application: .current, title: "Playing probe"),
-            WindowCandidate(element: model.windows[1].element, application: dock, title: "Silent probe"),
+            WindowCandidate(element: model.windows[0].element, application: .current, title: "Playing tab probe"),
+            WindowCandidate(element: model.windows[1].element, application: .current, title: "Silent tab probe"),
+            WindowCandidate(element: model.windows[2].element, application: dock, title: "Other app probe"),
         ])
         chrome.layoutSubtreeIfNeeded()
         let buttons = chrome.tabs.arrangedSubviews.compactMap {
             ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? WorkspaceTabButton
         }
-        guard buttons.count == 2 else { return ["audio indicator fixture expected 2 tabs, found \(buttons.count)"] }
-        let described = L("アプリが音声を再生中")
-        func expect(_ expected: [Bool], _ step: String) {
+        guard buttons.count == 3 else { return ["audio indicator fixture expected 3 tabs, found \(buttons.count)"] }
+        let described = L("音声を再生中")
+        func states() -> [Bool] {
+            buttons.map { $0.audioIndicator?.isHidden == false && $0.toolTip?.contains(described) == true }
+        }
+        func expect(_ expected: [Bool], _ step: String, wait: Bool = true) {
+            let deadline = Date().addingTimeInterval(wait ? 2 : 0)
+            while states() != expected, Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
             let speakers = buttons.map { $0.audioIndicator?.isHidden == false }
             let toolTips = buttons.map { $0.toolTip?.contains(described) == true }
             if speakers != expected || toolTips != expected {
                 failures.append("\(step): speakers \(speakers), tooltips \(toolTips), expected \(expected)")
             }
         }
-        expect([false, false], "before playback")
+        expect([false, false, false], "before playback")
+        browserTabs = [0: .tabs([.silent, .playing]), 1: .tabs([.silent])]
         playing = [getpid()]
         audio.refresh()
-        expect([true, false], "while this application plays")
+        expect([false, false, false], "before the tabs were read", wait: false)
+        expect([true, false, false], "while one browser window plays")
+        browserTabs = [0: .tabs([.muted]), 1: .tabs([.otherAlert])]
+        observedSelf = observations[getpid()]
+        observations[getpid()]?.onChange()
+        expect([false, true, false], "after the browser renamed its tabs")
         controller.session.select(controller.session.windows[1].id)
-        expect([true, false], "after selecting another tab")
-        guard let dragged = buttons[1].superview as? WorkspaceTabGroup else {
-            return failures + ["audio indicator fixture lost its second tab"]
+        expect([false, true, false], "after selecting another tab")
+        guard let dragged = buttons[2].superview as? WorkspaceTabGroup else {
+            return failures + ["audio indicator fixture lost its third tab"]
         }
-        chrome.beginTabDrag(source: buttons[1], token: "audio-indicator-probe")
+        chrome.beginTabDrag(source: buttons[2], token: "audio-indicator-probe")
         playing = [dock.processIdentifier]
         audio.refresh()
-        expect([false, true], "during a tab drag")
+        expect([false, false, true], "during a tab drag, for an app without tabs")
         if !dragged.isFloating || chrome.tabs.arrangedSubviews.contains(dragged) {
             failures.append("a playback change ended the tab drag")
         }
         chrome.endTabDrag()
+        observations = [:]
+        if observedSelf != nil { failures.append("tabs were still observed after their application went quiet") }
         playing = []
         audio.refresh()
-        expect([false, false], "after playback")
+        expect([false, false, false], "after playback")
         return failures
     }
 
