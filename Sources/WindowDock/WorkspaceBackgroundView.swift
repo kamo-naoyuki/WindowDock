@@ -107,16 +107,22 @@ class WorkspaceBackgroundView: NSView {
     var revealsWindow = false {
         didSet { needsDisplay = true }
     }
+    /// Grid cells kept opaque even where their window is shown, e.g. behind a window dragged in front of the workspace.
+    var concealedGridCells: Set<Int> = [] {
+        didSet { needsDisplay = true }
+    }
     private var transitionClips: [NSRect]?
 
     private var resizeGrip: NSRect { WorkspaceResize.grip(in: bounds) }
 
-    private var visibleContentRects: [NSRect] {
+    var visibleContentRects: [NSRect] {
         guard revealsWindow, let window else { return [] }
         let pairs: [(NSView?, NSRect?)] =
             gridContentAreas.isEmpty
                 ? [(contentArea, coveredScreenRect), (secondaryContentArea, secondaryCoveredScreenRect)]
-                : gridContentAreas.enumerated().map { ($0.element, gridCoveredScreenRects[$0.offset]) }
+                : gridContentAreas.enumerated().map {
+                    ($0.element, concealedGridCells.contains($0.offset) ? nil : gridCoveredScreenRects[$0.offset])
+                }
         let candidates = pairs.flatMap { area, coverage -> [NSRect] in
             guard let area, let coverage else { return [] }
             let contentRect = convert(area.bounds, from: area)

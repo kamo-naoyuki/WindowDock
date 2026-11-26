@@ -24,6 +24,17 @@ struct WorkspaceShortcutContext {
         originPID = frontPID == ownPID ? nil : frontPID
         return flags.contains(.shift) ? -1 : 1
     }
+    /// ⌃⌥Tab / ⌃⌥⇧Tab switch workspaces while WindowDock or a window shown in a workspace is in front.
+    static func workspaceDirection(for event: NSEvent, ownPID: pid_t, frontPID: pid_t?, managedPIDs: Set<pid_t>)
+        -> Int?
+    {
+        guard event.type == .keyDown, event.keyCode == 48, let frontPID,
+              frontPID == ownPID || managedPIDs.contains(frontPID)
+        else { return nil }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard flags == [.control, .option] || flags == [.control, .option, .shift] else { return nil }
+        return flags.contains(.shift) ? -1 : 1
+    }
 }
 
 /// Whether a workspace already manages a window being dragged. Registered windows must not be offered for a drop,
@@ -103,7 +114,7 @@ final class WorkspaceWindowDrop {
         self.controllers = controllers
     }
 
-    func poll() {
+    func poll(sampledWindows: [WindowServerWindow]? = nil) {
         guard isEnabled else {
             cancel()
             return
@@ -120,16 +131,20 @@ final class WorkspaceWindowDrop {
         let point = pointer.location
         let axPoint = CGPoint(x: point.x, y: screen.frame.maxY - point.y)
         let windows: [WindowServerWindow]
-        do {
-            windows = try self.windows()
-        } catch {
-            cancel()
-            if !samplingFailed {
-                samplingFailed = true
-                WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
-                onSamplingFailure(error)
+        if let sampledWindows {
+            windows = sampledWindows
+        } else {
+            do {
+                windows = try self.windows()
+            } catch {
+                cancel()
+                if !samplingFailed {
+                    samplingFailed = true
+                    WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
+                    onSamplingFailure(error)
+                }
+                return
             }
-            return
         }
         samplingFailed = false
         switch tracker.update(

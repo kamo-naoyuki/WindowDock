@@ -180,6 +180,102 @@ enum WorkspaceActivationSmoke {
         return failures
     }
 
+    /// With Stage Manager on, a managed window must stay over its workspace whichever of their apps is active,
+    /// instead of one of them being moved into the Stage Manager strip. `run-smoke.sh --stage-manager-only` turns
+    /// Stage Manager on for this check.
+    static func runStageManagerChecks() -> [String] {
+        guard CFPreferencesCopyAppValue("GloballyEnabled" as CFString, "com.apple.WindowManager" as CFString)
+            as? Bool == true
+        else { return ["Stage Manager check needs Stage Manager on; run it with run-smoke.sh --stage-manager-only"] }
+        // Stage Manager arranges regular apps' windows, and WindowDock is a regular app.
+        NSApp.setActivationPolicy(.regular)
+        defer { NSApp.setActivationPolicy(.accessory) }
+        let helper: WindowSessionSmoke.ActivationHelperProcess
+        switch WindowSessionSmoke.ActivationHelperProcess.launch(resizable: true) {
+        case .success(let launched): helper = launched
+        case .failure(let failure): return ["Stage Manager: \(failure.message)"]
+        }
+        defer { helper.terminate() }
+        func wait(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline {
+                if let event = NSApp.nextEvent(
+                    matching: .any, until: Date().addingTimeInterval(0.02), inMode: .default, dequeue: true
+                )
+                {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        guard let application = NSRunningApplication(processIdentifier: helper.pid),
+              let element = WindowAccess.windowElements(application)?.first(where: {
+                  WindowAccess.windowID(of: $0) == CGWindowID(helper.windows[0])
+              })
+        else { return ["Stage Manager fixture could not find the helper window"] }
+        let controller = WorkspaceController(name: "Stage Manager")
+        let workspace = controller.window
+        defer {
+            controller.quitting = true
+            workspace.orderOut(nil)
+        }
+        workspace.setFrame(NSRect(x: 260, y: 160, width: 900, height: 600), display: true)
+        workspace.orderFrontRegardless()
+        controller.session.add(WindowCandidate(element: element, application: application, title: "Stage probe"))
+        // Stage Manager shows windows of sets in its strip as small thumbnails.
+        func shownSize(_ number: Int) -> CGSize? {
+            let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+            guard let entry = list.first(where: { $0[kCGWindowNumber as String] as? Int == number }),
+                  let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds)
+            else { return nil }
+            return rect.size
+        }
+        func onStage(_ number: Int, size: CGSize?) -> Bool {
+            guard let size, let shown = shownSize(number) else { return false }
+            return abs(shown.width - size.width) <= 2 && abs(shown.height - size.height) <= 2
+        }
+        func workspaceOnStage() -> Bool { onStage(workspace.windowNumber, size: workspace.frame.size) }
+        func managedOnStage() -> Bool { onStage(helper.windows[0], size: try? WindowAccess.frame(element).size) }
+        wait(2) { (try? WindowAccess.frame(element).width) ?? 0 > 600 }
+        guard let fitted = try? WindowAccess.frame(element), fitted.width > 600 else {
+            return ["Stage Manager fixture did not fit the helper window into its pane"]
+        }
+        var failures: [String] = []
+
+        // Selecting the tab activates the window's app.
+        guard WindowAccess.activateFrontWindowOnly(helper.pid) else {
+            return ["Stage Manager fixture could not activate the helper app"]
+        }
+        wait(2) { NSWorkspace.shared.frontmostApplication?.processIdentifier == helper.pid }
+        wait(3) { workspaceOnStage() && managedOnStage() }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != helper.pid {
+            failures.append("Stage Manager fixture did not make the managed window's app frontmost")
+        } else if !workspaceOnStage() {
+            failures.append(
+                "Stage Manager moved the workspace and its tab bar off the stage while the managed window's app was "
+                    + "active (shown \(String(describing: shownSize(workspace.windowNumber))), "
+                    + "frame \(workspace.frame.size))"
+            )
+        }
+
+        // Clicking the tab bar activates WindowDock.
+        helper.send("yield \(ProcessInfo.processInfo.processIdentifier)")
+        wait(0.3)
+        NSApp.activate(ignoringOtherApps: true)
+        workspace.makeKeyAndOrderFront(nil)
+        wait(2) { NSApp.isActive }
+        wait(3) { workspaceOnStage() && managedOnStage() }
+        if !NSApp.isActive {
+            failures.append("Stage Manager fixture could not activate WindowDock")
+        } else if !managedOnStage() {
+            failures.append(
+                "Stage Manager moved the managed window off the stage while WindowDock was active (shown "
+                    + "\(String(describing: shownSize(helper.windows[0]))), frame \(fitted.size))"
+            )
+        }
+        return failures
+    }
+
     /// The auto-hidden tab bar is a non-activating panel; a click on it must still activate WindowDock (and show
     /// its menu bar) with that workspace key, like a click on the embedded tab bar.
     static func runAutoHiddenToolbarActivationChecks() -> [String] {

@@ -241,16 +241,206 @@ enum TabLayoutSmoke {
         return failures
     }
 
+    /// The installed apps wrap into columns, scroll vertically with the page, and a plain click still opens one app.
+    /// Selected apps open together, or are registered to add their new windows automatically.
+    @MainActor
+    private static func checkLauncherGrid() async -> [String] {
+        let apps = (1 ... 13).map {
+            LauncherApplication(url: URL(fileURLWithPath: "/Fixture\($0).app"), name: "Fixture \($0)", lastUsed: nil)
+        }
+        var launched: [URL] = []
+        var chosen: [[String]] = []
+        var registered: [[URL]] = []
+        let existing = WindowCandidate(element: AXUIElementCreateApplication(930_000), application: .current,
+                                       title: "Existing window")
+        var access = WindowAccessClient()
+        access.isTrusted = { true }
+        access.scan = { WindowScan(windows: [existing]) }
+        let autoGroup = AutoGroupPageModel()
+        autoGroup.isAvailable = true
+        autoGroup.register = {
+            registered.append($0)
+            return true
+        }
+        let page = NewTabPage(
+            access: access, isAvailable: { _ in true },
+            launch: { url in
+                launched.append(url)
+                if url == apps[4].url { throw CocoaError(.executableLoad) }
+                return [WindowCandidate(element: AXUIElementCreateApplication(pid_t(920_000 + launched.count)),
+                                        application: .current, title: url.lastPathComponent)]
+            },
+            choose: {
+                chosen.append($0.map(\.title).sorted())
+                return true
+            }, applications: { apps }, autoGroup: autoGroup)
+        let size = NSSize(width: 420, height: 360)
+        let host = NSHostingView(rootView: page.frame(width: size.width, height: size.height)
+            .environment(\.accessibilityEnabled, true))
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: .borderless,
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        func settle() async {
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+        }
+        // SwiftUI doesn't list a ScrollView's content as accessibility children, but hit-testing reaches it.
+        func buttons() -> [String: (node: AnyObject, frame: NSRect)] {
+            var found: [String: (node: AnyObject, frame: NSRect)] = [:]
+            for y in stride(from: 3.0, to: size.height, by: 9) {
+                for x in stride(from: 3.0, to: size.width, by: 9) {
+                    let node = host.accessibilityHitTest(window.convertPoint(toScreen: NSPoint(x: x, y: y)))
+                        as AnyObject?
+                    guard let node, node.accessibilityRole?() == .button,
+                          let label = node.accessibilityLabel?() ?? node.accessibilityTitle?(), !label.isEmpty,
+                          found[label] == nil, let frame = node.accessibilityFrame?() else { continue }
+                    found[label] = (node, window.convertFromScreen(frame))
+                }
+            }
+            return found
+        }
+        func descendants(of view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + descendants(of: $0) } }
+        var scroll: NSScrollView?
+        for _ in 0 ..< 60 where scroll == nil {
+            await settle()
+            scroll = descendants(of: host).compactMap { $0 as? NSScrollView }.first {
+                ($0.documentView?.bounds.height ?? 0) > $0.contentSize.height + 40
+            }
+        }
+        guard let scroll, let document = scroll.documentView else {
+            return ["the installed apps did not scroll vertically with the page"]
+        }
+        /// Scrolls the page from the top until the button is wholly visible.
+        func reveal(_ label: String) async -> (node: AnyObject, frame: NSRect)? {
+            let range = max(0, document.bounds.height - scroll.contentSize.height)
+            for offset in Array(stride(from: 0, to: range, by: 40)) + [range] {
+                document.scroll(NSPoint(x: 0, y: document.isFlipped ? offset : range - offset))
+                await settle()
+                if let button = buttons()[label], NSRect(origin: .zero, size: size).contains(button.frame) {
+                    return button
+                }
+            }
+            return nil
+        }
+        func press(_ label: String) async -> Bool {
+            guard let button = await reveal(label) else { return false }
+            return button.node.isAccessibilityEnabled?() == true && button.node.accessibilityPerformPress?() == true
+        }
+        func commandClick(_ label: String) async -> Bool {
+            guard let frame = await reveal(label)?.frame else { return false }
+            for type in [NSEvent.EventType.leftMouseUp, .leftMouseDown] {
+                guard let event = NSEvent.mouseEvent(
+                    with: type, location: NSPoint(x: frame.midX, y: frame.midY), modifierFlags: .command,
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                    eventNumber: 1, clickCount: 1, pressure: 1) else { return false }
+                NSApp.postEvent(event, atStart: true)
+            }
+            while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp], until: .distantPast,
+                                              inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+            return true
+        }
+        func waitFor(_ condition: () -> Bool) async -> Bool {
+            for _ in 0 ..< 60 {
+                if condition() { return true }
+                await settle()
+            }
+            return condition()
+        }
+
+        var failures: [String] = []
+        guard let one = await reveal("Fixture 1")?.frame, let two = buttons()["Fixture 2"]?.frame else {
+            return ["the installed apps grid did not show its first apps"]
+        }
+        if abs(one.midY - two.midY) > 1 || two.minX <= one.maxX {
+            failures.append("the first installed apps were not laid out side by side: \(one) \(two)")
+        }
+        guard await reveal("Fixture 13") != nil else { return failures + ["could not scroll to the thirteenth app"] }
+        let wrapped = buttons().contains { label, button in
+            label.hasPrefix("Fixture ") && label != "Fixture 1" && abs(button.frame.minX - one.minX) < 1
+        }
+        if !wrapped { failures.append("the installed apps did not wrap onto another row") }
+        let pressedLast = await press("Fixture 13")
+        let launchedLast = await waitFor { launched == [apps[12].url] && chosen == [["Fixture13.app"]] }
+        if !pressedLast || !launchedLast {
+            failures.append("could not launch the thirteenth app and add its window: \(launched) \(chosen)")
+        }
+
+        // A failed launch keeps the open windows to choose from instead.
+        launched.removeAll()
+        guard await press("Fixture 5"), await waitFor({ launched == [apps[4].url] }) else {
+            return failures + ["could not try to open an app that fails to launch"]
+        }
+        for _ in 0 ..< 10 { await settle() }
+        if await reveal(existing.label) == nil {
+            failures.append("a failed launch removed the open windows from the new tab")
+        }
+
+        launched.removeAll()
+        chosen.removeAll()
+        let selectedOne = await commandClick("Fixture 1")
+        guard selectedOne, launched.isEmpty, await press("Fixture 2"),
+              await press(L("%d個のアプリで新しいウィンドウを開く", 2)),
+              await waitFor({ chosen == [["Fixture1.app", "Fixture2.app"]] })
+        else {
+            return failures + ["Command-click didn't select apps, or the selected apps weren't opened together: "
+                + "launched \(launched), added \(chosen)"]
+        }
+        if Set(launched) != [apps[0].url, apps[1].url] { failures.append("opened the wrong apps: \(launched)") }
+        if await reveal(L("アプリを複数選択")) == nil {
+            failures.append("opening the selected apps did not leave multi-select mode")
+        }
+
+        launched.removeAll()
+        guard await press(L("アプリを複数選択")), await press("Fixture 3"), await press("Fixture 4"),
+              await press(L("%d個のアプリの新しいウィンドウを自動でこのワークスペースに追加", 2))
+        else { return failures + ["could not register the selected apps to add their new windows automatically"] }
+        if registered != [[apps[2].url, apps[3].url]] || !launched.isEmpty {
+            failures.append("registering selected apps did not pass them without launching: \(registered) \(launched)")
+        }
+        if await reveal(L("アプリを複数選択")) == nil {
+            failures.append("registering the selected apps did not leave multi-select mode")
+        }
+
+        // A failed launch keeps the open windows to choose from instead.
+        launched.removeAll()
+        guard await press(L("アプリを複数選択")), await press("Fixture 5"), await press("Fixture 6"),
+              await press(L("%d個のアプリで新しいウィンドウを開く", 2)),
+              await waitFor({ Set(launched) == [apps[4].url, apps[5].url] })
+        else { return failures + ["could not open a failing app together with another app"] }
+        for _ in 0 ..< 10 { await settle() }
+        let opened = "\(existing.application.localizedName ?? "App") — Fixture6.app"
+        let keptExisting = await reveal(existing.label) != nil
+        let showedOpened = await reveal(opened) != nil
+        let selectedOpened = await reveal(L("%d件を追加", 1)) != nil
+        if !keptExisting || !showedOpened || !selectedOpened {
+            failures.append("after one of the selected apps failed to open, the new tab showed existing "
+                + "\(keptExisting), opened \(showedOpened), opened selected \(selectedOpened)")
+        }
+        return failures
+    }
+
     @MainActor
     private static func checkNewTabHoverGlow() -> [String] {
-        var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
-        arguments["recentTabApplicationIDs"] = ["com.apple.finder", "com.apple.TextEdit"]
-        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         var access = WindowAccessClient()
         access.isTrusted = { true }
         access.scan = { WindowScan() }
         let page = NewTabPage(access: access, isAvailable: { _ in true }, launch: { _ in [] },
-                              choose: { _ in false }, browse: { _ in })
+                              choose: { _ in false }, applications: {
+                                  ["com.apple.finder", "com.apple.TextEdit"].compactMap { id in
+                                      guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
+                                      else { return nil }
+                                      return LauncherApplication(
+                                          url: url,
+                                          name: FileManager.default.displayName(atPath: url.path),
+                                          lastUsed: nil)
+                                  }
+                              })
         let windows = (0 ..< 2).map {
             WindowCandidate(element: AXUIElementCreateApplication(pid_t(910_100 + $0)), application: .current,
                             title: "Glow \($0)")
@@ -269,6 +459,8 @@ enum TabLayoutSmoke {
         host.contentView = chrome
         host.orderBack(nil)
         defer { host.close() }
+        // A compressed name could otherwise grow back into space freed by closed tabs and shift the next ×.
+        chrome.setWorkspaceName("A workspace name long enough to be compressed")
         var failures: [String] = []
         let click = TabCloseProbe()
         let tracking = TabBarTrackingEvent()
@@ -317,8 +509,9 @@ enum TabLayoutSmoke {
                 }
                 (hit as? NSButton)?.performClick(nil)
                 let center = screenPoint(groups[slot].close)
+                let visible = chrome.tabs.visibleRect
                 if groups[slot].id != next || abs(center.x - point.x) > 1 || abs(center.y - point.y) > 1
-                    || chrome.tabs.visibleRect != viewport {
+                    || visible.origin != viewport.origin || visible.height != viewport.height {
                     failures
                         .append(
                             "slot \(slot): next × moved from \(point) to \(center), viewport \(viewport) → \(chrome.tabs.visibleRect)")
@@ -332,13 +525,38 @@ enum TabLayoutSmoke {
             if scroll { chrome.revealTab(groups[count - 1].view) }
             let slot = scroll ? count - 4 : 2
             let width = groups[slot].view.bounds.width
+            let plus = screenPoint(chrome.addButton).x
             closeTwice(at: slot)
+            let pulled = plus - screenPoint(chrome.addButton).x
+            if abs(pulled - 2 * (width + chrome.tabs.spacing)) > 1 {
+                failures.append("slot \(slot): + moved \(pulled) pt instead of following the closed tabs")
+            }
             chrome.mouseExited(with: tracking)
             layout()
             if !scroll, groups[slot].view.bounds.width <= width + 1 {
                 failures.append("leaving the tab bar did not redistribute freed space")
             }
         }
+
+        // Closing the rightmost tab resizes at once, so the new last × lands under the pointer.
+        items = Array(all.prefix(7))
+        render()
+        settle()
+        let lastClose = screenPoint(groups[groups.count - 1].close)
+        let compressedWidth = groups[0].view.bounds.width
+        chrome.mouseEntered(with: tracking)
+        for _ in 0 ..< 2 {
+            let hit = chrome.hitTest(host.convertPoint(fromScreen: lastClose))
+            guard hit === groups.last?.close else {
+                failures.append("closing the rightmost tab moved the next × away from \(lastClose)")
+                break
+            }
+            (hit as? NSButton)?.performClick(nil)
+        }
+        if groups[0].view.bounds.width <= compressedWidth + 1 {
+            failures.append("closing the rightmost tab under the pointer did not resize the remaining tabs")
+        }
+        chrome.mouseExited(with: tracking)
 
         chrome.wrapsCrowdedTabs = true
         for position: TabBarPosition in [.top, .bottom] {
@@ -407,6 +625,127 @@ enum TabLayoutSmoke {
             }
         }
         return failures
+    }
+
+    /// Icon-only tabs hide window names but keep them for help and accessibility, and stay narrow in a wide bar.
+    @MainActor
+    private static func checkIconOnlyTabs() -> [String] {
+        let host = WorkspaceWindow(contentRect: NSRect(x: 100, y: 100, width: 930, height: 600),
+                                   styleMask: .borderless, backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        let chrome = WorkspaceChromeView(frame: .zero)
+        host.contentView = chrome
+        host.orderBack(nil)
+        defer { host.close() }
+        func layout() {
+            chrome.layoutSubtreeIfNeeded()
+            chrome.tabs.window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        let icon = NSWorkspace.shared.icon(forFile: "/System/Applications/TextEdit.app")
+        var items = [
+            WorkspaceTabItem(id: UUID(), title: "Quarterly report draft", icon: icon, selected: true),
+            WorkspaceTabItem(id: UUID(), title: "Meeting notes", icon: icon, selected: false),
+            WorkspaceTabItem(id: UUID(), title: "New Tab", selected: false),
+        ]
+        var tabs = chrome.setTabs(items)
+        layout()
+        let titledWidth = tabs[0].view.frame.width
+        var failures: [String] = []
+        chrome.showsTabIconsOnly = true
+        layout()
+        for (tab, item) in zip(tabs, items) {
+            if !tab.select.title.isEmpty || tab.select.image == nil || tab.select.imagePosition != .imageOnly {
+                failures.append("icon-only tab ‘\(item.title)’ still showed its title or lost its icon")
+            }
+            if tab.select.accessibilityLabel() != item.title || tab.select.toolTip != item.title {
+                failures.append("icon-only tab ‘\(item.title)’ lost its name for help or accessibility")
+            }
+            let width = tab.view.frame.width
+            if width > WindowGeometry.iconOnlyTabContentWidth + 34 + 1 || width >= titledWidth {
+                failures.append("icon-only tab ‘\(item.title)’ was \(width) wide (titled \(titledWidth))")
+            }
+        }
+        items[1] = WorkspaceTabItem(id: items[1].id, title: "Renamed notes", icon: icon, selected: false)
+        chrome.updateTabs(items)
+        if !tabs[1].select.title.isEmpty || tabs[1].select.accessibilityLabel() != "Renamed notes" {
+            failures.append("updating an icon-only tab showed its title or kept its old name")
+        }
+        chrome.setTabBarPosition(.left)
+        layout()
+        if !tabs[0].select.title.isEmpty || tabs[0].select.imagePosition != .imageLeading {
+            failures.append("icon-only tabs in a vertical bar showed titles or moved their icons off the leading edge")
+        }
+        chrome.setTabBarPosition(.top)
+        chrome.showsTabIconsOnly = false
+        tabs = chrome.setTabs(items)
+        layout()
+        if tabs[0].select.title != items[0].title || tabs[2].select.image != nil
+            || abs(tabs[0].view.frame.width - titledWidth) > 1 {
+            failures.append("turning icon-only tabs off did not restore titles and widths")
+        }
+        return failures
+    }
+
+    /// An auto-hidden tab bar draws its tabs like the regular bar, not grayed out.
+    @MainActor
+    private static func checkAutoHiddenTabAppearance() -> [String] {
+        let host = WorkspaceWindow(contentRect: NSRect(x: 100, y: 100, width: 930, height: 600),
+                                   styleMask: .borderless, backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        let chrome = WorkspaceChromeView(frame: .zero)
+        host.contentView = chrome
+        host.orderBack(nil)
+        defer {
+            chrome.setAutoHideTabBar(false)
+            host.close()
+        }
+        let tabs = chrome.setTabs([
+            WorkspaceTabItem(id: UUID(), title: "Selected document", selected: true),
+            WorkspaceTabItem(id: UUID(), title: "Other document", selected: false),
+        ])
+        let tab = tabs[1]
+        // The unselected tab's translucent background and its title's contrast against it.
+        func sample(in root: NSView) -> (background: NSColor, contrast: CGFloat)? {
+            root.layoutSubtreeIfNeeded()
+            root.window?.displayIfNeeded()
+            guard let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) else { return nil }
+            root.cacheDisplay(in: root.bounds, to: bitmap)
+            let scale = CGFloat(bitmap.pixelsWide) / root.bounds.width
+            func color(_ point: NSPoint) -> NSColor? {
+                let y = root.isFlipped ? point.y : root.bounds.height - point.y
+                return bitmap.colorAt(x: Int(point.x * scale), y: Int(y * scale))?.usingColorSpace(.deviceRGB)
+            }
+            func luminance(_ color: NSColor) -> CGFloat {
+                0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
+            }
+            let group = tab.view.convert(tab.view.bounds, to: root)
+            guard let background = color(NSPoint(x: group.minX + 3, y: group.midY)) else { return nil }
+            let title = tab.select.convert(tab.select.bounds, to: root).insetBy(dx: 2, dy: 4)
+            var contrast: CGFloat = 0
+            for y in stride(from: title.minY, to: title.maxY, by: 0.5) {
+                for x in stride(from: title.minX, to: min(title.maxX, title.minX + 80), by: 0.5) {
+                    if let pixel = color(NSPoint(x: x, y: y)) {
+                        contrast = max(contrast, abs(luminance(pixel) - luminance(background)))
+                    }
+                }
+            }
+            return (background, contrast)
+        }
+        guard let regular = sample(in: chrome) else { return ["couldn't render the regular tab bar"] }
+        chrome.setAutoHideTabBar(true)
+        chrome.setAutoHiddenToolbarVisible(true)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        guard let panel = chrome.autoHiddenToolbarPanel?.contentView, let hidden = sample(in: panel) else {
+            return ["couldn't render the auto-hidden tab bar"]
+        }
+        let difference = abs(regular.background.redComponent - hidden.background.redComponent)
+            + abs(regular.background.greenComponent - hidden.background.greenComponent)
+            + abs(regular.background.blueComponent - hidden.background.blueComponent)
+        if difference > 0.1 || hidden.contrast < regular.contrast * 0.8 {
+            return ["auto-hidden tabs looked grayed out: background \(hidden.background) vs \(regular.background), "
+                + "title contrast \(hidden.contrast) vs \(regular.contrast)"]
+        }
+        return []
     }
 
     @MainActor
@@ -550,6 +889,19 @@ enum TabLayoutSmoke {
             UserDefaults.standard
                 .setVolatileDomain(["NSInitialToolTipDelay": 100], forName: UserDefaults.argumentDomain) }
         let app = NSApplication.shared
+        if CommandLine.arguments.contains("--new-tab-only") {
+            app.setActivationPolicy(.prohibited)
+            Task {
+                let failures = await checkLauncherGrid()
+                for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
+                if failures.isEmpty {
+                    print("PASS: installed apps grid, launching one or several apps, and registering automatic adds")
+                }
+                exit(failures.isEmpty ? 0 : 1)
+            }
+            app.run()
+            return
+        }
         app.setActivationPolicy(hoverOnly ? .prohibited : .accessory)
         if hoverOnly {
             app.finishLaunching()
@@ -569,7 +921,8 @@ enum TabLayoutSmoke {
         let chrome = WorkspaceChromeView(frame: .zero)
         host.contentView = chrome
         chrome.workspaceButton.title = "Workspace"
-        var failures = checkTabStripFeedback() + checkCloseSlotsAndWrapping()
+        var failures = checkTabStripFeedback() + checkCloseSlotsAndWrapping() + checkIconOnlyTabs()
+            + checkAutoHiddenTabAppearance()
 
         func settle() {
             for _ in 0 ..< 4 {
@@ -734,7 +1087,7 @@ enum TabLayoutSmoke {
         let regularStageTop = chrome.stage.frame.maxY
         chrome.setAutoHideTabBar(true)
         settle()
-        if !chrome.autoHideTabBar || chrome.stage.frame.maxY < regularStageTop + 30 {
+        if !chrome.autoHideTabBar || chrome.stage.frame.maxY < regularStageTop + 24 {
             failures.append("auto-hide mode did not expand the managed window area")
         }
         if chrome.autoHiddenToolbarPanel?.isVisible == true {
@@ -1349,9 +1702,9 @@ enum TabLayoutSmoke {
         if autoHideController.isAutoHiddenToolbarVisible {
             failures.append("auto-hidden toolbar appeared without the hover delay")
         }
-        autoHideController.updateAutoHiddenTabBar(at: revealPoint, now: hoverStart + 0.3)
+        autoHideController.updateAutoHiddenTabBar(at: revealPoint, now: hoverStart + 0.1)
         if !autoHideController.isAutoHiddenToolbarVisible {
-            failures.append("hovering at the top edge did not reveal the auto-hidden toolbar")
+            failures.append("hovering at the top edge did not reveal the auto-hidden toolbar within 0.1 s")
         }
         autoHideController.updateAutoHiddenTabBar(at: outsidePoint, now: hoverStart + 0.4)
         autoHideController.updateAutoHiddenTabBar(at: outsidePoint, now: hoverStart + 1.3)
@@ -1361,7 +1714,8 @@ enum TabLayoutSmoke {
         autoHideController.window.orderOut(nil)
         failures += positionChecks()
         if failures.isEmpty {
-            print("PASS: tab layout, cross-workspace drops, actual tab mouse release/Escape, and movement masks")
+            print(
+                "PASS: tab layout, icon-only tabs, cross-workspace drops, actual tab mouse release/Escape, and movement masks")
             exit(0)
         }
         failures.forEach { fputs("FAIL: \($0)\n", stderr) }
@@ -1497,8 +1851,16 @@ enum TabLayoutSmoke {
             chrome.setAutoHiddenToolbarVisible(true)
             settle()
             let expanded = chrome.stage.frame
-            if position.isVertical ? expanded.width < stage.width + 180 : expanded.height < stage.height + 30 {
+            if position.isVertical ? expanded.width < stage.width + 180 : expanded.height < stage.height + 24 {
                 failures.append("\(position): auto-hide did not reclaim the tab bar area")
+            }
+            let handle = chrome.toolbarHoverFrame
+            let stageOnScreen = host.convertToScreen(chrome.stage.convert(chrome.stage.bounds, to: nil))
+            if !chrome.isAutoHideHandleVisible || min(handle.width, handle.height) < 5
+                || stageOnScreen.intersects(handle)
+            {
+                failures
+                    .append("\(position): auto-hidden tab bar left no visible edge handle outside the panes: \(handle)")
             }
             if chrome.autoHiddenToolbarPanel?.isVisible != true
                 || !host.frame.contains(chrome.toolbarHoverFrame)
@@ -1515,6 +1877,9 @@ enum TabLayoutSmoke {
             }
             chrome.setAutoHideTabBar(false)
             settle()
+            if chrome.isAutoHideHandleVisible {
+                failures.append("\(position): the auto-hide edge handle stayed after showing the tab bar again")
+            }
         }
         do {
             let old = try JSONDecoder().decode(SavedWorkspace.self, from: Data(#"{"name":"old","windows":[]}"#.utf8))

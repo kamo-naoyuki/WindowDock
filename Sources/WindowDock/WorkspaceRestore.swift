@@ -24,6 +24,13 @@ enum WorkspaceRestore {
             }
             let controller = makeWorkspace(saved.name)
             if let hidden = saved.autoHideTabs { controller.setAutoHideTabs(hidden) }
+            // Restore the rules first so saving the workspace while later pages are open keeps them.
+            controller.autoGroupBundleIDs = saved.autoGroupBundleIDs ?? []
+            guard !saved.windows.isEmpty else {
+                // A workspace that only collects apps has no windows to ask about.
+                chosen.append((controller, saved, []))
+                return next(remaining.dropFirst())
+            }
             let reserved = chosen.filter { !$0.controller.quitting }.flatMap(\.windows)
             controller.collectRestoration(saved, excluding: reserved) { [weak controller] windows in
                 if let controller, !controller.quitting { chosen.append((controller, saved, windows)) }

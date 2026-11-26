@@ -808,6 +808,67 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    static func runWorkspaceMergeChecks() -> [String] {
+        var failures: [String] = []
+        let (source, model) = fixture()
+        let startPage = UUID()
+        source.newTab(id: startPage)
+        let (destination, _) = fixture(registering: [3], sharedModel: model)
+        let targets: [Int: CGRect] = [
+            0: CGRect(x: 1200, y: 120, width: 400, height: 600), 1: CGRect(x: 1600, y: 120, width: 400, height: 600),
+        ]
+        destination.setSplit(true)
+        destination.targetFrames = { targets }
+        let kept = destination.windows[0].id
+        let moved = source.windows
+        var observedDuplicate = false
+        for session in [source, destination] {
+            session.onChange = {
+                if moved.contains(where: { source.contains($0.candidate) && destination.contains($0.candidate) }) {
+                    observedDuplicate = true
+                }
+            }
+        }
+        if destination.absorbWindows(from: source) != 3 || observedDuplicate || !source.windows.isEmpty
+            || source.tabIDs != [startPage] || destination.tabIDs != [kept] + moved.map(\.id)
+        {
+            failures.append("merging workspaces lost windows, kept start pages, or briefly shared ownership")
+        }
+        if destination.cells != [kept, moved[0].id] || destination.selectedID != kept {
+            failures
+                .append("merging changed the shown window instead of only filling the empty pane: \(destination.cells)")
+        }
+        if model.windows[0].frame != targets[1] || model.windows[1].frame != targets[0]
+            || model.windows[2].frame != targets[0]
+        {
+            failures.append("merged windows were not aligned to the destination's panes")
+        }
+        if destination.windows.dropFirst().map(\.originalFrame) != moved.map(\.originalFrame)
+            || destination.absorbWindows(from: source) != 0
+            || !destination.remove(moved[2].id) || model.windows[2].frame != moved[2].originalFrame
+        {
+            failures.append("merged windows lost their original frames or a repeated merge moved windows again")
+        }
+
+        let first = WorkspaceController(name: "Merge 1")
+        let second = WorkspaceController(name: "Merge 2")
+        defer {
+            first.quitting = true
+            second.quitting = true
+            first.window.orderOut(nil)
+            second.window.orderOut(nil)
+        }
+        first.autoGroupBundleIDs = ["com.example.a", "com.example.b"]
+        second.autoGroupBundleIDs = ["com.example.b", "com.example.c"]
+        first.absorbWorkspaces([first, second])
+        if first.autoGroupBundleIDs != ["com.example.a", "com.example.b", "com.example.c"] {
+            failures
+                .append(
+                    "merging workspaces did not combine their automatically added apps: \(first.autoGroupBundleIDs)")
+        }
+        return failures
+    }
+
     static func runRegisteredWindowDragChecks() -> [String] {
         var failures: [String] = []
         let (source, model) = fixture(registering: [0])
@@ -2414,6 +2475,354 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    /// A registered app's new windows join their workspace in the background; windows that already existed,
+    /// were released, belong elsewhere, are awaited by a launcher, or appeared while the workspace was paused don't.
+    static func runAutoGroupChecks() -> [String] {
+        var failures: [String] = []
+        let bundleID = "test.autogroup"
+        let model = Model(windowCount: 14)
+        var client = access(for: model)
+        client.isTrusted = { true }
+        client.allWindowIDs = { _ in [] }
+        var creationHandlers: [(AXUIElement) -> Void] = []
+        client.observeWindowCreation = { _, handler in
+            creationHandlers.append(handler)
+            return NSObject()
+        }
+        var controllers: [WorkspaceController] = []
+        let coordinator = AutoGroupCoordinator(access: client, controllers: { controllers })
+        coordinator.runningApplications = { [.current] }
+        coordinator.bundleIdentifier = { _ in bundleID }
+        coordinator.readsWindowsInBackground = false
+        var closed: [SavedWorkspace] = []
+        var closedUpdates: [(name: String, ids: [String])] = []
+        coordinator.closedWorkspaces = { closed }
+        coordinator.updateClosedWorkspace = { closedUpdates.append(($0, $1)) }
+        var saves = 0
+        coordinator.save = { _ in saves += 1 }
+        var confirmations: [AutoGroupConfirmation] = []
+        var answer: Bool? = false
+        coordinator.confirm = {
+            confirmations.append($0)
+            return answer
+        }
+        defer {
+            coordinator.stop()
+            for controller in controllers {
+                controller.quitting = true
+                controller.window.orderOut(nil)
+            }
+        }
+        func makeController(_ name: String) -> WorkspaceController {
+            let controller = WorkspaceController(name: "\(name) \(UUID())", access: client)
+            controller.returnsDisplacedWindows = false
+            controller.autoGrouping = coordinator
+            controller.window.setFrame(NSRect(x: 160, y: 160, width: 900, height: 600), display: false)
+            controllers.append(controller)
+            return controller
+        }
+        func candidate(_ index: Int) -> WindowCandidate {
+            WindowCandidate(element: model.windows[index].element, application: .current, title: "Auto \(index)")
+        }
+        func pump(_ seconds: TimeInterval = 1.2, until condition: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+        }
+        func reportCreation(_ index: Int) {
+            for handler in creationHandlers { handler(model.windows[index].element) }
+        }
+        func open(_ index: Int) {
+            model.listedWindows.append(index)
+            reportCreation(index)
+        }
+        func id(of index: Int, in controller: WorkspaceController) -> UUID? {
+            controller.session.windows.first { CFEqual($0.candidate.element, model.windows[index].element) }?.id
+        }
+        func event(in window: NSWindow) -> NSEvent {
+            NSEvent.mouseEvent(
+                with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        func tabMenu(_ controller: WorkspaceController, _ tab: Int) -> NSMenu? {
+            guard let chrome = controller.window.contentView as? WorkspaceChromeView else { return nil }
+            chrome.layoutSubtreeIfNeeded()
+            let menu = chrome.tabs.arrangedSubviews.compactMap {
+                ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? NSButton
+            }.first { $0.tag == tab }?.menu(for: event(in: controller.window))
+            menu?.update()
+            return menu
+        }
+        let toggleTitle = L("「%@」の新しいウィンドウを自動でこのワークスペースに追加", NSRunningApplication.current.localizedName ?? L("対象アプリ"))
+        func shows(_ text: String, in controller: WorkspaceController) -> Bool {
+            func search(_ view: NSView) -> Bool {
+                (view as? NSTextField)?.stringValue == text || view.subviews.contains(where: search)
+            }
+            return controller.window.contentView.map(search) ?? false
+        }
+
+        let first = makeController("Auto group")
+        first.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        first.session.add(candidate(1))
+        model.listedWindows = [0, 1]
+        coordinator.register([bundleID], in: first)
+        if confirmations.count != 1 || confirmations.first?.existingWindowCount != 1
+            || confirmations.first?.moves.isEmpty != true
+        {
+            failures.append("registering did not offer the app's one unmanaged open window: \(confirmations)")
+        }
+        if first.autoGroupBundleIDs != [bundleID] || saves == 0 || creationHandlers.isEmpty {
+            failures.append("registering did not save the rule and watch the app's new windows")
+        }
+        if first.session.windows.count != 1 {
+            failures.append("declining to add open windows still added them")
+        }
+
+        reportCreation(0)
+        pump()
+        if first.session.windows.count != 1 { failures.append("a window open before registration was collected") }
+
+        let selected = first.session.selectedID
+        model.operations.removeAll()
+        model.focusedWindows.removeAll()
+        open(3)
+        pump(2) { id(of: 3, in: first) != nil }
+        if let added = id(of: 3, in: first) {
+            if first.session.cells != [selected, added] {
+                failures.append("a collected window did not fill the empty pane: \(first.session.cells)")
+            }
+            if first.session.selectedID != selected || model.operations.contains(.raise(3))
+                || !model.focusedWindows.isEmpty
+            {
+                failures.append("a collected window was selected, raised or focused")
+            }
+            first.session.remove(added, closeWindow: false)
+            pump(0.1)
+            reportCreation(3)
+            pump()
+            if id(of: 3, in: first) != nil { failures.append("a released window was collected again") }
+        } else {
+            failures.append("a registered app's new window was not collected")
+        }
+
+        let other = makeController("Auto group other")
+        other.session.add(candidate(4))
+        open(4)
+        pump()
+        if id(of: 4, in: first) != nil || id(of: 4, in: other) == nil {
+            failures.append("a window managed by another workspace was collected")
+        }
+
+        let reservation = first.session.reserveLaunch(of: bundleID)
+        open(5)
+        pump()
+        if id(of: 5, in: first) != nil { failures.append("a window awaited by a new-tab launcher was collected") }
+        first.session.releaseLaunch(reservation)
+
+        model.windows[6].fullScreen = true
+        open(2)
+        open(6)
+        pump()
+        if id(of: 2, in: first) != nil || id(of: 6, in: first) != nil {
+            failures.append("a new minimized or full-screen window was collected")
+        }
+
+        first.collectRestoration(SavedWorkspace(name: first.name, windows: []), excluding: []) { _ in }
+        if !first.isRestoring || first.acceptsAutomaticWindows {
+            failures.append("a restore prompt did not pause automatic grouping")
+        }
+        if let menu = tabMenu(first, 0) {
+            if menu.item(withTitle: toggleTitle)?.isEnabled != false
+                || menu.item(withTitle: L("別のアプリを選ぶ…"))?.isEnabled != false
+            {
+                failures.append("automatic grouping could be changed during a restore prompt")
+            }
+        } else {
+            failures.append("auto-group fixture could not open a tab menu")
+        }
+        open(7)
+        pump()
+        if id(of: 7, in: first) != nil { failures.append("a window opened during a restore prompt was collected") }
+        if let prompt = first.session.tabIDs.first(where: first.session.isStartPage) {
+            first.session.remove(prompt, closeWindow: false)
+        }
+        pump(0.1)
+        reportCreation(7)
+        pump()
+        if first.isRestoring || id(of: 7, in: first) != nil {
+            failures.append("a window opened while paused was collected after resuming")
+        }
+        open(8)
+        pump(2) { id(of: 8, in: first) != nil }
+        if id(of: 8, in: first) == nil { failures.append("automatic grouping did not resume after a restore prompt") }
+
+        let tabCount = first.session.windows.count
+        let toggle = tabMenu(first, 0)?.item(withTitle: toggleTitle)
+        if toggle?.state != .on || toggle?.isEnabled != true {
+            failures.append("the tab menu did not show its app as collected")
+        }
+        if let toggle, let action = toggle.action { NSApp.sendAction(action, to: toggle.target, from: toggle) }
+        if !first.autoGroupBundleIDs.isEmpty || first.session.windows.count != tabCount {
+            failures.append("turning off collection from the tab menu did not keep the tabs and remove only the rule")
+        }
+        let off = tabMenu(first, 0)?.item(withTitle: toggleTitle)
+        if off?.state != .off { failures.append("the tab menu still showed an unregistered app as collected") }
+        confirmations.removeAll()
+        answer = false
+        if let off, let action = off.action { NSApp.sendAction(action, to: off.target, from: off) }
+        if first.autoGroupBundleIDs != [bundleID] || confirmations.count != 1 {
+            failures.append("turning on collection from the tab menu did not register the app")
+        }
+        first.session.newTab()
+        if let blank = first.session.tabIDs.lastIndex(where: first.session.isStartPage) {
+            let menu = tabMenu(first, blank)
+            if menu?.item(withTitle: L("新しいウィンドウを自動で追加するアプリを選ぶ…"))?.isEnabled != true
+                || menu?.items.contains(where: { $0.title.hasPrefix("「") }) == true
+            {
+                failures.append("a blank tab's menu did not offer only choosing apps to collect")
+            }
+            first.session.remove(first.session.tabIDs[blank], closeWindow: false)
+        }
+
+        model.listedWindows = [0, 1, 3, 8]
+        let second = makeController("Auto group second")
+        confirmations.removeAll()
+        answer = true
+        coordinator.register([bundleID], in: second)
+        if confirmations.count != 1 || confirmations.first?.moves.map { $0.from } != [first.name]
+            || confirmations.first?.existingWindowCount != 2
+        {
+            failures.append("moving an app to another workspace was not confirmed with its source and windows")
+        }
+        if !first.autoGroupBundleIDs.isEmpty || second.autoGroupBundleIDs != [bundleID]
+            || id(of: 0, in: second) == nil || id(of: 3, in: second) == nil
+        {
+            failures.append("moving an app did not move its rule or add its open windows")
+        }
+
+        model.listedWindows.append(10)
+        coordinator.applicationLaunched(.current)
+        pump(2) { id(of: 10, in: second) != nil }
+        if id(of: 10, in: second) == nil || id(of: 10, in: first) != nil {
+            failures.append("a window that appeared while its app launched was not collected by the new owner")
+        }
+
+        let closedName = "Auto group closed \(UUID())"
+        closed = [SavedWorkspace(name: closedName, windows: [], autoGroupBundleIDs: ["test.closed"])]
+        confirmations.removeAll()
+        coordinator.register(["test.closed"], in: second)
+        if confirmations.first?.moves.map { $0.from } != [closedName] || closedUpdates.last?.name != closedName
+            || closedUpdates.last?.ids != [] || !second.autoGroupBundleIDs.contains("test.closed")
+            {
+                failures.append("moving an app from a closed workspace did not update the saved workspace")
+            }
+        closed = [SavedWorkspace(name: closedName, windows: [], autoGroupBundleIDs: ["test.cancel"])]
+        let updates = closedUpdates.count
+        answer = nil
+        coordinator.register(["test.cancel"], in: second)
+        if second.autoGroupBundleIDs.contains("test.cancel") || closedUpdates.count != updates {
+            failures.append("cancelling a move still changed the rules")
+        }
+        closed = []
+
+        let failure = InjectedFailure().localizedDescription
+        model.failedRegistrations = [11, 12]
+        open(11)
+        pump()
+        if !shows(failure, in: second) { failures.append("a window that could not be collected was not reported") }
+        second.showNotice(.information("Auto group probe"))
+        open(12)
+        pump()
+        if shows(failure, in: second) { failures.append("a repeated collection failure was reported again") }
+
+        coordinator.unregister(bundleID, from: second)
+        let secondTabs = second.session.windows.count
+        open(13)
+        pump()
+        if second.autoGroupBundleIDs != ["test.closed"] || second.session.windows.count != secondTabs
+            || id(of: 13, in: first) != nil
+        {
+            failures.append("unregistering did not stop collection while keeping the tabs")
+        }
+
+        // The editor lists this workspace's apps checked, and saving changes several apps at once.
+        let edited = makeController("Auto group edit")
+        edited.autoGroupBundleIDs = ["test.edit.keep", "test.edit.drop"]
+        let textEdit = "com.apple.TextEdit"
+        second.autoGroupBundleIDs.append(textEdit)
+        coordinator.recentApplications = { [textEdit: Date()] }
+        let choices = coordinator.applicationChoices(for: edited)
+        if choices.map(\.bundleID) != ["test.edit.keep", "test.edit.drop", textEdit]
+            || choices.map(\.selected) != [true, true, false] || choices.last?.registeredIn != second.name
+        {
+            failures.append("the app editor did not list registered apps checked before other apps: \(choices)")
+        }
+        let list = AutoGroupApplicationList(choices: choices)
+        list.checkbox(for: "test.edit.drop")?.state = .off
+        list.checkbox(for: textEdit)?.state = .on
+        list.add(["test.edit.new", "test.edit.keep"])
+        if list.selectedBundleIDs != ["test.edit.keep", textEdit, "test.edit.new"] || list.frame.width < 300
+            || list.frame.height > 340
+        {
+            failures.append("the app editor did not track checked and added apps: \(list.selectedBundleIDs)")
+        }
+        confirmations.removeAll()
+        answer = nil
+        if coordinator.setApplications(list.selectedBundleIDs, for: edited)
+            || edited.autoGroupBundleIDs != ["test.edit.keep", "test.edit.drop"]
+            || !second.autoGroupBundleIDs.contains(textEdit)
+        {
+            failures.append("cancelling the app editor's move still changed the rules")
+        }
+        answer = false
+        if !coordinator.setApplications(list.selectedBundleIDs, for: edited)
+            || Set(edited.autoGroupBundleIDs) != ["test.edit.keep", textEdit, "test.edit.new"]
+            || second.autoGroupBundleIDs.contains(textEdit) || confirmations.count != 2
+        {
+            failures
+                .append(
+                    "saving the app editor did not add, move and remove apps together: \(edited.autoGroupBundleIDs)")
+        }
+        let dropped = edited.autoGroupBundleIDs.filter { $0 != "test.edit.keep" }
+        if !coordinator.setApplications(["test.edit.keep"], for: edited) || edited
+            .autoGroupBundleIDs != ["test.edit.keep"]
+            || !shows(L("%@の自動追加を止めました。追加済みのタブは残ります。", AutoGroupApplication.names(dropped)), in: edited)
+            || coordinator.setApplications(["test.edit.keep"], for: edited)
+        {
+            failures.append("unchecking several apps did not stop them together or reported an unchanged list")
+        }
+        let workspaceMenu = (edited.window.contentView as? WorkspaceChromeView)?.workspaceMenu?()
+        workspaceMenu?.update()
+        if workspaceMenu?.items.first(where: { $0.title == L("新しいウィンドウを自動で追加するアプリ…") })?.isEnabled != true {
+            failures.append("the workspace menu did not offer editing the apps whose new windows are added")
+        }
+
+        let empty = makeController("Auto group empty")
+        var autoDeleted = false
+        empty.onAutoDelete = { _ in autoDeleted = true }
+        empty.deletesWhenEmpty = true
+        empty.autoGroupBundleIDs = ["test.keep"]
+        empty.session.add(candidate(9))
+        if let added = id(of: 9, in: empty) { empty.session.remove(added, closeWindow: false) }
+        pump(0.2)
+        if autoDeleted { failures.append("an empty workspace that collects apps was deleted") }
+        empty.autoGroupBundleIDs = []
+        pump(0.2)
+        if !autoDeleted { failures.append("an empty workspace was not deleted after its last rule was removed") }
+
+        let legacy = Data(#"[{"name":"Legacy","windows":[]}]"#.utf8)
+        let saved = SavedWorkspace(name: "Rules", windows: [], autoGroupBundleIDs: ["a", "b"])
+        if (try? JSONDecoder().decode([SavedWorkspace].self, from: legacy))?.first.map({ $0.autoGroupBundleIDs == nil })
+            != true
+            || (try? JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(saved)))?
+            .autoGroupBundleIDs != ["a", "b"]
+        {
+            failures.append("saved workspaces did not keep or tolerate missing automatic-grouping rules")
+        }
+        return failures
+    }
+
     static func runDisplacedWindowChecks() -> [String] {
         let (session, model) = fixture(registering: [0, 1, 3])
         session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
@@ -2491,6 +2900,632 @@ enum WindowSessionSmoke {
         constrained.refitDisplacedWindows()
         if !constrainedModel.operations.isEmpty {
             failures.append("refitting retried a known size constraint even though the window had not moved")
+        }
+        return failures
+    }
+
+    static func runManagedWindowFollowChecks() -> [String] {
+        let model = Model(windowCount: 2)
+        let controller = WorkspaceController(name: "Window follow \(UUID())", access: access(for: model))
+        controller.managedWindowMoveAction = .follow
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        let candidates = model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Follow")
+        }
+        controller.session.add(candidates)
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.window.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        model.operations.removeAll()
+        // Resizes and zooms are applied once the frames settle after the release.
+        func settleAfterRelease(until condition: () -> Bool) {
+            let deadline = Date().addingTimeInterval(1.5)
+            while !condition(), Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+        }
+
+        let processID = ProcessInfo.processInfo.processIdentifier
+        let initialWindow = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        guard model.windows.count == 2, controller.session.windows.count == 2,
+              controller.beginManagedWindowDrag(windowServerWindow: initialWindow)
+        else { return ["managed-window follow fixture could not capture its leader"] }
+        let leaderStart = model.windows[0].frame
+        let peerStart = model.windows[1].frame
+        let workspaceStart = controller.window.frame
+        let selected = controller.session.selectedID
+        let cells = controller.session.cells
+        var failures: [String] = []
+        model.windows[0].frame.origin.x += 60
+        model.windows[0].frame.origin.y += 30
+        let firstSample = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        controller.updateManagedWindowDrag(using: [firstSample], mouseButtonDown: true)
+        let firstWorkspaceDelta = CGPoint(
+            x: controller.window.frame.minX - workspaceStart.minX,
+            y: controller.window.frame.minY - workspaceStart.minY)
+        let firstPeerDelta = CGPoint(
+            x: model.windows[1].frame.minX - peerStart.minX,
+            y: model.windows[1].frame.minY - peerStart.minY)
+        if abs(firstWorkspaceDelta.x - 60) > 1 || abs(firstWorkspaceDelta.y + 30) > 1 {
+            failures.append("the workspace did not follow while the leader was still moving: \(firstWorkspaceDelta)")
+        }
+        if abs(firstPeerDelta.x - 60) > 1 || abs(firstPeerDelta.y - 30) > 1 {
+            failures.append("the other pane did not follow during the drag: \(firstPeerDelta)")
+        }
+
+        model.windows[0].frame.origin.x += 30
+        model.windows[0].frame.origin.y += 15
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        let lastSample = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        controller.updateManagedWindowDrag(using: [lastSample], mouseButtonDown: true)
+        let lastWorkspaceDelta = CGPoint(
+            x: controller.window.frame.minX - workspaceStart.minX,
+            y: controller.window.frame.minY - workspaceStart.minY)
+        if abs(lastWorkspaceDelta.x - 90) > 1 || abs(lastWorkspaceDelta.y + 45) > 1 {
+            failures.append("a later drag sample did not update the live workspace offset: \(lastWorkspaceDelta)")
+        }
+        controller.finishManagedWindowDrag()
+
+        let leaderDelta = CGPoint(
+            x: model.windows[0].frame.minX - leaderStart.minX,
+            y: model.windows[0].frame.minY - leaderStart.minY)
+        let peerDelta = CGPoint(
+            x: model.windows[1].frame.minX - peerStart.minX,
+            y: model.windows[1].frame.minY - peerStart.minY)
+        let workspaceDelta = CGPoint(
+            x: controller.window.frame.minX - workspaceStart.minX,
+            y: controller.window.frame.minY - workspaceStart.minY)
+        if abs(leaderDelta.x - 90) > 1 || abs(leaderDelta.y - 45) > 1 {
+            failures.append("following changed the leader window's drag: \(leaderDelta)")
+        }
+        if abs(peerDelta.x - 90) > 1 || abs(peerDelta.y - 45) > 1 {
+            failures.append("the other pane did not follow the leader: \(peerDelta)")
+        }
+        if abs(workspaceDelta.x - 90) > 1 || abs(workspaceDelta.y + 45) > 1 {
+            failures.append("the workspace did not follow the leader in screen coordinates: \(workspaceDelta)")
+        }
+        if controller.session.selectedID != selected || controller.session.cells != cells {
+            failures.append("following changed the selected tab or pane assignments")
+        }
+        if model.operations.contains(where: {
+            if case .raise = $0 { return true }
+            return false
+        }) {
+            failures.append("following raised managed windows over the foreground app")
+        }
+
+        let stableWorkspace = controller.window.frame
+        let fittedLeaderSize = model.windows[0].frame.size
+        let resizeStart = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        guard controller.beginManagedWindowDrag(windowServerWindow: resizeStart) else {
+            return failures + ["managed-window resize fixture could not capture its leader"]
+        }
+        model.windows[0].frame.origin.x -= 25
+        model.windows[0].frame.size.width += 50
+        let resizeSample = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        controller.updateManagedWindowDrag(using: [resizeSample], mouseButtonDown: true)
+        if controller.window.frame != stableWorkspace {
+            failures.append("resizing a managed window moved its workspace")
+        }
+        controller.finishManagedWindowDrag()
+        settleAfterRelease { model.windows[0].frame.size == fittedLeaderSize }
+        if model.windows[0].frame.size != fittedLeaderSize {
+            failures.append("a resized managed window was not returned to its pane")
+        }
+
+        let leaderID = controller.session.windows[0].id
+        let originalPaneWidth = controller.session.alignedFrame(for: leaderID)?.width ?? 0
+        let dividerStart = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        guard controller.beginManagedWindowDrag(windowServerWindow: dividerStart) else {
+            return failures + ["managed-window divider fixture could not capture its leader"]
+        }
+        model.windows[0].frame.size.width += 80
+        controller.finishManagedWindowDrag()
+        settleAfterRelease { (controller.session.alignedFrame(for: leaderID)?.width ?? 0) > originalPaneWidth + 20 }
+        let resizedPaneWidth = controller.session.alignedFrame(for: leaderID)?.width ?? 0
+        if resizedPaneWidth <= originalPaneWidth + 20 || controller.session.customLayout != nil {
+            failures.append(
+                "resizing an inner grid edge did not update its regular-grid track: "
+                    + "\(originalPaneWidth) -> \(resizedPaneWidth), custom \(controller.session.customLayout != nil)")
+        }
+
+        controller.session.setGrid(WorkspaceGridSize(columns: 1, rows: 2))
+        controller.session.realign(raiseWindows: false)
+        let verticalPaneHeight = controller.session.alignedFrame(for: leaderID)?.height ?? 0
+        guard let verticalPaneIndex = controller.session.cells.firstIndex(of: leaderID) else {
+            return failures + ["managed-window vertical-divider fixture could not find its pane"]
+        }
+        let verticalEdge: WorkspaceResizeEdges = verticalPaneIndex == 0 ? .bottom : .top
+        let verticalDividerStart = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        guard controller.beginManagedWindowDrag(windowServerWindow: verticalDividerStart) else {
+            return failures + ["managed-window vertical-divider fixture could not capture its leader"]
+        }
+        if verticalEdge == .bottom {
+            model.windows[0].frame.size.height += 60
+        } else {
+            model.windows[0].frame.origin.y -= 60
+            model.windows[0].frame.size.height += 60
+        }
+        controller.finishManagedWindowDrag()
+        settleAfterRelease {
+            (controller.session.alignedFrame(for: leaderID)?.height ?? 0) > verticalPaneHeight + 20
+        }
+        let resizedVerticalPaneHeight = controller.session.alignedFrame(for: leaderID)?.height ?? 0
+        if resizedVerticalPaneHeight <= verticalPaneHeight + 20 {
+            failures.append("resizing an inner vertical edge did not update its regular-grid track")
+        }
+
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.session.realign(raiseWindows: false)
+        controller.session.setCustomLayout(PaneLayout.grid(columnWeights: [1, 1], rowWeights: [1]))
+        controller.session.realign(raiseWindows: false)
+        let customPaneWidth = controller.session.alignedFrame(for: leaderID)?.width ?? 0
+        guard let customPaneIndex = controller.session.cells.firstIndex(of: leaderID) else {
+            return failures + ["managed-window custom-divider fixture could not find its pane"]
+        }
+        let customDividerStart = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        guard controller.beginManagedWindowDrag(windowServerWindow: customDividerStart) else {
+            return failures + ["managed-window custom-divider fixture could not capture its leader"]
+        }
+        if customPaneIndex == 0 {
+            model.windows[0].frame.size.width += 60
+        } else {
+            model.windows[0].frame.origin.x += 60
+            model.windows[0].frame.size.width -= 60
+        }
+        controller.finishManagedWindowDrag()
+        settleAfterRelease {
+            abs((controller.session.alignedFrame(for: leaderID)?.width ?? 0) - customPaneWidth) > 20
+        }
+        let resizedCustomPaneWidth = controller.session.alignedFrame(for: leaderID)?.width ?? 0
+        if controller.session.customLayout == nil
+            || (customPaneIndex == 0 && resizedCustomPaneWidth <= customPaneWidth + 20)
+            || (customPaneIndex != 0 && resizedCustomPaneWidth >= customPaneWidth - 20)
+        {
+            failures.append("resizing an inner custom-layout edge did not update its adjacent divider")
+        }
+
+        let alignedFrames = controller.session.cells.compactMap { id in
+            id.flatMap { controller.session.alignedFrame(for: $0) }
+        }
+        guard let leaderPane = controller.session.alignedFrame(for: leaderID),
+              let contentMinX = alignedFrames.map(\.minX).min(),
+              let contentMaxX = alignedFrames.map(\.maxX).max()
+        else { return failures + ["managed-window workspace-edge fixture could not read pane frames"] }
+        let outerEdge: WorkspaceResizeEdges
+        if abs(leaderPane.minX - contentMinX) <= 1 {
+            outerEdge = .left
+        } else if abs(leaderPane.maxX - contentMaxX) <= 1 {
+            outerEdge = .right
+        } else {
+            return failures + ["managed-window workspace-edge fixture did not find an outer pane edge"]
+        }
+        let workspaceBeforeOuterResize = controller.window.frame
+        let outerResizeStart = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        guard controller.beginManagedWindowDrag(windowServerWindow: outerResizeStart) else {
+            return failures + ["managed-window workspace-edge fixture could not capture its leader"]
+        }
+        if outerEdge == .left {
+            model.windows[0].frame.origin.x -= 50
+        }
+        model.windows[0].frame.size.width += 50
+        controller.finishManagedWindowDrag()
+        settleAfterRelease { controller.window.frame.width > workspaceBeforeOuterResize.width + 40 }
+        let expectedWorkspaceFrame = outerEdge == .left
+            ? CGRect(
+                x: workspaceBeforeOuterResize.minX - 50,
+                y: workspaceBeforeOuterResize.minY,
+                width: workspaceBeforeOuterResize.width + 50,
+                height: workspaceBeforeOuterResize.height)
+            : CGRect(
+                x: workspaceBeforeOuterResize.minX,
+                y: workspaceBeforeOuterResize.minY,
+                width: workspaceBeforeOuterResize.width + 50,
+                height: workspaceBeforeOuterResize.height)
+        if !WindowGeometry.fits(controller.window.frame, requested: expectedWorkspaceFrame, tolerance: 1)
+        {
+            failures.append(
+                "resizing an outer managed-window edge did not resize the workspace: "
+                    + "\(workspaceBeforeOuterResize) -> \(controller.window.frame)")
+        }
+
+        guard let screen = controller.window.screen, let primaryScreen = NSScreen.screens.first else {
+            return failures + ["managed-window maximize fixture could not find its screen"]
+        }
+        let maximizeStart = WindowServerWindow(id: 1, processID: processID, frame: model.windows[0].frame)
+        guard controller.beginManagedWindowDrag(windowServerWindow: maximizeStart) else {
+            return failures + ["managed-window maximize fixture could not capture its leader"]
+        }
+        model.windows[0].frame = WindowGeometry.accessibilityRect(
+            from: screen.visibleFrame, primaryScreenTop: primaryScreen.frame.maxY)
+        controller.finishManagedWindowDrag()
+        settleAfterRelease { WindowGeometry.fits(controller.window.frame, requested: screen.visibleFrame, tolerance: 1)
+        }
+        if !WindowGeometry.fits(controller.window.frame, requested: screen.visibleFrame, tolerance: 1) {
+            failures.append("maximizing an aligned managed window did not maximize its workspace")
+        }
+        return failures
+    }
+
+    /// Resizing and maximizing can finish after the release, and the press can reach a window other than the one
+    /// being resized, e.g. a background tab behind the pane when the resize area lies outside the window.
+    static func runManagedWindowSettledFollowChecks() -> [String] {
+        let model = Model(windowCount: 3)
+        let controller = WorkspaceController(name: "Settled follow \(UUID())", access: access(for: model))
+        controller.managedWindowMoveAction = .follow
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Settled follow")
+        })
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.window.setFrame(NSRect(x: 160, y: 160, width: 900, height: 600), display: true)
+        controller.window.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        func settle(until condition: () -> Bool) {
+            let deadline = Date().addingTimeInterval(1.5)
+            while !condition(), Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+        }
+        func modelIndex(_ id: UUID) -> Int? {
+            controller.session.managedByID[id].flatMap { try? model.index(of: $0.candidate.element) }
+        }
+        let visible = controller.session.cells.compactMap { $0 }
+        guard visible.count == 2, let resizedID = visible.first, let resized = modelIndex(resizedID),
+              let hiddenID = controller.session.windows.map(\.id).first(where: { !visible.contains($0) }),
+              let hidden = modelIndex(hiddenID),
+              let pane = controller.session.alignedFrame(for: resizedID),
+              let other = controller.session.alignedFrame(for: visible[1])
+        else { return ["settled-follow fixture did not show two panes and a background tab"] }
+        let processID = ProcessInfo.processInfo.processIdentifier
+        var failures: [String] = []
+
+        let workspaceBeforeResize = controller.window.frame
+        let pressedBackgroundTab = WindowServerWindow(
+            id: CGWindowID(hidden + 1), processID: processID, frame: model.windows[hidden].frame)
+        _ = controller.beginManagedWindowDrag(windowServerWindow: pressedBackgroundTab)
+        let resizesLeft = pane.minX < other.minX
+        if resizesLeft { model.windows[resized].frame.origin.x -= 50 }
+        model.windows[resized].frame.size.width += 50
+        controller.windowsChangedOutsideWorkspace(model.windows[resized].element)
+        controller.finishManagedWindowDrag()
+        settle { controller.window.frame.width > workspaceBeforeResize.width + 40 }
+        let expectedResize = NSRect(
+            x: workspaceBeforeResize.minX - (resizesLeft ? 50 : 0), y: workspaceBeforeResize.minY,
+            width: workspaceBeforeResize.width + 50, height: workspaceBeforeResize.height)
+        if !WindowGeometry.fits(controller.window.frame, requested: expectedResize, tolerance: 1) {
+            failures.append(
+                "resizing an outer edge while the press reached a background tab did not resize the workspace: "
+                    + "\(workspaceBeforeResize) -> \(controller.window.frame)")
+        }
+
+        guard let screen = controller.window.screen, let primaryScreen = NSScreen.screens.first else {
+            return failures + ["settled-follow fixture could not find its screen"]
+        }
+        let maximized = WindowGeometry.accessibilityRect(
+            from: screen.visibleFrame, primaryScreenTop: primaryScreen.frame.maxY)
+        settle { false }
+        let zoomStart = WindowServerWindow(
+            id: CGWindowID(resized + 1), processID: processID, frame: model.windows[resized].frame)
+        guard controller.beginManagedWindowDrag(windowServerWindow: zoomStart) else {
+            return failures + ["settled-follow fixture could not capture the window to maximize"]
+        }
+        controller.finishManagedWindowDrag()
+        model.windows[resized].frame = maximized
+        controller.windowsChangedOutsideWorkspace(model.windows[resized].element)
+        settle { WindowGeometry.fits(controller.window.frame, requested: screen.visibleFrame, tolerance: 1) }
+        if !WindowGeometry.fits(controller.window.frame, requested: screen.visibleFrame, tolerance: 1) {
+            failures.append("a maximize that finished after the release did not maximize the workspace")
+        }
+
+        settle { false }
+        model.windows[resized].frame = maximized
+        controller.windowsChangedOutsideWorkspace(model.windows[resized].element)
+        settle { model.windows[resized].frame != maximized }
+        if let fitted = controller.session.alignedFrame(for: resizedID),
+           model.windows[resized].frame == maximized || model.windows[resized].frame != fitted
+        {
+            failures.append(
+                "maximizing a window in a maximized workspace left it out of its pane: \(model.windows[resized].frame)")
+        }
+        return failures
+    }
+
+    /// Resizing a window's edge changes the workspace or its divider while the mouse is still down.
+    static func runManagedWindowLiveResizeChecks() -> [String] {
+        let model = Model(windowCount: 2)
+        let controller = WorkspaceController(name: "Live resize \(UUID())", access: access(for: model))
+        controller.managedWindowMoveAction = .follow
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Live resize")
+        })
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.window.setFrame(NSRect(x: 160, y: 160, width: 900, height: 600), display: true)
+        controller.window.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        func pump(_ seconds: TimeInterval = 0.05, until condition: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+        }
+        func modelIndex(_ id: UUID) -> Int? {
+            controller.session.managedByID[id].flatMap { try? model.index(of: $0.candidate.element) }
+        }
+        let visible = controller.session.cells.compactMap { $0 }.sorted {
+            (controller.session.alignedFrame(for: $0)?.minX ?? 0) <
+                (controller.session.alignedFrame(for: $1)?.minX ?? 0)
+        }
+        guard visible.count == 2, let leader = modelIndex(visible[0]), let peer = modelIndex(visible[1]) else {
+            return ["live-resize fixture did not show two panes"]
+        }
+        let leaderID = visible[0]
+        let processID = ProcessInfo.processInfo.processIdentifier
+        func sample() -> WindowServerWindow {
+            WindowServerWindow(id: CGWindowID(leader + 1), processID: processID, frame: model.windows[leader].frame)
+        }
+        func fits(_ index: Int, _ expected: CGRect) -> Bool {
+            WindowGeometry.fits(model.windows[index].frame, requested: expected, tolerance: 1)
+        }
+        func leaderFitsPane(_ expected: CGRect) -> Bool {
+            fits(leader, expected) && controller.session.alignedFrame(for: leaderID).map {
+                WindowGeometry.fits($0, requested: expected, tolerance: 1)
+            } == true
+        }
+        var failures: [String] = []
+
+        let workspaceStart = controller.window.frame
+        let leaderStart = model.windows[leader].frame
+        let peerStart = model.windows[peer].frame
+        guard controller.beginManagedWindowDrag(windowServerWindow: sample()) else {
+            return ["live-resize fixture could not capture its leader"]
+        }
+        model.windows[leader].frame.origin.x -= 50
+        model.windows[leader].frame.size.width += 50
+        let firstOuterFrame = model.windows[leader].frame
+        controller.updateManagedWindowDrag(using: [sample()], mouseButtonDown: true)
+        let firstOuterWorkspace = NSRect(
+            x: workspaceStart.minX - 50, y: workspaceStart.minY,
+            width: workspaceStart.width + 50, height: workspaceStart.height)
+        if !WindowGeometry.fits(controller.window.frame, requested: firstOuterWorkspace, tolerance: 1) {
+            failures.append(
+                "the workspace did not follow an outer-edge resize while the mouse was down: "
+                    + "\(workspaceStart) -> \(controller.window.frame)")
+        }
+        if model.windows[leader].frame != firstOuterFrame {
+            failures.append("following a live resize moved the window being resized: \(model.windows[leader].frame)")
+        }
+        if !fits(peer, peerStart) {
+            failures.append(
+                "an outer-edge resize changed the other pane instead of only the resized one: "
+                    + "\(peerStart) -> \(model.windows[peer].frame)")
+        }
+        pump()
+        model.windows[leader].frame.origin.x -= 30
+        model.windows[leader].frame.size.width += 30
+        controller.updateManagedWindowDrag(using: [sample()], mouseButtonDown: true)
+        let lastOuterWorkspace = NSRect(
+            x: workspaceStart.minX - 80, y: workspaceStart.minY,
+            width: workspaceStart.width + 80, height: workspaceStart.height)
+        if !WindowGeometry.fits(controller.window.frame, requested: lastOuterWorkspace, tolerance: 1) {
+            failures.append(
+                "a later resize sample did not set the workspace from the drag's start: \(controller.window.frame)")
+        }
+        controller.finishManagedWindowDrag()
+        let outerLeader = CGRect(
+            x: leaderStart.minX - 80, y: leaderStart.minY, width: leaderStart.width + 80, height: leaderStart.height)
+        pump(0.6)
+        if !WindowGeometry.fits(controller.window.frame, requested: lastOuterWorkspace, tolerance: 1)
+            || !leaderFitsPane(outerLeader) || !fits(peer, peerStart)
+        {
+            failures.append(
+                "a live outer-edge resize did not end with each window in its pane: "
+                    + "\(controller.window.frame), \(model.windows[leader].frame), \(model.windows[peer].frame)")
+        }
+
+        guard controller.beginManagedWindowDrag(windowServerWindow: sample()) else {
+            return failures + ["live-resize fixture could not capture its leader for the divider"]
+        }
+        model.windows[leader].frame.size.width += 60
+        let dividerFrame = model.windows[leader].frame
+        controller.updateManagedWindowDrag(using: [sample()], mouseButtonDown: true)
+        let dividerPeer = CGRect(
+            x: peerStart.minX + 60, y: peerStart.minY, width: peerStart.width - 60, height: peerStart.height)
+        if !fits(peer, dividerPeer) {
+            failures.append(
+                "the neighbouring pane did not follow an inner-edge resize while the mouse was down: "
+                    + "\(peerStart) -> \(model.windows[peer].frame)")
+        }
+        pump()
+        if model.windows[leader].frame != dividerFrame {
+            failures.append("moving a divider live moved the window being resized: \(model.windows[leader].frame)")
+        }
+        controller.finishManagedWindowDrag()
+        pump(0.6)
+        if !leaderFitsPane(dividerFrame) || !fits(peer, dividerPeer) {
+            failures.append(
+                "a live inner-edge resize did not end with both windows in their panes: "
+                    + "\(model.windows[leader].frame), \(model.windows[peer].frame)")
+        }
+
+        let workspaceBeforeSmallResize = controller.window.frame
+        guard controller.beginManagedWindowDrag(windowServerWindow: sample()) else {
+            return failures + ["live-resize fixture could not capture its leader for a small resize"]
+        }
+        model.windows[leader].frame.origin.x -= 8
+        model.windows[leader].frame.size.width += 8
+        controller.updateManagedWindowDrag(using: [sample()], mouseButtonDown: true)
+        if controller.window.frame != workspaceBeforeSmallResize {
+            failures.append("a small left-edge resize moved the workspace while the mouse was down")
+        }
+        controller.finishManagedWindowDrag()
+        pump(0.6)
+        if controller.window.frame != workspaceBeforeSmallResize || !leaderFitsPane(dividerFrame) {
+            failures.append(
+                "a small left-edge resize was not put back into its pane: "
+                    + "\(controller.window.frame), \(model.windows[leader].frame)")
+        }
+
+        // A press just outside the window's edge reaches the workspace, so no window was captured at the press.
+        let workspaceBeforeAdoption = controller.window.frame
+        model.windows[leader].frame.origin.x -= 40
+        model.windows[leader].frame.size.width += 40
+        let adoptedLeader = model.windows[leader].frame
+        controller.windowsChangedOutsideWorkspace(model.windows[leader].element, mouseButtonDown: true)
+        let adoptedWorkspace = NSRect(
+            x: workspaceBeforeAdoption.minX - 40, y: workspaceBeforeAdoption.minY,
+            width: workspaceBeforeAdoption.width + 40, height: workspaceBeforeAdoption.height)
+        if !controller.isTrackingManagedWindowDrag
+            || !WindowGeometry.fits(controller.window.frame, requested: adoptedWorkspace, tolerance: 1)
+        {
+            failures.append(
+                "a resize the press did not reach was not followed while the mouse was down: "
+                    + "\(workspaceBeforeAdoption) -> \(controller.window.frame)")
+        }
+        controller.finishManagedWindowDrag()
+        pump(0.6)
+        if !WindowGeometry.fits(controller.window.frame, requested: adoptedWorkspace, tolerance: 1)
+            || !leaderFitsPane(adoptedLeader) || !fits(peer, dividerPeer)
+        {
+            failures.append(
+                "a resize the press did not reach did not end with each window in its pane: "
+                    + "\(controller.window.frame), \(model.windows[leader].frame), \(model.windows[peer].frame)")
+        }
+        return failures
+    }
+
+    /// Minimizing a shown window minimizes its workspace, and restoring it brings the workspace back.
+    /// The workspace lags behind a dragged window drawn in front of it, so the window's pane must stay opaque while it
+    /// is dragged; otherwise the windows behind the workspace show through where the pane lags.
+    static func runManagedWindowDragConcealmentChecks() -> [String] {
+        let model = Model(windowCount: 2)
+        let controller = WorkspaceController(name: "Drag concealment \(UUID())", access: access(for: model))
+        controller.managedWindowMoveAction = .follow
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Drag concealment")
+        })
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.window.setFrame(NSRect(x: 160, y: 160, width: 900, height: 600), display: true)
+        controller.window.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        guard let workspace = controller.window.contentView as? WorkspaceBackgroundView,
+              workspace.gridContentAreas.count == 2,
+              let leaderID = controller.session.cells[0],
+              let leader = controller.session.managedByID[leaderID].flatMap({
+                  try? model.index(of: $0.candidate.element)
+              })
+        else { return ["drag-concealment fixture did not show two panes"] }
+        func reveals(_ cell: Int) -> Bool {
+            let area = workspace.gridContentAreas[cell]
+            let pane = workspace.convert(area.bounds, from: area)
+            return workspace.visibleContentRects.contains { $0.intersects(pane) }
+        }
+        guard reveals(0), reveals(1) else {
+            return ["drag-concealment fixture did not show its windows through the workspace"]
+        }
+        let processID = ProcessInfo.processInfo.processIdentifier
+        func leaderSample() -> WindowServerWindow {
+            WindowServerWindow(id: CGWindowID(leader + 1), processID: processID, frame: model.windows[leader].frame)
+        }
+        func workspaceSample() -> WindowServerWindow {
+            WindowServerWindow(
+                id: CGWindowID(controller.window.windowNumber), processID: processID, frame: controller.window.frame)
+        }
+        guard controller.beginManagedWindowDrag(windowServerWindow: leaderSample()) else {
+            return ["drag-concealment fixture could not capture its leader"]
+        }
+        var failures: [String] = []
+        model.windows[leader].frame.origin.x += 60
+        // The WindowServer lists windows front to back.
+        controller.updateManagedWindowDrag(using: [leaderSample(), workspaceSample()], mouseButtonDown: true)
+        if reveals(0) {
+            failures.append("the dragged window's pane let the windows behind the workspace show through")
+        }
+        if !reveals(1) {
+            failures.append("hiding the dragged window's pane also hid the other pane's window")
+        }
+
+        // E.g. a Command-drag moves a window without bringing it in front of the workspace.
+        model.windows[leader].frame.origin.x += 30
+        RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+        controller.updateManagedWindowDrag(using: [workspaceSample(), leaderSample()], mouseButtonDown: true)
+        if !reveals(0) {
+            failures.append("a dragged window behind the workspace was hidden by its pane")
+        }
+
+        controller.updateManagedWindowDrag(using: [leaderSample(), workspaceSample()], mouseButtonDown: true)
+        controller.finishManagedWindowDrag()
+        if !reveals(0) || !reveals(1) {
+            failures.append("the dragged window's pane stayed opaque after the drag")
+        }
+        return failures
+    }
+
+    static func runManagedWindowMinimizeFollowChecks() -> [String] {
+        let model = Model(windowCount: 2)
+        let controller = WorkspaceController(name: "Minimize follow \(UUID())", access: access(for: model))
+        controller.managedWindowMoveAction = .follow
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Minimize follow")
+        })
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.window.setFrame(NSRect(x: 160, y: 160, width: 900, height: 600), display: true)
+        controller.window.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        func pump(_ seconds: TimeInterval, until condition: () -> Bool) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition(), Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+        }
+        let visible = controller.session.cells.compactMap { $0 }
+        guard visible.count == 2,
+              let shown = controller.session.managedByID[visible[0]].flatMap({
+                  try? model.index(of: $0.candidate.element)
+              })
+        else { return ["minimize-follow fixture did not show two panes"] }
+        let other = 1 - shown
+        var failures: [String] = []
+
+        model.windows[shown].minimized = true
+        controller.windowsChangedOutsideWorkspace(model.windows[shown].element)
+        pump(3) { controller.window.isMiniaturized && model.windows[other].minimized }
+        if !controller.window.isMiniaturized || !controller.suspended {
+            failures.append("minimizing a shown window did not minimize its workspace")
+        }
+        if !model.windows[other].minimized {
+            failures.append("minimizing a shown window left the workspace's other window on screen")
+        }
+        if !model.windows[shown].minimized {
+            failures.append("minimizing a shown window put it back into its pane")
+        }
+
+        model.windows[shown].minimized = false
+        controller.windowRestoredOutsideWorkspace(model.windows[shown].element)
+        pump(3) { !controller.window.isMiniaturized && !controller.suspended && !model.windows[other].minimized }
+        if controller.window.isMiniaturized || controller.suspended {
+            failures.append("restoring a minimized window did not restore its workspace")
+        }
+        if model.windows[other].minimized {
+            failures.append("restoring a minimized window left the workspace's other window minimized")
         }
         return failures
     }
@@ -2605,10 +3640,20 @@ enum WindowSessionSmoke {
         case .failure(let failure): return [failure.message]
         }
         defer { helper.terminate() }
-        guard let application = NSRunningApplication(processIdentifier: helper.pid),
-              let element = WindowAccess.windowElements(application)?.first(where: {
-                  WindowAccess.windowID(of: $0) == CGWindowID(helper.windows[0])
-              })
+        // A just-launched helper can take a moment to answer accessibility requests, e.g. while the system is busy.
+        func helperWindow() -> AXUIElement? {
+            guard let application = NSRunningApplication(processIdentifier: helper.pid) else { return nil }
+            return WindowAccess.windowElements(application)?.first {
+                WindowAccess.windowID(of: $0) == CGWindowID(helper.windows[0])
+            }
+        }
+        var helperElement = helperWindow()
+        let lookupDeadline = Date().addingTimeInterval(3)
+        while helperElement == nil, Date() < lookupDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            helperElement = helperWindow()
+        }
+        guard let element = helperElement, let application = NSRunningApplication(processIdentifier: helper.pid)
         else { return ["could not find the window-event helper window"] }
         let controller = WorkspaceController(name: "Window events")
         let window = controller.window
@@ -2996,6 +4041,7 @@ enum WindowSessionSmoke {
         failures += runCloseOnReleaseChecks()
         failures += runDisplacedWindowChecks()
         failures += runEmptyWorkspaceDeletionChecks()
+        failures += runAutoGroupChecks()
         failures += runWindowEventRefitChecks()
         failures += runWindowEventReturnPolicyChecks()
         failures += runReresolveChecks()
@@ -3003,6 +4049,7 @@ enum WindowSessionSmoke {
         failures += runOutsideTabDropChecks()
         failures += runConstraintNoticeChecks()
         failures += runTransferChecks()
+        failures += runWorkspaceMergeChecks()
         failures += runRegisteredWindowDragChecks()
         failures += runExternalWindowDropChecks()
         failures += runExternalFocusChecks()
@@ -3310,6 +4357,21 @@ enum WindowSessionSmoke {
         _ = context.direction(for: key(.command, code: 50), ownPID: 1, frontPID: 2, visiblePIDs: [3])
         if context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [3]) != nil {
             failures.append("switching windows within the same application retained a stale shortcut context")
+        }
+        context.reset()
+        let workspaceKey = key([.control, .option])
+        if WorkspaceShortcutContext.workspaceDirection(for: workspaceKey, ownPID: 1, frontPID: 2, managedPIDs: [2]) != 1
+            || WorkspaceShortcutContext.workspaceDirection(
+                for: key([.control, .option, .shift, .capsLock]), ownPID: 1, frontPID: 1, managedPIDs: []) != -1
+        {
+            failures.append("Control Option Tab did not switch workspaces from WindowDock or a workspace window")
+        }
+        if WorkspaceShortcutContext.workspaceDirection(for: workspaceKey, ownPID: 1, frontPID: 9, managedPIDs: [2])
+            != nil
+            || WorkspaceShortcutContext.workspaceDirection(for: key(), ownPID: 1, frontPID: 2, managedPIDs: [2]) != nil
+            || context.direction(for: workspaceKey, ownPID: 1, frontPID: 2, visiblePIDs: [2]) != nil
+        {
+            failures.append("workspace and tab switching shortcuts overlapped or fired from an unrelated app")
         }
 
         let (session, model) = fixture(registering: [])

@@ -55,16 +55,20 @@ public enum WindowGeometry {
     }
 
     public static let minimumTabContentWidth: CGFloat = 22
+    public static let maximumTabContentWidth: CGFloat = 200
+    /// Room for a 16-point icon and its margins when tabs show no titles.
+    public static let iconOnlyTabContentWidth: CGFloat = 24
 
     /// Fill one row before opening a second. Beyond two full rows, scroll both together.
     public static func horizontalTabRows(
-        count: Int, available: CGFloat, chrome: CGFloat, spacing: CGFloat, wrap: Bool
+        count: Int, available: CGFloat, chrome: CGFloat, spacing: CGFloat, wrap: Bool,
+        maximumContent: CGFloat = maximumTabContentWidth
     ) -> (contentWidth: CGFloat, secondRow: Int?, viewport: CGFloat) {
         guard count > 0 else { return (0, nil, 0) }
         let capacity = max(1, Int((available + spacing) / (minimumTabContentWidth + chrome + spacing)))
         let columns = wrap && count > capacity ? max(capacity, (count + 1) / 2) : count
         let fixed = chrome * CGFloat(columns) + spacing * CGFloat(columns - 1)
-        let width = min(200, max(minimumTabContentWidth, (available - fixed) / CGFloat(columns)))
+        let width = min(maximumContent, max(minimumTabContentWidth, (available - fixed) / CGFloat(columns)))
         return (width, columns < count ? columns : nil, min(available, fixed + CGFloat(columns) * width))
     }
 

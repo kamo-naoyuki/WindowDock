@@ -18,6 +18,21 @@ final class WindowGeometryTests: XCTestCase {
         XCTAssertNil(rows(6, wrap: false).secondRow)
     }
 
+    func testIconOnlyTabsKeepTheirWidthInsteadOfFillingTheBar() {
+        let icons = WindowGeometry.horizontalTabRows(
+            count: 3, available: 1000, chrome: 34, spacing: 2, wrap: false,
+            maximumContent: WindowGeometry.iconOnlyTabContentWidth
+        )
+        XCTAssertEqual(icons.contentWidth, 24)
+        XCTAssertEqual(icons.viewport, 3 * (24 + 34) + 2 * 2)
+        let crowded = WindowGeometry.horizontalTabRows(
+            count: 11, available: 288, chrome: 34, spacing: 2, wrap: true,
+            maximumContent: WindowGeometry.iconOnlyTabContentWidth
+        )
+        XCTAssertEqual(crowded.contentWidth, 22)
+        XCTAssertEqual(crowded.secondRow, 6)
+    }
+
     private let insertionTabs = [
         CGRect(x: 0, y: 0, width: 100, height: 28),
         CGRect(x: 102, y: 0, width: 80, height: 28),

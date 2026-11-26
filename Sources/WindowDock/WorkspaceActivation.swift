@@ -13,6 +13,7 @@ final class WorkspaceActivation {
 
     private let controllers: () -> [WorkspaceController]
     var latestClick: () -> Click? = WorkspaceActivation.currentClick
+    var orderedWindows: () -> [NSWindow] = { NSApp.orderedWindows }
 
     init(controllers: @escaping () -> [WorkspaceController]) {
         self.controllers = controllers
@@ -23,6 +24,28 @@ final class WorkspaceActivation {
         let controllers = controllers()
         return controllers.first { $0.window.isKeyWindow } ?? controllers.first { $0.window.isMainWindow }
             ?? controllers.first
+    }
+
+    /// The workspace in front of the others as the user sees it, also while another app is active.
+    var frontController: WorkspaceController? {
+        let controllers = controllers()
+        if let key = controllers.first(where: { $0.window.isKeyWindow }) { return key }
+        for window in orderedWindows() where window.isVisible && !window.isMiniaturized {
+            if let controller = controllers.first(where: { $0.window === window }) { return controller }
+        }
+        return activeController
+    }
+
+    /// Shows the workspace `offset` places from the front one in the Workspace menu's order, skipping minimized ones.
+    @discardableResult
+    func cycle(_ offset: Int) -> WorkspaceController? {
+        let controllers = controllers()
+        let current = frontController.flatMap { front in controllers.firstIndex { $0 === front } }
+        guard let index = WorkspaceCycle.target(from: current, offset: offset, count: controllers.count, isEligible: {
+            !controllers[$0].quitting && !controllers[$0].window.isMiniaturized
+        }) else { return nil }
+        show(controllers[index])
+        return controllers[index]
     }
 
     /// Brings a workspace forward on request, e.g. from the Dock menu or the Workspace menu.

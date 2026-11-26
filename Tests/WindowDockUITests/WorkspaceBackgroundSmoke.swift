@@ -78,6 +78,17 @@ enum WorkspaceBackgroundSmoke {
             application.run()
             return
         }
+        if CommandLine.arguments.contains("--stage-manager-only") {
+            DispatchQueue.main.async {
+                let failures = WorkspaceActivationSmoke.runStageManagerChecks()
+                if let previous { _ = previous.activate(options: []) }
+                for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
+                if failures.isEmpty { print("PASS: workspaces and their windows share the Stage Manager stage") }
+                exit(failures.isEmpty ? 0 : 1)
+            }
+            application.run()
+            return
+        }
         DispatchQueue.main.async {
             let focused = CommandLine.arguments.contains("--tab-move-only")
             let dropOnly = CommandLine.arguments.contains("--window-drop-only")
@@ -86,13 +97,23 @@ enum WorkspaceBackgroundSmoke {
             let nestedOnly = CommandLine.arguments.contains("--nested-split-only")
             let focusOnly = CommandLine.arguments.contains("--focus-sync-only")
             let refitOnly = CommandLine.arguments.contains("--window-refit-only")
+            let windowFollowOnly = CommandLine.arguments.contains("--window-follow-only")
             let constraintOnly = CommandLine.arguments.contains("--constraint-notice-only")
             let enhancedUIOnly = CommandLine.arguments.contains("--enhanced-ui-only")
             let emptyWorkspaceOnly = CommandLine.arguments.contains("--empty-workspace-only")
             let audioOnly = CommandLine.arguments.contains("--audio-indicator-only")
+            let autoGroupOnly = CommandLine.arguments.contains("--auto-group-only")
             let failures: [String]
             if CommandLine.arguments.contains("--new-tab-only") {
                 failures = WindowSessionSmoke.runNewTabChecks() + checkThumbnailSelection()
+            } else if windowFollowOnly {
+                failures = WindowSessionSmoke.runManagedWindowFollowChecks()
+                    + WindowSessionSmoke.runManagedWindowSettledFollowChecks()
+                    + WindowSessionSmoke.runManagedWindowLiveResizeChecks()
+                    + WindowSessionSmoke.runManagedWindowDragConcealmentChecks()
+                    + WindowSessionSmoke.runManagedWindowMinimizeFollowChecks()
+            } else if autoGroupOnly {
+                failures = WindowSessionSmoke.runAutoGroupChecks()
             } else if audioOnly {
                 failures = checkAudioIndicatorLayout() + WindowSessionSmoke.runAudioIndicatorChecks()
                     + checkAudioPlaybackDetection()
@@ -120,7 +141,7 @@ enum WorkspaceBackgroundSmoke {
                 failures = WindowSessionSmoke.runShortcutChecks()
             } else if focused {
                 failures = checkTabMoveRouting() + WindowSessionSmoke.runTabTransferRevealChecks()
-                    + WindowSessionSmoke.runOutsideTabDropChecks()
+                    + WindowSessionSmoke.runOutsideTabDropChecks() + WindowSessionSmoke.runWorkspaceMergeChecks()
             } else if activationOnly {
                 failures =
                     WindowSessionSmoke.runFrontWindowOnlyActivationChecks()
@@ -145,6 +166,8 @@ enum WorkspaceBackgroundSmoke {
                 print(
                     CommandLine.arguments.contains("--new-tab-only")
                         ? "PASS: inline start pages, selection, replacement, failure and closing"
+                        : autoGroupOnly
+                        ? "PASS: automatic app grouping"
                         : audioOnly
                         ? "PASS: tab speakers for applications playing audio"
                         : emptyWorkspaceOnly

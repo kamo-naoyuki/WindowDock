@@ -101,10 +101,18 @@ private let translations: [String: [String]] = [
         "Add windows to a workspace by dragging", "通过拖动窗口将其添加到工作区",
         "창을 드래그하여 작업 공간에 추가", "Añadir ventanas al espacio de trabajo arrastrándolas",
     ],
-    "移動・最大化・最小化したウィンドウをペインに戻す": [
-        "Return moved, maximized, or minimized windows to their panes", "将移动、最大化或最小化的窗口放回窗格",
-        "이동·최대화·최소화한 창을 패널로 되돌리기",
-        "Devolver a su panel las ventanas movidas, maximizadas o minimizadas",
+    "ウィンドウを直接動かしたとき": [
+        "When moving a window directly", "直接移动窗口时", "창을 직접 움직일 때", "Al mover una ventana directamente",
+    ],
+    "ワークスペースを追従させる": [
+        "Move the workspace with it", "让工作区跟随移动", "작업 공간을 함께 이동", "Mover el espacio de trabajo con ella",
+    ],
+    "ペインに戻す": ["Return to pane", "返回窗格", "패널로 되돌리기", "Volver al panel"],
+    "管理ウィンドウの位置を取得できませんでした。ペインに戻します。": [
+        "Could not read the managed window's position. Returning it to its pane.",
+        "无法读取受管理窗口的位置。将其返回窗格。",
+        "관리 중인 창의 위치를 읽지 못했습니다. 패널로 되돌립니다.",
+        "No se pudo leer la posición de la ventana administrada. Se devolverá a su panel.",
     ],
     "フルスクリーンのウィンドウもペインに戻す": [
         "Also return full-screen windows to their panes", "也将全屏窗口放回窗格",
@@ -135,6 +143,10 @@ private let translations: [String: [String]] = [
         "Automatically Hide Tab Bar", "自动隐藏标签栏", "탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas",
     ],
     "タブバーの位置": ["Tab Bar Position", "标签栏位置", "탭 막대 위치", "Posición de la barra de pestañas"],
+    "タブにアイコンだけを表示する（ウィンドウ名を隠す）": [
+        "Show Only Icons in Tabs (Hide Window Names)", "标签页仅显示图标（隐藏窗口名称）",
+        "탭에 아이콘만 표시(창 이름 숨기기)", "Mostrar solo iconos en las pestañas (ocultar nombres de ventana)",
+    ],
     "タブが収まらないときは2段にする": [
         "Wrap crowded tabs into two rows", "标签页放不下时分为两行", "탭이 모두 들어가지 않으면 두 줄로 표시",
         "Usar dos filas cuando no quepan las pestañas",
@@ -250,6 +262,12 @@ private let translations: [String: [String]] = [
     "ワークスペース名を変更…": ["Rename Workspace…", "重命名工作区…", "작업 공간 이름 변경…", "Renombrar espacio de trabajo…"],
     "ワークスペース名を変更": ["Rename Workspace", "重命名工作区", "작업 공간 이름 변경", "Renombrar espacio de trabajo"],
     "ワークスペースを削除…": ["Delete Workspace…", "删除工作区…", "작업 공간 삭제…", "Eliminar espacio de trabajo…"],
+    "次のワークスペース": ["Next Workspace", "下一个工作区", "다음 작업 공간", "Espacio de trabajo siguiente"],
+    "前のワークスペース": ["Previous Workspace", "上一个工作区", "이전 작업 공간", "Espacio de trabajo anterior"],
+    "全てのワークスペースを現在のワークスペースに統合": [
+        "Merge All Workspaces into This One", "将所有工作区合并到当前工作区", "모든 작업 공간을 현재 작업 공간으로 병합",
+        "Combinar todos los espacios de trabajo en el actual",
+    ],
     "ワークスペース「%@」を削除しますか？": [
         "Delete workspace “%@”?", "要删除工作区“%@”吗？", "작업 공간 “%@”을(를) 삭제할까요?", "¿Eliminar el espacio de trabajo «%@»?",
     ],
@@ -288,14 +306,14 @@ private let translations: [String: [String]] = [
         "Allow Screen Recording for Previews…", "允许录屏以显示预览…", "미리보기를 위해 화면 기록 허용…",
         "Permitir la grabación de pantalla para ver vistas previas…",
     ],
-    "最近タブに追加したアプリ": [
-        "Apps Recently Added to Tabs", "最近添加到标签页的应用", "최근 탭에 추가한 앱", "Apps añadidas recientemente a pestañas",
+    "インストール済みのアプリ": [
+        "Installed Apps", "已安装的应用", "설치된 앱", "Apps instaladas",
     ],
-    "どのワークスペースでも、ウィンドウをタブに追加するとそのアプリがここに新しい順で表示されます（最大10個）。": [
-        "When you add a window as a tab in any workspace, its app appears here, newest first (up to 10).",
-        "在任意工作区中将窗口添加为标签页后，其应用会按从新到旧显示在这里（最多 10 个）。",
-        "어느 작업 공간에서든 창을 탭으로 추가하면 해당 앱이 최신순으로 여기에 표시됩니다(최대 10개).",
-        "Al añadir una ventana como pestaña en cualquier espacio de trabajo, su app aparece aquí, de la más reciente a la más antigua (hasta 10).",
+    "最近使った順に表示します。": [
+        "Recently used apps appear first.",
+        "最近使用的应用排在最前面。",
+        "최근 사용한 앱부터 표시합니다.",
+        "Las apps que has usado recientemente aparecen primero.",
     ],
     "アプリを選ぶと新しいウィンドウを開いて、このタブに追加します。起動していないアプリは起動し、起動中のアプリでは「新規ウィンドウ」を実行します。": [
         "Choose an app to open a new window in this tab. Apps that aren’t running are launched; running apps use their New Window command.",
@@ -303,8 +321,50 @@ private let translations: [String: [String]] = [
         "앱을 선택하면 새 창을 열어 이 탭에 추가합니다. 실행 중이 아닌 앱은 실행하고, 실행 중인 앱은 '새 창' 명령을 사용합니다.",
         "Elige una app para abrir una ventana nueva en esta pestaña. Si no está abierta, se abre; si ya lo está, se usa su comando Nueva ventana.",
     ],
-    "その他のアプリを選んで起動…": [
-        "Choose Another App to Launch…", "选择其他应用并启动…", "다른 앱을 선택하여 실행…", "Elegir otra app para abrir…",
+    "複数選択すると、まとめて開くか、新しいウィンドウを自動でこのワークスペースに追加するように設定できます。": [
+        "Select several apps to open them together, or to add their new windows to this workspace automatically.",
+        "选择多个应用后，可以一起打开，或设置为自动将其新窗口添加到此工作区。",
+        "여러 앱을 선택하면 한꺼번에 열거나, 새 창을 이 작업 공간에 자동으로 추가하도록 설정할 수 있습니다.",
+        "Selecciona varias apps para abrirlas juntas o para que sus ventanas nuevas se añadan automáticamente a este espacio de trabajo.",
+    ],
+    "アプリを複数選択": [
+        "Select Apps",
+        "选择多个应用",
+        "앱 여러 개 선택",
+        "Seleccionar apps",
+    ],
+    "%d個のアプリで新しいウィンドウを開く": [
+        "Open New Windows of %d Apps",
+        "打开 %d 个应用的新窗口",
+        "앱 %d개의 새 창 열기",
+        "Abrir ventanas nuevas de %d apps",
+    ],
+    "%d個のアプリの新しいウィンドウを自動でこのワークスペースに追加": [
+        "Automatically Add New Windows of %d Apps to This Workspace",
+        "自动将 %d 个应用的新窗口添加到此工作区",
+        "앱 %d개의 새 창을 이 작업 공간에 자동으로 추가",
+        "Añadir automáticamente a este espacio de trabajo las ventanas nuevas de %d apps",
+    ],
+    "選んだアプリで今後開いたウィンドウを、自動的にこのワークスペースに追加します。アプリは起動しません。": [
+        "Windows the chosen apps open from now on are added to this workspace automatically. The apps aren’t launched.",
+        "所选应用此后打开的窗口会自动添加到此工作区。不会启动这些应用。",
+        "선택한 앱에서 앞으로 여는 창을 이 작업 공간에 자동으로 추가합니다. 앱은 실행되지 않습니다.",
+        "Las ventanas que abran las apps elegidas a partir de ahora se añadirán automáticamente a este espacio de trabajo. Las apps no se abren.",
+    ],
+    "新しいウィンドウを自動でこのワークスペースに追加します": [
+        "New windows are added to this workspace automatically",
+        "新窗口会自动添加到此工作区",
+        "새 창을 이 작업 공간에 자동으로 추가합니다",
+        "Las ventanas nuevas se añaden automáticamente a este espacio de trabajo",
+    ],
+    "%@は起動しましたが、追加できるウィンドウが見つかりませんでした。": [
+        "%@ launched, but no window was available to add.",
+        "%@ 已启动，但没有找到可添加的窗口。",
+        "%@이(가) 실행되었지만 추가할 수 있는 창을 찾지 못했습니다.",
+        "%@ se abrió, pero no se encontró ninguna ventana para añadir.",
+    ],
+    "起動できるアプリが見つかりませんでした。": [
+        "No apps available to launch.", "找不到可启动的应用。", "실행할 수 있는 앱이 없습니다.", "No hay apps disponibles para abrir.",
     ],
     "このタブまたはウィンドウは利用できなくなりました。": [
         "This tab or window is no longer available.", "此标签页或窗口已不可用。", "이 탭 또는 창은 더 이상 사용할 수 없습니다.",
@@ -313,8 +373,6 @@ private let translations: [String: [String]] = [
     "追加できるウィンドウがありません。": [
         "No windows available to add.", "没有可添加的窗口。", "추가할 수 있는 창이 없습니다.", "No hay ventanas para añadir.",
     ],
-    "起動するアプリを選択": ["Choose an App to Launch", "选择要启动的应用", "실행할 앱 선택", "Elegir una app para abrir"],
-    "起動": ["Launch", "启动", "실행", "Abrir"],
     "新規ウィンドウの作成": ["opening a new window", "创建新窗口", "새 창 열기", "abrir una ventana nueva"],
     "ウィンドウ一覧の取得": ["listing windows", "获取窗口列表", "창 목록 가져오기", "obtener la lista de ventanas"],
     "「新規ウィンドウ」メニューの取得": [
@@ -323,12 +381,6 @@ private let translations: [String: [String]] = [
     ],
     "%@を起動できませんでした: %@": [
         "Could not launch %@: %@", "无法启动 %@：%@", "%@을(를) 실행할 수 없습니다: %@", "No se pudo abrir %@: %@",
-    ],
-    "アプリは起動しましたが、追加できるウィンドウが見つかりませんでした。": [
-        "The app launched, but no window was available to add.",
-        "应用已启动，但没有找到可添加的窗口。",
-        "앱이 실행되었지만 추가할 수 있는 창을 찾지 못했습니다.",
-        "La app se abrió, pero no se encontró ninguna ventana para añadir.",
     ],
     "取得できなかったアプリ: %@": ["Apps that could not be read: %@", "无法读取的应用：%@", "가져오지 못한 앱: %@", "Apps no legibles: %@"],
     "、": [", ", "、", ", ", ", "],
@@ -433,4 +485,117 @@ private let translations: [String: [String]] = [
         "Restaurar posición original y liberar pestaña",
     ],
     "権限設定\n%@": ["Permission Settings\n%@", "权限设置\n%@", "권한 설정\n%@", "Ajustes de permisos\n%@"],
+
+    // Automatic grouping
+    "「%@」の新しいウィンドウを自動でこのワークスペースに追加": [
+        "Automatically Add New “%@” Windows to This Workspace",
+        "自动将“%@”的新窗口添加到此工作区",
+        "‘%@’의 새 창을 이 작업 공간에 자동으로 추가",
+        "Añadir automáticamente a este espacio de trabajo las ventanas nuevas de “%@”",
+    ],
+    "このアプリは識別できないため、新しいウィンドウを自動で追加できません。": [
+        "This app can’t be identified, so its new windows can’t be added automatically.",
+        "无法识别此应用，因此不能自动添加其新窗口。",
+        "이 앱을 식별할 수 없어 새 창을 자동으로 추가할 수 없습니다.",
+        "No se puede identificar esta app, así que sus ventanas nuevas no se pueden añadir automáticamente.",
+    ],
+    "%@ は識別できないため、新しいウィンドウを自動で追加できません。": [
+        "%@ can’t be identified, so its new windows can’t be added automatically.",
+        "无法识别 %@，因此不能自动添加其新窗口。",
+        "%@을(를) 식별할 수 없어 새 창을 자동으로 추가할 수 없습니다.",
+        "No se puede identificar %@, así que sus ventanas nuevas no se pueden añadir automáticamente.",
+    ],
+    "別のアプリを選ぶ…": ["Choose Another App…", "选择其他应用…", "다른 앱 선택…", "Elegir otra app…"],
+    "新しいウィンドウを自動で追加するアプリを選ぶ…": [
+        "Choose Apps Whose New Windows Are Added Automatically…",
+        "选择自动添加其新窗口的应用…",
+        "새 창을 자동으로 추가할 앱 선택…",
+        "Elegir apps cuyas ventanas nuevas se añaden automáticamente…",
+    ],
+    "新しいウィンドウを自動で追加するアプリ…": [
+        "Apps Whose New Windows Are Added Automatically…",
+        "自动添加其新窗口的应用…",
+        "새 창을 자동으로 추가하는 앱…",
+        "Apps cuyas ventanas nuevas se añaden automáticamente…",
+    ],
+    "チェックしたアプリで今後開いたウィンドウを「%@」に追加します。チェックを外しても、追加済みのタブは残ります。": [
+        "Windows the checked apps open from now on are added to “%@”. Unchecking an app keeps its existing tabs.",
+        "勾选的应用此后打开的窗口会添加到“%@”。取消勾选后，已添加的标签页会保留。",
+        "체크한 앱에서 앞으로 여는 창을 ‘%@’에 추가합니다. 체크를 해제해도 이미 추가된 탭은 남아 있습니다.",
+        "Las ventanas que abran las apps marcadas a partir de ahora se añadirán a “%@”. Si desmarcas una app, sus pestañas se quedan.",
+    ],
+    "保存": ["Save", "保存", "저장", "Guardar"],
+    "新しいウィンドウを自動で追加するアプリ": [
+        "Apps Whose New Windows Are Added Automatically",
+        "自动添加其新窗口的应用",
+        "새 창을 자동으로 추가하는 앱",
+        "Apps cuyas ventanas nuevas se añaden automáticamente",
+    ],
+    "これらのアプリで新しく開いたウィンドウは、自動的にこのワークスペースにタブとして追加されます。": [
+        "New windows of these apps are added to this workspace as tabs automatically.",
+        "这些应用新打开的窗口会自动作为标签页添加到此工作区。",
+        "이 앱들에서 새로 연 창은 이 작업 공간에 탭으로 자동 추가됩니다.",
+        "Las ventanas nuevas de estas apps se añaden automáticamente a este espacio de trabajo como pestañas.",
+    ],
+    "登録を解除": ["Remove", "移除", "등록 해제", "Quitar"],
+    "登録": ["Add", "添加", "등록", "Añadir"],
+    "その他のアプリを選ぶ…": ["Choose Other Apps…", "选择其他应用…", "다른 앱 선택…", "Elegir otras apps…"],
+    "（「%@」に登録済み）": [
+        " (new windows go to “%@”)",
+        "（新窗口会添加到“%@”）",
+        " (‘%@’에 등록됨)",
+        " (sus ventanas nuevas van a “%@”)",
+    ],
+    "選んだアプリで今後開いたウィンドウを「%@」に追加します。アプリは起動しません。": [
+        "Windows the chosen apps open from now on are added to “%@”. The apps aren’t launched.",
+        "所选应用此后打开的窗口会添加到“%@”。不会启动这些应用。",
+        "선택한 앱에서 앞으로 여는 창을 ‘%@’에 추가합니다. 앱은 실행되지 않습니다.",
+        "Las ventanas que abran las apps elegidas a partir de ahora se añadirán a “%@”. Las apps no se abren.",
+    ],
+    "新しいウィンドウを自動で「%@」に追加しますか？": [
+        "Automatically add new windows to “%@”?",
+        "要自动将新窗口添加到“%@”吗？",
+        "새 창을 ‘%@’에 자동으로 추가할까요?",
+        "¿Añadir automáticamente las ventanas nuevas a “%@”?",
+    ],
+    "「%@」の追加先を「%@」から「%@」に変更します。": [
+        "New windows of %1$@ will be added to “%3$@” instead of “%2$@”.",
+        "“%1$@”的新窗口将添加到“%3$@”，而不是“%2$@”。",
+        "‘%@’의 추가 대상을 ‘%@’에서 ‘%@’(으)로 변경합니다.",
+        "Las ventanas nuevas de %1$@ se añadirán a “%3$@” en lugar de “%2$@”.",
+    ],
+    "追加済みのタブは移動しません。": [
+        "Existing tabs stay where they are.", "已添加的标签页不会移动。", "이미 추가된 탭은 이동하지 않습니다.",
+        "Las pestañas existentes no se mueven.",
+    ],
+    "%@で今後開いたウィンドウを追加します。": [
+        "Windows that %@ opens from now on will be added.", "此后 %@ 打开的窗口会被添加。",
+        "앞으로 %@에서 여는 창을 추가합니다.", "Se añadirán las ventanas que %@ abra a partir de ahora.",
+    ],
+    "今開いている%d件も追加": [
+        "Also add the %d windows open now", "同时添加当前打开的 %d 个窗口", "지금 열려 있는 %d개도 추가",
+        "Añadir también las %d ventanas abiertas ahora",
+    ],
+    "新しいウィンドウを自動で追加するにはアクセシビリティ権限が必要です。": [
+        "Accessibility permission is required to add new windows automatically.",
+        "自动添加新窗口需要辅助功能权限。",
+        "새 창을 자동으로 추가하려면 손쉬운 사용 권한이 필요합니다.",
+        "Se requiere permiso de Accesibilidad para añadir ventanas nuevas automáticamente.",
+    ],
+    "%@で新しく開いたウィンドウを、このワークスペースに追加します。": [
+        "New windows of %@ will be added to this workspace.", "%@ 新打开的窗口会添加到此工作区。",
+        "%@에서 새로 연 창을 이 작업 공간에 추가합니다.", "Las ventanas nuevas de %@ se añadirán a este espacio de trabajo.",
+    ],
+    "%@の自動追加を止めました。追加済みのタブは残ります。": [
+        "New windows of %@ are no longer added automatically. Its tabs stay in the workspace.",
+        "已停止自动添加 %@ 的新窗口。已添加的标签页会保留。",
+        "%@의 자동 추가를 중지했습니다. 이미 추가된 탭은 남아 있습니다.",
+        "Las ventanas nuevas de %@ ya no se añaden automáticamente. Sus pestañas se quedan en el espacio de trabajo.",
+    ],
+    "、新しいウィンドウを自動で追加するアプリ%d個": [
+        ", %d apps whose new windows are added automatically",
+        "，%d 个自动添加新窗口的应用",
+        ", 새 창을 자동으로 추가하는 앱 %d개",
+        ", %d apps cuyas ventanas nuevas se añaden automáticamente",
+    ],
 ]

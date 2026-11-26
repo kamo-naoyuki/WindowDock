@@ -252,12 +252,15 @@ enum WindowAccess {
 private final class WindowNotificationContext {
     let onFocusChange: @Sendable () -> Void
     let onWindowChange: @Sendable (AXUIElement) -> Void
+    let onWindowRestore: @Sendable (AXUIElement) -> Void
 
     init(
         onFocusChange: @escaping @Sendable () -> Void,
-        onWindowChange: @escaping @Sendable (AXUIElement) -> Void) {
+        onWindowChange: @escaping @Sendable (AXUIElement) -> Void,
+        onWindowRestore: @escaping @Sendable (AXUIElement) -> Void) {
         self.onFocusChange = onFocusChange
         self.onWindowChange = onWindowChange
+        self.onWindowRestore = onWindowRestore
     }
 }
 
@@ -267,12 +270,14 @@ private func windowObserverCallback(
     let context = Unmanaged<WindowNotificationContext>.fromOpaque(refcon).takeUnretainedValue()
     if notification as String == kAXFocusedWindowChangedNotification {
         context.onFocusChange()
+    } else if notification as String == kAXWindowDeminiaturizedNotification {
+        context.onWindowRestore(element)
     } else {
         context.onWindowChange(element)
     }
 }
 
-/// Watches an app's focused window and its windows being moved, resized or minimized.
+/// Watches an app's focused window and its windows being moved, resized, minimized or restored.
 final class WindowEventObserver {
     private static let applicationNotifications = [
         kAXFocusedWindowChangedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
@@ -287,7 +292,8 @@ final class WindowEventObserver {
     /// The handlers are called on the main thread.
     init?(
         application: NSRunningApplication, onFocusChange: @escaping @Sendable () -> Void,
-        onWindowChange: @escaping @Sendable (AXUIElement) -> Void) {
+        onWindowChange: @escaping @Sendable (AXUIElement) -> Void,
+        onWindowRestore: @escaping @Sendable (AXUIElement) -> Void) {
         let pid = application.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
@@ -297,7 +303,8 @@ final class WindowEventObserver {
             WindowAccess.logger.debug("Could not observe windows for PID \(pid): \(createError.rawValue)")
             return nil
         }
-        let context = WindowNotificationContext(onFocusChange: onFocusChange, onWindowChange: onWindowChange)
+        let context = WindowNotificationContext(
+            onFocusChange: onFocusChange, onWindowChange: onWindowChange, onWindowRestore: onWindowRestore)
         let registered = Self.applicationNotifications.filter { notification in
             let error = AXObserverAddNotification(
                 createdObserver, appElement, notification as CFString, Unmanaged.passUnretained(context).toOpaque())
@@ -317,20 +324,25 @@ final class WindowEventObserver {
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
     }
 
-    /// Apps report minimizing for each window rather than for the whole app.
+    private static let windowNotifications = [kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+
+    /// Apps report minimizing and restoring for each window rather than for the whole app.
     func observeMinimizing(of windows: [AXUIElement]) {
-        let notification = kAXWindowMiniaturizedNotification as CFString
         for element in minimizableWindows where !windows.contains(where: { CFEqual($0, element) }) {
-            AXObserverRemoveNotification(observer, element, notification)
+            for notification in Self.windowNotifications {
+                AXObserverRemoveNotification(observer, element, notification as CFString)
+            }
         }
         minimizableWindows.removeAll { element in !windows.contains { CFEqual($0, element) } }
         for element in windows where !minimizableWindows.contains(where: { CFEqual($0, element) }) {
-            let error = AXObserverAddNotification(
-                observer, element, notification, Unmanaged.passUnretained(context).toOpaque())
-            guard error == .success || error == .notificationAlreadyRegistered else {
-                WindowAccess.logger.debug("Could not observe minimizing of a window: \(error.rawValue)")
-                continue
+            let errors = Self.windowNotifications.map {
+                AXObserverAddNotification(
+                    observer, element, $0 as CFString, Unmanaged.passUnretained(context).toOpaque())
             }
+            for error in errors where error != .success && error != .notificationAlreadyRegistered {
+                WindowAccess.logger.debug("Could not observe minimizing of a window: \(error.rawValue)")
+            }
+            guard errors.contains(where: { $0 == .success || $0 == .notificationAlreadyRegistered }) else { continue }
             minimizableWindows.append(element)
         }
     }
@@ -340,8 +352,60 @@ final class WindowEventObserver {
             AXObserverRemoveNotification(observer, applicationElement, notification as CFString)
         }
         for element in minimizableWindows {
-            AXObserverRemoveNotification(observer, element, kAXWindowMiniaturizedNotification as CFString)
+            for notification in Self.windowNotifications {
+                AXObserverRemoveNotification(observer, element, notification as CFString)
+            }
         }
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+    }
+}
+
+private final class WindowCreationContext {
+    let onCreate: @Sendable (AXUIElement) -> Void
+    init(onCreate: @escaping @Sendable (AXUIElement) -> Void) { self.onCreate = onCreate }
+}
+
+private func windowCreationCallback(
+    _ observer: AXObserver, _ element: AXUIElement, _ notification: CFString, _ refcon: UnsafeMutableRawPointer?) {
+    guard let refcon else { return }
+    Unmanaged<WindowCreationContext>.fromOpaque(refcon).takeUnretainedValue().onCreate(element)
+}
+
+/// Reports windows an app opens. Some apps report them late or never, so callers also rescan.
+final class WindowCreationObserver {
+    private let observer: AXObserver
+    private let applicationElement: AXUIElement
+    private let context: WindowCreationContext
+    private let runLoopSource: CFRunLoopSource
+
+    /// The handler is called on the main thread.
+    init?(application: NSRunningApplication, onCreate: @escaping @Sendable (AXUIElement) -> Void) {
+        let pid = application.processIdentifier
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        var createdObserver: AXObserver?
+        let createError = AXObserverCreate(pid, windowCreationCallback, &createdObserver)
+        guard createError == .success, let createdObserver else {
+            WindowAccess.logger.debug("Could not observe new windows for PID \(pid): \(createError.rawValue)")
+            return nil
+        }
+        let context = WindowCreationContext(onCreate: onCreate)
+        let error = AXObserverAddNotification(
+            createdObserver, appElement, kAXWindowCreatedNotification as CFString,
+            Unmanaged.passUnretained(context).toOpaque())
+        guard error == .success || error == .notificationAlreadyRegistered else {
+            WindowAccess.logger.debug("Could not register window creation for PID \(pid): \(error.rawValue)")
+            return nil
+        }
+        observer = createdObserver
+        applicationElement = appElement
+        self.context = context
+        runLoopSource = AXObserverGetRunLoopSource(createdObserver)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+    }
+
+    deinit {
+        AXObserverRemoveNotification(observer, applicationElement, kAXWindowCreatedNotification as CFString)
         CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
     }
 }
@@ -367,6 +431,11 @@ struct WindowAccessClient {
     var probe: (AXUIElement) -> WindowProbeResult = WindowAccess.probe
     var applicationWindows: (NSRunningApplication) -> [WindowCandidate]? = WindowAccess.applicationWindows
     var requestNewWindow: (NSRunningApplication) async throws -> Void = WindowAccess.requestNewWindow
+    var allWindowIDs: (NSRunningApplication) -> [CGWindowID]? = WindowAccess.allWindowIDs(of:)
+    /// Returns an object that keeps reporting the app's new windows until it's released, or nil if that failed.
+    var observeWindowCreation: (NSRunningApplication, @escaping @Sendable (AXUIElement) -> Void) -> AnyObject? = {
+        WindowCreationObserver(application: $0, onCreate: $1)
+    }
 }
 
 struct WindowProbeResult {
@@ -411,6 +480,19 @@ extension WindowAccess {
                   !frame.isEmpty, !frame.isInfinite
             else { return nil }
             return WindowServerWindow(id: id, processID: pid, frame: frame, layer: layer)
+        }
+    }
+
+    /// Every normal-layer window the app owns, including minimized ones and ones on other Spaces that AX doesn't list.
+    static func allWindowIDs(of application: NSRunningApplication) -> [CGWindowID]? {
+        guard let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        let pid = application.processIdentifier
+        return entries.compactMap { entry in
+            guard entry[kCGWindowOwnerPID as String] as? pid_t == pid,
+                  entry[kCGWindowLayer as String] as? Int == 0 else { return nil }
+            return entry[kCGWindowNumber as String] as? CGWindowID
         }
     }
 

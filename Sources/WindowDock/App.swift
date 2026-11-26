@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var shortcutContext = WorkspaceShortcutContext()
     private let tabOutsideDropSettings = TabOutsideDropSettings()
     private var dragTimer: Timer?
-    private var leftMouseDownLocation: NSPoint?
+    private var leftMousePress = LeftMousePress()
     private lazy var tabTransfer: WorkspaceTabTransfer = {
         let transfer = WorkspaceTabTransfer { [weak self] in self?.controllers ?? [] }
         transfer.onBegin = { [weak self] in self?.cancelWindowDrag() }
@@ -53,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         transfer.discardWorkspace = { [weak self] controller in
             self?.controllers.removeAll { $0 === controller }
             controller.finishClosing()
+            self?.autoGrouping.refresh()
         }
         transfer.onRelease = { [weak self] source in
             guard let self else { return }
@@ -61,6 +62,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return transfer
     }()
     private lazy var activation = WorkspaceActivation { [weak self] in self?.controllers ?? [] }
+    private lazy var autoGrouping: AutoGroupCoordinator = {
+        let coordinator = AutoGroupCoordinator { [weak self] in self?.controllers ?? [] }
+        coordinator.save = { [weak self] in self?.persist($0) }
+        return coordinator
+    }()
     private lazy var windowDrop: WorkspaceWindowDrop = {
         let drop = WorkspaceWindowDrop { [weak self] in self?.controllers ?? [] }
         drop.isEnabled = isSettingEnabled(.addWindowsByDragging)
@@ -79,7 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Setting.addWindowsByDragging.rawValue: true,
             Setting.autoHideNewWorkspaces.rawValue: false,
             Setting.wrapCrowdedTabs.rawValue: false,
-            Setting.returnDisplacedWindows.rawValue: true,
+            Setting.showTabIconsOnly.rawValue: false,
             Setting.returnFullScreenWindows.rawValue: false,
             Setting.deleteEmptyWorkspaces.rawValue: false,
         ])
@@ -93,7 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if event.type == .leftMouseDown {
                         self?.beginLeftMousePress()
                     } else {
-                        self?.leftMouseDownLocation = nil
+                        self?.leftMousePress.cancel()
+                        self?.controllers.forEach { $0.cancelManagedWindowDrag() }
                     }
                     return event
                 }
@@ -150,22 +157,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                       !Self.isScreenUnavailable, Date() >= self.pruneResumeDate
                 else { return }
                 self.controllers.forEach { $0.session.pruneClosedWindows() }
+                self.autoGrouping.poll()
             }
         }
         NSApp.activate(ignoringOtherApps: true)
-        let layouts = SavedLayout.load().filter { !$0.windows.isEmpty }
-        RecentApplications().seedIfNeeded(from: layouts.flatMap { $0.windows.map(\.bundleID) })
+        let layouts = SavedLayout.load().filter { !$0.windows.isEmpty || !($0.autoGroupBundleIDs ?? []).isEmpty }
         let saved = chooseWorkspacesToRestore(layouts)
         WorkspaceRestore.start(saved) { self.addWorkspace(name: $0) }
+        autoGrouping.start()
+    }
+
+    private func summary(of workspace: SavedWorkspace) -> String {
+        var summary = "\(workspace.name) — " + L("%d個のウィンドウ", workspace.windows.count)
+        if let rules = workspace.autoGroupBundleIDs, !rules.isEmpty {
+            summary += L("、新しいウィンドウを自動で追加するアプリ%d個", rules.count)
+        }
+        return summary
     }
 
     /// Lets the user pick which saved workspaces to bring back; a single workspace needs no question.
     private func chooseWorkspacesToRestore(_ workspaces: [SavedWorkspace]) -> [SavedWorkspace] {
         guard workspaces.count > 1 else { return workspaces }
         let checks = workspaces.map { workspace -> NSButton in
-            let check = NSButton(
-                checkboxWithTitle: "\(workspace.name) — " + L("%d個のウィンドウ", workspace.windows.count),
-                target: nil, action: nil)
+            let check = NSButton(checkboxWithTitle: summary(of: workspace), target: nil, action: nil)
             check.state = .on
             return check
         }
@@ -209,17 +223,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case addWindowsByDragging = "addWindowsByDragging"
         case autoHideNewWorkspaces = "autoHideNewWorkspaces"
         case wrapCrowdedTabs
-        case returnDisplacedWindows = "returnDraggedWindowsToPanes"
+        case showTabIconsOnly
         case returnFullScreenWindows = "returnFullScreenWindowsToPanes"
         case deleteEmptyWorkspaces = "deleteEmptyWorkspaces"
 
         var defaultValue: Bool {
             switch self {
             case .closeOnRelease, .autoHideNewWorkspaces, .returnFullScreenWindows, .deleteEmptyWorkspaces,
-                 .wrapCrowdedTabs: false
-            case .controlTabSwitching, .addWindowsByDragging, .returnDisplacedWindows: true
+                 .wrapCrowdedTabs, .showTabIconsOnly: false
+            case .controlTabSwitching, .addWindowsByDragging: true
             }
         }
+    }
+
+    private var managedWindowMoveAction: ManagedWindowMoveAction {
+        let defaults = UserDefaults.standard
+        let key = "managedWindowMoveAction"
+        if let value = defaults.string(forKey: key) {
+            guard let action = ManagedWindowMoveAction(rawValue: value) else {
+                WindowAccess.logger.error("Invalid managed window move action: \(value, privacy: .public)")
+                return .follow
+            }
+            return action
+        }
+        let legacy = defaults.object(forKey: "returnDraggedWindowsToPanes") as? Bool
+        let action = ManagedWindowMoveAction.migrated(from: legacy)
+        defaults.set(action.rawValue, forKey: key)
+        return action
     }
 
     private func isSettingEnabled(_ setting: Setting) -> Bool {
@@ -240,14 +270,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             shortcutContext.reset()
         case .addWindowsByDragging:
             windowDrop.isEnabled = enabled
-        case .returnDisplacedWindows:
-            for controller in controllers { controller.returnsDisplacedWindows = enabled }
         case .returnFullScreenWindows:
             for controller in controllers { controller.returnsFullScreenWindows = enabled }
         case .deleteEmptyWorkspaces:
             for controller in controllers { controller.deletesWhenEmpty = enabled }
         case .wrapCrowdedTabs:
             for controller in controllers { controller.setWrapsCrowdedTabs(enabled) }
+        case .showTabIconsOnly:
+            for controller in controllers { controller.setShowsTabIconsOnly(enabled) }
         case .autoHideNewWorkspaces:
             break
         }
@@ -316,6 +346,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             withTitle: L("ワークスペースを閉じる"), action: #selector(closeWorkspace), keyEquivalent: "w")
         close.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(withTitle: L("ワークスペースを削除…"), action: #selector(deleteWorkspace), keyEquivalent: "")
+        menu.addItem(
+            withTitle: L("新しいウィンドウを自動で追加するアプリ…"),
+            action: activeController?.canChooseAutoGroupApplications == true
+                ? #selector(chooseAutoGroupApplications) : nil,
+            keyEquivalent: "")
+        menu.addItem(.separator())
+        let switchable = controllers.filter { !$0.window.isMiniaturized }.count > 1
+        let nextWorkspace = menu.addItem(
+            withTitle: L("次のワークスペース"), action: switchable ? #selector(selectNextWorkspace) : nil,
+            keyEquivalent: "\t")
+        nextWorkspace.keyEquivalentModifierMask = [.control, .option]
+        let previousWorkspace = menu.addItem(
+            withTitle: L("前のワークスペース"), action: switchable ? #selector(selectPreviousWorkspace) : nil,
+            keyEquivalent: "\t")
+        previousWorkspace.keyEquivalentModifierMask = [.control, .option, .shift]
+        menu.addItem(
+            withTitle: L("全てのワークスペースを現在のワークスペースに統合"),
+            action: controllers.count > 1 ? #selector(mergeAllWorkspaces) : nil, keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: L("最小化"), action: #selector(minimizeWorkspace), keyEquivalent: "m")
         menu.addItem(withTitle: L("最大化 / 復元"), action: #selector(maximizeWorkspace), keyEquivalent: "")
@@ -395,11 +443,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.closeOnRelease, "タブを解除するときにウィンドウも閉じる"),
             (.controlTabSwitching, "Control+Tabでワークスペースのタブを切り替える"),
             (.addWindowsByDragging, "ウィンドウをドラッグしてワークスペースに追加する"),
-            (.returnDisplacedWindows, "移動・最大化・最小化したウィンドウをペインに戻す"),
             (.returnFullScreenWindows, "フルスクリーンのウィンドウもペインに戻す"),
             (.deleteEmptyWorkspaces, "空になったワークスペースを自動的に削除する"),
             (.autoHideNewWorkspaces, "新しいワークスペースではタブバーを自動的に隠す"),
             (.wrapCrowdedTabs, "タブが収まらないときは2段にする"),
+            (.showTabIconsOnly, "タブにアイコンだけを表示する（ウィンドウ名を隠す）"),
         ]
         for (setting, title) in settings {
             let item = menu.addItem(withTitle: L(title), action: #selector(toggleSetting(_:)), keyEquivalent: "")
@@ -407,6 +455,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.representedObject = setting.rawValue
             item.state = isSettingEnabled(setting) ? .on : .off
         }
+        let moveAction = menu.addItem(withTitle: L("ウィンドウを直接動かしたとき"), action: nil, keyEquivalent: "")
+        let moveMenu = NSMenu()
+        for action in ManagedWindowMoveAction.allCases {
+            let title: String
+            switch action {
+            case .follow: title = "ワークスペースを追従させる"
+            case .returnToPane: title = "ペインに戻す"
+            case .nothing: title = "何もしない"
+            }
+            let item = moveMenu.addItem(
+                withTitle: L(title), action: #selector(selectManagedWindowMoveAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            item.state = action == managedWindowMoveAction ? .on : .off
+        }
+        moveAction.submenu = moveMenu
         menu.addItem(.separator())
         let outsideDrop = menu.addItem(withTitle: L("タブをワークスペースの外にドロップしたとき"), action: nil, keyEquivalent: "")
         outsideDrop.submenu = tabOutsideDropSettings.menu()
@@ -420,9 +484,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: L("閉じているワークスペース"), action: nil, keyEquivalent: "").isEnabled = false
         for workspace in closed {
-            let item = NSMenuItem(
-                title: "\(workspace.name) — " + L("%d個のウィンドウ", workspace.windows.count),
-                action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: summary(of: workspace), action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             let reopen = NSMenuItem(title: L("開く"), action: #selector(reopenSavedWorkspace(_:)), keyEquivalent: "")
             let delete = NSMenuItem(
@@ -443,6 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else { return }
         if workspace.windows.isEmpty {
             let controller = addWorkspace(name: name)
+            controller.autoGroupBundleIDs = workspace.autoGroupBundleIDs ?? []
             controller.restoreLayout(workspace)
             controller.showPicker()
         } else {
@@ -487,27 +550,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @discardableResult
     private func addWorkspace(name: String? = nil, dropPoint: NSPoint? = nil) -> WorkspaceController {
         let controller = WorkspaceController(name: name ?? nextWorkspaceName())
-        controller.session.onAddedApplication = { app in
-            if let id = app.bundleIdentifier { RecentApplications().record(id) }
-        }
         controller.session.closesWindowsOnRelease = isSettingEnabled(.closeOnRelease)
-        controller.returnsDisplacedWindows = isSettingEnabled(.returnDisplacedWindows)
+        controller.managedWindowMoveAction = managedWindowMoveAction
         controller.returnsFullScreenWindows = isSettingEnabled(.returnFullScreenWindows)
         controller.deletesWhenEmpty = isSettingEnabled(.deleteEmptyWorkspaces)
         controller.setAutoHideTabs(isSettingEnabled(.autoHideNewWorkspaces))
         controller.setWrapsCrowdedTabs(isSettingEnabled(.wrapCrowdedTabs))
+        controller.setShowsTabIconsOnly(isSettingEnabled(.showTabIconsOnly))
         controller.onClose = { [weak self] in self?.close($0) }
-        controller.onSessionChange = { [weak self] controller in
-            guard let self, !self.quitting else { return }
-            let workspace = self.savedWorkspace(controller)
-            if !workspace.windows.isEmpty { SavedLayout.upsert([workspace]) }
-        }
+        controller.onSessionChange = { [weak self] controller in self?.persist(controller) }
         controller.onRename = { [weak self] in self?.rename($0) }
         controller.onDelete = { [weak self] in self?.delete($0) }
         controller.onAutoDelete = { [weak self] controller in
             guard let self, !self.quitting, self.controllers.contains(where: { $0 === controller }) else { return }
             self.tabTransfer.clear()
             self.controllers.removeAll { $0 === controller }
+            self.autoGrouping.refresh()
         }
         controller.onSuspend = { [weak self] in
             self?.shortcutContext.reset()
@@ -519,6 +577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return self.controllers.contains { $0 !== controller && $0.session.contains(candidate) }
         }
         tabTransfer.attach(controller)
+        controller.autoGrouping = autoGrouping
         if let dropPoint,
            let screen = NSScreen.screens.first(where: { $0.frame.contains(dropPoint) }) ?? NSScreen.main
         {
@@ -568,11 +627,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if !name.isEmpty {
             SavedLayout.remove(named: controller.name)
             controller.name = name
+            persist(controller)
         }
     }
 
     @objc private func closeWorkspace() {
         if let controller = activeController { close(controller) }
+    }
+
+    @objc private func selectNextWorkspace() { activation.cycle(1) }
+    @objc private func selectPreviousWorkspace() { activation.cycle(-1) }
+
+    @objc private func chooseAutoGroupApplications() {
+        activeController?.chooseAutoGroupApplications()
+    }
+
+    /// Moves every other workspace's windows into the active one and closes the emptied workspaces.
+    @objc private func mergeAllWorkspaces() {
+        guard let destination = activeController else { return }
+        let others = controllers.filter { $0 !== destination }
+        guard !others.isEmpty else { return }
+        tabTransfer.clear()
+        cancelWindowDrag()
+        shortcutContext.reset()
+        destination.absorbWorkspaces(others)
+        for other in others {
+            controllers.removeAll { $0 === other }
+            SavedLayout.remove(named: other.name)
+            other.finishClosing()
+        }
+        autoGrouping.refresh()
+        persist(destination)
+        activation.show(destination)
     }
 
     @objc private func deleteWorkspace() {
@@ -597,7 +683,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
             }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows,
             autoHideTabs: controller.autoHideTabs, paneLayout: controller.session.customLayout,
-            pinnedPanes: controller.session.pinnedCells.sorted(), tabBarPosition: controller.tabBarPosition)
+            pinnedPanes: controller.session.pinnedCells.sorted(), tabBarPosition: controller.tabBarPosition,
+            autoGroupBundleIDs: controller.autoGroupBundleIDs.isEmpty ? nil : controller.autoGroupBundleIDs)
+    }
+
+    /// Saves a workspace that has windows or collects apps. A workspace being restored keeps its saved record.
+    private func persist(_ controller: WorkspaceController) {
+        guard !quitting, !controller.isRestoring else { return }
+        let workspace = savedWorkspace(controller)
+        if !workspace.windows.isEmpty || workspace.autoGroupBundleIDs != nil {
+            SavedLayout.upsert([workspace])
+        } else {
+            SavedLayout.setAutoGroupBundleIDs([], forWorkspaceNamed: controller.name)
+        }
     }
 
     /// Restores the workspace's windows to their original positions and closes it; closing the last workspace quits.
@@ -607,8 +705,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if forget {
             SavedLayout.remove(named: controller.name)
         } else if controllers.count > 1 {
-            let workspace = savedWorkspace(controller)
-            if !workspace.windows.isEmpty { SavedLayout.upsert([workspace]) }
+            persist(controller)
         }
         if controllers.count == 1 {
             skipLayoutSave = forget
@@ -617,7 +714,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         // The restored windows are still in the session; don't put them back into their panes.
-        controller.returnsDisplacedWindows = false
+        let moveAction = controller.managedWindowMoveAction
+        controller.managedWindowMoveAction = .nothing
         controller.returnsFullScreenWindows = false
         let failures = controller.session.restoreAll()
         if !failures.isEmpty {
@@ -627,7 +725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.addButton(withTitle: L("閉じる"))
             alert.addButton(withTitle: L("戻って再試行"))
             if alert.runModal() == .alertSecondButtonReturn {
-                controller.returnsDisplacedWindows = isSettingEnabled(.returnDisplacedWindows)
+                controller.managedWindowMoveAction = moveAction
                 controller.returnsFullScreenWindows = isSettingEnabled(.returnFullScreenWindows)
                 return
             }
@@ -635,6 +733,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controllers.removeAll { $0 === controller }
         if forget { SavedLayout.remove(named: controller.name) }
         controller.finishClosing()
+        autoGrouping.refresh()
         controllers.last?.present()
     }
 
@@ -659,6 +758,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func handleShortcut(_ event: NSEvent) -> Bool {
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if let direction = WorkspaceShortcutContext.workspaceDirection(
+            for: event, ownPID: ProcessInfo.processInfo.processIdentifier, frontPID: frontPID,
+            managedPIDs: controllers.reduce(into: Set<pid_t>()) { $0.formUnion($1.visiblePIDs) })
+        {
+            shortcutContext.reset()
+            return activation.cycle(direction) != nil
+        }
         let target =
             controllers.first { $0.canHandleShortcut && $0.window.isKeyWindow } ?? controllers.first {
                 $0.canHandleShortcut && frontPID.map($0.visiblePIDs.contains) == true
@@ -676,6 +782,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func frontApplicationChanged(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
             return
+        }
+        if app != .current, app.activationPolicy == .regular, let id = app.bundleIdentifier {
+            RecentApplications().record(id)
         }
         shortcutContext.applicationDidActivate(app.processIdentifier)
         controllers.forEach { $0.applicationDidBecomeFrontmost(app) }
@@ -699,9 +808,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.shortcutContext.reset()
                 DispatchQueue.main.async { self.controllers.forEach { $0.focusPane(at: point) } }
             case .rightMouseDown, .otherMouseDown:
-                self.leftMouseDownLocation = nil
+                self.leftMousePress.cancel()
                 self.shortcutContext.reset()
                 self.cancelWindowDrag()
+                self.controllers.forEach { $0.cancelManagedWindowDrag() }
             case .leftMouseUp:
                 self.finishLeftMousePress()
             case .keyDown:
@@ -717,18 +827,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func beginLeftMousePress() {
-        leftMouseDownLocation = NSEvent.mouseLocation
+        let point = NSEvent.mouseLocation
+        if leftMousePress.begin(at: point) {
+            controllers.forEach { $0.finishManagedWindowDrag() }
+        }
+        beginManagedWindowDrag(at: point)
     }
 
     private func finishLeftMousePress() {
-        guard let start = leftMouseDownLocation else { return }
-        leftMouseDownLocation = nil
-        guard isSettingEnabled(.returnDisplacedWindows) else { return }
-        let end = NSEvent.mouseLocation
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        guard dx * dx + dy * dy >= 16 else { return }
-        controllers.forEach { $0.windowsChangedOutsideWorkspace() }
+        guard let dragged = leftMousePress.end(at: NSEvent.mouseLocation) else { return }
+        controllers.forEach { $0.finishManagedWindowDrag() }
+        if dragged, managedWindowMoveAction == .returnToPane {
+            controllers.forEach { $0.windowsChangedOutsideWorkspace() }
+        }
+    }
+
+    @objc private func selectManagedWindowMoveAction(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let action = ManagedWindowMoveAction(rawValue: rawValue)
+        else {
+            WindowAccess.logger.error("Invalid managed window move action selection")
+            return
+        }
+        UserDefaults.standard.set(action.rawValue, forKey: "managedWindowMoveAction")
+        for controller in controllers { controller.managedWindowMoveAction = action }
+    }
+
+    private func beginManagedWindowDrag(at point: NSPoint) {
+        guard managedWindowMoveAction == .follow else { return }
+        let excluded = Set(controllers.flatMap { controller in
+            [controller.window.windowNumber, controller.toolbarPanelNumber ?? 0, controller.windowDropPanelNumber ?? 0]
+                .filter { $0 > 0 }.map { CGWindowID($0) }
+        })
+        guard let windowID = WindowAccess.windowReceivingClick(at: point, excluding: excluded) else { return }
+        guard let controller = controllers.first(where: { controller in
+            controller.session.windows.contains {
+                controller.session.access.windowID($0.candidate.element) == windowID
+            }
+        })
+        else { return }
+        do {
+            guard let window = try WindowAccess.windowServerWindows().first(where: { $0.id == windowID })
+            else { return }
+            _ = controller.beginManagedWindowDrag(windowServerWindow: window)
+        } catch {
+            WindowAccess.logger
+                .error("Could not begin managed-window sampling: \(error.localizedDescription, privacy: .public)")
+            controller.showNotice(.attention(error.localizedDescription))
+        }
     }
 
     // MARK: Window drag and drop
@@ -744,9 +890,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func pollWindowDrag() {
         let point = NSEvent.mouseLocation
         controllers.forEach { $0.updateAutoHiddenTabBar(at: point) }
+        let tracking = controllers.filter(\.isTrackingManagedWindowDrag)
+        var sampledWindows: [WindowServerWindow]?
+        if !tracking.isEmpty, NSEvent.pressedMouseButtons & 1 != 0 {
+            do {
+                let windows = try WindowAccess.windowServerWindows()
+                sampledWindows = windows
+                tracking.forEach {
+                    $0.updateManagedWindowDrag(using: windows, mouseButtonDown: true)
+                }
+            } catch {
+                tracking.forEach { $0.managedWindowDragSamplingFailed(error) }
+            }
+        }
         guard !tabTransfer.isActive else { return }
         guard !quitting else { return cancelWindowDrag() }
-        windowDrop.poll()
+        if let sampledWindows {
+            windowDrop.poll(sampledWindows: sampledWindows)
+        } else if tracking.isEmpty {
+            windowDrop.poll()
+        }
     }
 
     private func cancelWindowDrag() {
@@ -781,7 +944,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         quitting = true
         controllers.forEach { $0.quitting = true }
-        let saved = controllers.map(savedWorkspace).filter { !$0.windows.isEmpty }
+        // A workspace still asking what to restore would overwrite its saved windows with none.
+        let saved = controllers.filter { !$0.isRestoring }.map(savedWorkspace)
+            .filter { !$0.windows.isEmpty || $0.autoGroupBundleIDs != nil }
         if !saved.isEmpty && !skipLayoutSave { SavedLayout.upsert(saved) }
         let failures = controllers.flatMap { $0.session.restoreAll() }
         if !failures.isEmpty {
@@ -798,6 +963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         timer?.invalidate()
         dragTimer?.invalidate()
+        autoGrouping.stop()
         cancelWindowDrag()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }

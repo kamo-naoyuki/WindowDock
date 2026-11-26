@@ -238,6 +238,77 @@ final class WorkspaceGridView: NSView {
         }
     }
 
+    @discardableResult
+    func resizePaneBoundary(at paneIndex: Int, edge: WorkspaceResizeEdges, by delta: CGFloat) -> Bool {
+        guard delta.isFinite, areas.indices.contains(paneIndex) else { return false }
+        if let customLayout {
+            guard let geometry = customLayout.geometry(
+                in: bounds, minimums: paneMinimums, dividerThickness: dividerThickness
+            ), geometry.panes.indices.contains(paneIndex)
+            else { return false }
+            let pane = geometry.panes[paneIndex]
+            guard let divider = geometry.dividers.first(where: { divider in
+                switch edge {
+                case .left:
+                    return divider.axis == .horizontal && abs(pane.minX - divider.frame.maxX) <= 1
+                case .right:
+                    return divider.axis == .horizontal && abs(pane.maxX - divider.frame.minX) <= 1
+                case .top:
+                    return divider.axis == .vertical && abs(pane.maxY - divider.frame.minY) <= 1
+                case .bottom:
+                    return divider.axis == .vertical && abs(pane.minY - divider.frame.maxY) <= 1
+                default:
+                    return false
+                }
+            }), let resized = customLayout.resizing(divider, by: delta)
+            else { return false }
+            self.customLayout = resized
+            onCustomLayoutChange?(resized)
+            layoutCells()
+            return true
+        }
+
+        return resizeGridBoundary(at: paneIndex, edge: edge, by: delta)
+    }
+
+    private func resizeGridBoundary(at paneIndex: Int, edge: WorkspaceResizeEdges, by delta: CGFloat) -> Bool {
+        let row = paneIndex / gridSize.columns
+        let column = paneIndex % gridSize.columns
+        if edge == .left || edge == .right {
+            let divider = edge == .left ? column - 1 : column
+            guard (0 ..< gridSize.columns - 1).contains(divider) else { return false }
+            var widths = (0 ..< gridSize.columns).map { areas[$0].frame.width }
+            let total = widths[divider] + widths[divider + 1]
+            guard total >= columnMinimums[divider] + columnMinimums[divider + 1] else { return false }
+            widths[divider] = min(
+                max(widths[divider] + delta, columnMinimums[divider]),
+                total - columnMinimums[divider + 1]
+            )
+            widths[divider + 1] = total - widths[divider]
+            let sum = widths.reduce(0, +)
+            guard sum > 0 else { return false }
+            columnWeights = widths.map { $0 / sum }
+        } else if edge == .top || edge == .bottom {
+            let divider = edge == .bottom ? row : row - 1
+            guard (0 ..< gridSize.rows - 1).contains(divider) else { return false }
+            var heights = (0 ..< gridSize.rows).map { areas[$0 * gridSize.columns].frame.height }
+            let total = heights[divider] + heights[divider + 1]
+            guard total >= rowMinimums[divider] + rowMinimums[divider + 1] else { return false }
+            heights[divider] = min(
+                max(heights[divider] + delta, rowMinimums[divider]),
+                total - rowMinimums[divider + 1]
+            )
+            heights[divider + 1] = total - heights[divider]
+            let sum = heights.reduce(0, +)
+            guard sum > 0 else { return false }
+            rowWeights = heights.map { $0 / sum }
+        } else {
+            return false
+        }
+        layoutCells()
+        return true
+    }
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if let customLayout {

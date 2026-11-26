@@ -39,6 +39,8 @@ final class WindowSession {
     var windows: [ManagedWindow] { tabIDs.compactMap { managedByID[$0] } }
     var onFocusStartPage: (() -> Void)?
     var onAddedApplication: ((NSRunningApplication) -> Void)?
+    /// Called for every window that becomes a tab, however it was added.
+    var onAddedWindow: ((WindowCandidate) -> Void)?
     // The last regular-grid preset; customLayout takes precedence when present.
     private(set) var gridSize = WorkspaceGridSize.single
     private(set) var customLayout: PaneLayout?
@@ -71,7 +73,10 @@ final class WindowSession {
     private var alignedFrames: [UUID: CGRect] = [:]
     private var isSynchronizing = false
     private var resyncRequested = false
+    private var resyncExcluding: UUID?
     private var pendingWindowLaunches: [UUID: (page: UUID, pid: pid_t)] = [:]
+    /// Apps a start page is opening a window for; automatic grouping must leave their new windows to it.
+    private var pendingLaunchBundleIDs: [UUID: String] = [:]
 
     init(access: WindowAccessClient = WindowAccessClient()) {
         self.access = access
@@ -347,10 +352,28 @@ final class WindowSession {
 
     func isStartPage(_ id: UUID) -> Bool { managedByID[id] == nil && tabIDs.contains(id) }
 
+    func reserveLaunch(of bundleID: String) -> UUID {
+        let token = UUID()
+        pendingLaunchBundleIDs[token] = bundleID
+        return token
+    }
+
+    func releaseLaunch(_ token: UUID) {
+        pendingLaunchBundleIDs.removeValue(forKey: token)
+    }
+
+    /// Whether a start page is waiting for a new window of the app.
+    func isAwaitingWindow(pid: pid_t, bundleID: String?) -> Bool {
+        pendingWindowLaunches.values.contains { $0.pid == pid }
+            || bundleID.map { pendingLaunchBundleIDs.values.contains($0) } == true
+    }
+
     func launchWindows(at url: URL, from page: UUID) async throws -> [WindowCandidate] {
         try Task.checkCancellation()
         guard isStartPage(page), cells.contains(page) else { throw CancellationError() }
         let bundleID = Bundle(url: url)?.bundleIdentifier
+        let reservation = bundleID.map(reserveLaunch(of:))
+        defer { reservation.map(releaseLaunch) }
         let instances = (bundleID.map(NSRunningApplication.runningApplications(withBundleIdentifier:))
             ?? NSWorkspace.shared.runningApplications).filter { !$0.isTerminated }
         let canonical = url.resolvingSymlinksInPath().standardizedFileURL
@@ -484,7 +507,39 @@ final class WindowSession {
             originallyMinimized: try access.isMinimized(candidate.element))
         managedByID[id] = window
         onAddedApplication?(candidate.application)
+        onAddedWindow?(candidate)
         return window
+    }
+
+    /// Adds a new window as a tab without selecting it, raising windows or bringing the workspace forward.
+    /// It only fills a pane when one is empty; otherwise it waits behind the pane's shown tab.
+    /// Throws when the window can't be managed, so the caller can decide how often to report it.
+    @discardableResult
+    func addInBackground(_ candidate: WindowCandidate) throws -> UUID? {
+        guard !contains(candidate), !isClaimedElsewhere(candidate) else { return nil }
+        let window = try register(candidate, id: UUID())
+        tabIDs.append(window.id)
+        let preferred = tabSwitchCell ?? activeCell
+        let empty = cells.indices.contains(preferred) && cells[preferred] == nil
+            ? preferred : cells.indices.first { cells[$0] == nil && !pinnedCells.contains($0) }
+        if let empty {
+            cells[empty] = window.id
+            assignments[window.id] = empty
+            onChange?()
+            synchronize(bringToFront: false, raiseWindows: false, showShortcutHint: false)
+            return window.id
+        }
+        assignments[window.id] = preferred
+        onChange?()
+        if !access.isFullScreen(candidate.element), let target = currentTargets()[preferred] {
+            do {
+                try align(window, to: target)
+                alignedFrames[window.id] = try access.frame(candidate.element)
+            } catch {
+                report(error)
+            }
+        }
+        return window.id
     }
 
     private func add(_ candidates: [WindowCandidate], originalFrame: CGRect?, at insertionIndex: Int? = nil) {
@@ -651,6 +706,41 @@ final class WindowSession {
         return true
     }
 
+    /// Moves every window tab of `source` behind this session's tabs without changing what is shown here,
+    /// except that empty panes take the first moved windows. Start pages stay behind. Returns how many windows moved.
+    @discardableResult
+    func absorbWindows(from source: WindowSession) -> Int {
+        guard source !== self else { return 0 }
+        let ids = source.tabIDs.filter { id in
+            source.managedByID[id].map { !contains($0.candidate) } ?? false
+        }
+        guard !ids.isEmpty else { return 0 }
+        for id in ids {
+            source.tabIDs.removeAll { $0 == id }
+            tabIDs.append(id)
+            managedByID[id] = source.managedByID.removeValue(forKey: id)
+            minimumSizes[id] = source.minimumSizes.removeValue(forKey: id)
+            if source.constraintWarningIDs.remove(id) != nil { constraintWarningIDs.insert(id) }
+            source.cancelConstraintRecovery(for: id)
+            source.requestedFrames.removeValue(forKey: id)
+            source.suspendedWindowIDs.remove(id)
+            source.assignments.removeValue(forKey: id)
+            source.pendingClosedIDs.remove(id)
+            let preferred = tabSwitchCell ?? activeCell
+            let empty = cells.indices.contains(preferred) && cells[preferred] == nil
+                ? preferred : cells.indices.first { cells[$0] == nil && !pinnedCells.contains($0) }
+            if let empty { cells[empty] = id }
+            assignments[id] = empty ?? preferred
+        }
+        source.reconcilePanes()
+        clearPresentation()
+        // Both ownership lists are updated before observers run; never restore a moved window here.
+        source.onChange?()
+        onChange?()
+        presentVisibleWindows()
+        return ids.count
+    }
+
     private func presentVisibleWindows() {
         var errors: [Error] = []
         for window in visibleWindows {
@@ -680,10 +770,23 @@ final class WindowSession {
         synchronize(bringToFront: false)
     }
 
+    func sync(excluding id: UUID) {
+        synchronize(bringToFront: false, raiseWindows: false, excluding: id)
+    }
+
     /// Re-applies target frames and re-presents even if nothing appears to have changed.
-    func realign() {
+    func realign(raiseWindows: Bool = true) {
         requestedFrames.removeAll()
-        synchronize(bringToFront: false)
+        synchronize(bringToFront: false, raiseWindows: raiseWindows)
+    }
+
+    func alignedFrame(for id: UUID) -> CGRect? { alignedFrames[id] }
+
+    /// Makes the next refit compare a shown window with its pane, e.g. one left out of syncing while it was resized.
+    func expectPaneFrame(for id: UUID) {
+        guard cells.contains(id), let target = currentTargets()[assignments[id] ?? 0] else { return }
+        alignedFrames[id] = target
+        requestedFrames.removeValue(forKey: id)
     }
 
     /// Puts windows that were moved, resized, maximized or minimized outside WindowDock back into their panes.
@@ -801,11 +904,12 @@ final class WindowSession {
     }
 
     private func synchronize(
-        bringToFront: Bool, raiseWindows: Bool = true, showShortcutHint: Bool = true) {
+        bringToFront: Bool, raiseWindows: Bool = true, showShortcutHint: Bool = true, excluding: UUID? = nil) {
         guard !windows.isEmpty else { return }
         // A resize event (e.g. the zoom animation) can arrive while syncing; rerun afterwards so the final frame isn't lost.
         guard !isSynchronizing else {
             resyncRequested = true
+            resyncExcluding = excluding
             return
         }
         isSynchronizing = true
@@ -813,7 +917,11 @@ final class WindowSession {
             isSynchronizing = false
             if resyncRequested {
                 resyncRequested = false
-                DispatchQueue.main.async { [weak self] in self?.synchronize(bringToFront: false) }
+                let excluding = resyncExcluding
+                resyncExcluding = nil
+                DispatchQueue.main.async { [weak self] in
+                    self?.synchronize(bringToFront: false, excluding: excluding)
+                }
             }
         }
         var retryingWindows: Set<UUID> = []
@@ -835,13 +943,16 @@ final class WindowSession {
                 onMessage?(.attention(L("分割表示の領域を取得できませんでした。")))
                 return
             }
-            let changed = windows.contains { requestedFrames[$0.id] != targets[assignments[$0.id] ?? 0] }
+            let changed = windows.contains {
+                $0.id != excluding && requestedFrames[$0.id] != targets[assignments[$0.id] ?? 0]
+            }
             guard bringToFront || changed || !retryingWindows.isEmpty || rejectedWindows != nil else { return }
             var errors: [Error] = []
             var actualFrames: [UUID: CGRect] = [:]
             var mismatches: Set<UUID> = []
             let visibleIDs = Set(visibleWindows.map(\.id))
-            let order = windows.filter { !visibleIDs.contains($0.id) } + presentationOrder
+            let order = windows.filter { $0.id != excluding && !visibleIDs.contains($0.id) }
+                + presentationOrder.filter { $0.id != excluding }
             for window in order {
                 // Native full-screen windows live in another Space and cannot be fitted until they leave it.
                 guard !access.isFullScreen(window.candidate.element) else {
@@ -887,6 +998,13 @@ final class WindowSession {
                 } catch {
                     cancelConstraintRecovery(for: window.id)
                     requestedFrames.removeValue(forKey: window.id)
+                    errors.append(error)
+                }
+            }
+            if let excluding, let leader = managedByID[excluding] {
+                do {
+                    actualFrames[excluding] = try access.frame(leader.candidate.element)
+                } catch {
                     errors.append(error)
                 }
             }

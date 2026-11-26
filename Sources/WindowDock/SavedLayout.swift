@@ -17,6 +17,8 @@ struct SavedWorkspace: Codable {
     var paneLayout: PaneLayout?
     var pinnedPanes: [Int]?
     var tabBarPosition: TabBarPosition? = nil
+    /// Apps whose new windows are collected into this workspace.
+    var autoGroupBundleIDs: [String]? = nil
 
     var gridSize: WorkspaceGridSize? {
         guard let columns, let rows else { return nil }
@@ -48,6 +50,14 @@ enum SavedLayout {
 
     static func remove(named name: String) {
         save(load().filter { $0.name != name })
+    }
+
+    /// Updates only the apps collected by an existing saved workspace.
+    static func setAutoGroupBundleIDs(_ ids: [String], forWorkspaceNamed name: String) {
+        var all = load()
+        guard let index = all.firstIndex(where: { $0.name == name }) else { return }
+        all[index].autoGroupBundleIDs = ids.isEmpty ? nil : ids
+        save(all)
     }
 
     static func load() -> [SavedWorkspace] {
