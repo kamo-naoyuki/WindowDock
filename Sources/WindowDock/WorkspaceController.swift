@@ -76,10 +76,12 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     var onExternalTabDrop: ((String, NSButton?, Int?, Int?) -> Bool)?
     /// Whether another workspace already manages the candidate window.
     var isRegisteredElsewhere: ((WindowCandidate) -> Bool)?
+    private let audio: AudioPlaybackMonitor
 
-    init(name: String, access: WindowAccessClient = WindowAccessClient()) {
+    init(name: String, access: WindowAccessClient = WindowAccessClient(), audio: AudioPlaybackMonitor? = nil) {
         self.name = name
         session = WindowSession(access: access)
+        self.audio = audio ?? .shared
         window = WorkspaceWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -89,6 +91,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         super.init()
         buildWindow()
         wireSession()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(audioPlaybackChanged), name: AudioPlaybackMonitor.didChange, object: self.audio
+        )
+        self.audio.start()
     }
 
     // MARK: Setup
@@ -318,7 +324,23 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             workspace.setGrid(session.gridSize, activeCell: session.activeCell)
         }
         workspace.setPaneIndicators(switchTargetCell: session.tabSwitchCell, pinnedCells: session.pinnedCells)
-        let items = tabIDs.map { id in
+        let tabs = workspace.setTabs(tabItems())
+        for (index, tab) in tabs.enumerated() {
+            tab.select.target = self
+            tab.select.action = #selector(selectTab(_:))
+            tab.select.tag = index
+            tab.close.target = self
+            tab.close.action = #selector(removeTab(_:))
+            tab.close.tag = index
+        }
+        workspace.showManagedWindows(!tabIDs.isEmpty)
+        updateStartPages()
+        if let selected = tabs.first(where: { $0.id == session.selectedID }) { workspace.revealTab(selected.view) }
+        window.invalidateShadow()
+    }
+
+    private func tabItems() -> [WorkspaceTabItem] {
+        tabIDs.map { id in
             let selected = id == session.selectedID
             let cell = session.cellIndex(for: id)
             let displayed = session.isSplit && cell != nil
@@ -333,30 +355,28 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             let title = candidate.map { $0.title.isEmpty ? $0.application.localizedName ?? "App" : $0.title }
                 ?? L("新しいタブ")
             let pinned = cell.map { session.isPanePinned($0) } ?? false
+            let playingAudio = candidate.map {
+                audio.audibleApplications.contains($0.application.processIdentifier)
+            } ?? false
             return WorkspaceTabItem(
                 id: id,
                 title: side + title,
-                toolTip: side + (candidate?.label ?? title) + (pinned ? " · " + L("固定中") : ""),
+                toolTip: side + (candidate?.label ?? title) + (pinned ? " · " + L("固定中") : "")
+                    + (playingAudio ? " · " + L("アプリが音声を再生中") : ""),
                 icon: candidate?.application.icon,
                 selected: selected,
                 displayed: displayed,
                 pinned: pinned,
-                tabSwitchTarget: cell == session.tabSwitchCell
+                tabSwitchTarget: cell == session.tabSwitchCell,
+                playingAudio: playingAudio
             )
         }
-        let tabs = workspace.setTabs(items)
-        for (index, tab) in tabs.enumerated() {
-            tab.select.target = self
-            tab.select.action = #selector(selectTab(_:))
-            tab.select.tag = index
-            tab.close.target = self
-            tab.close.action = #selector(removeTab(_:))
-            tab.close.tag = index
-        }
-        workspace.showManagedWindows(!tabIDs.isEmpty)
-        updateStartPages()
-        if let selected = tabs.first(where: { $0.id == session.selectedID }) { workspace.revealTab(selected.view) }
-        window.invalidateShadow()
+    }
+
+    /// Reconfigures the tabs in place: `renderTabs` would end a tab drag and scroll to the selected tab.
+    @objc private func audioPlaybackChanged() {
+        guard !quitting else { return }
+        workspace.updateTabs(tabItems())
     }
 
     private func updateStartPages() {

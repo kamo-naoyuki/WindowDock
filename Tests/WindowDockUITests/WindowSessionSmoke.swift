@@ -393,6 +393,63 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    /// Speakers follow the applications playing audio, through tab re-renders and during a tab drag.
+    static func runAudioIndicatorChecks() -> [String] {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
+            return ["audio indicator fixture needs the Dock as a second application"]
+        }
+        var failures: [String] = []
+        let model = Model(windowCount: 2)
+        var playing: Set<pid_t> = []
+        let audio = AudioPlaybackMonitor(hold: 0, playingApplications: { playing })
+        let controller = WorkspaceController(name: "Audio indicator", access: access(for: model), audio: audio)
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        guard let chrome = controller.window.contentView as? WorkspaceChromeView else {
+            return ["audio indicator fixture could not find its chrome"]
+        }
+        controller.session.add([
+            WindowCandidate(element: model.windows[0].element, application: .current, title: "Playing probe"),
+            WindowCandidate(element: model.windows[1].element, application: dock, title: "Silent probe"),
+        ])
+        chrome.layoutSubtreeIfNeeded()
+        let buttons = chrome.tabs.arrangedSubviews.compactMap {
+            ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? WorkspaceTabButton
+        }
+        guard buttons.count == 2 else { return ["audio indicator fixture expected 2 tabs, found \(buttons.count)"] }
+        let described = L("アプリが音声を再生中")
+        func expect(_ expected: [Bool], _ step: String) {
+            let speakers = buttons.map { $0.audioIndicator?.isHidden == false }
+            let toolTips = buttons.map { $0.toolTip?.contains(described) == true }
+            if speakers != expected || toolTips != expected {
+                failures.append("\(step): speakers \(speakers), tooltips \(toolTips), expected \(expected)")
+            }
+        }
+        expect([false, false], "before playback")
+        playing = [getpid()]
+        audio.refresh()
+        expect([true, false], "while this application plays")
+        controller.session.select(controller.session.windows[1].id)
+        expect([true, false], "after selecting another tab")
+        guard let dragged = buttons[1].superview as? WorkspaceTabGroup else {
+            return failures + ["audio indicator fixture lost its second tab"]
+        }
+        chrome.beginTabDrag(source: buttons[1], token: "audio-indicator-probe")
+        playing = [dock.processIdentifier]
+        audio.refresh()
+        expect([false, true], "during a tab drag")
+        if !dragged.isFloating || chrome.tabs.arrangedSubviews.contains(dragged) {
+            failures.append("a playback change ended the tab drag")
+        }
+        chrome.endTabDrag()
+        playing = []
+        audio.refresh()
+        expect([false, false], "after playback")
+        return failures
+    }
+
     static func runNestedPaneUIChecks() -> [String] {
         var failures: [String] = []
         let model = Model(windowCount: 3)

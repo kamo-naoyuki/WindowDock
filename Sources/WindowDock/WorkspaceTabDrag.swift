@@ -173,6 +173,33 @@ final class WorkspaceTabGroup: NSStackView {
     }
 }
 
+/// Keeps the title and image clear of indicators drawn over the button's trailing edge.
+final class WorkspaceTabButtonCell: NSButtonCell {
+    var trailingInset: CGFloat = 0
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        var frame = cellFrame
+        frame.size.width = max(0, frame.width - trailingInset)
+        super.drawInterior(withFrame: frame, in: controlView)
+    }
+
+    override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+        // Beside an indicator, a title without room for its ellipsis would leave just a sliver of a glyph.
+        if trailingInset > 0, frame.width < title.size().width {
+            let ellipsis = NSAttributedString(
+                string: "…", attributes: title.length > 0 ? title.attributes(at: 0, effectiveRange: nil) : [:]
+            )
+            if frame.width < ellipsis.size().width { return .zero }
+        }
+        return super.drawTitle(title, withFrame: frame, in: controlView)
+    }
+}
+
+/// Draws over a tab without taking its clicks or drags.
+private final class WorkspaceTabIndicatorView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// Tracks internal tab drags without requiring the destination to be the frontmost native window.
 final class WorkspaceTabButton: NSButton {
     weak var chrome: WorkspaceChromeView?
@@ -183,6 +210,49 @@ final class WorkspaceTabButton: NSButton {
     var acceptsTabDrop: ((NSPasteboard, NSButton?) -> Bool)?
     var updateTabDrop: ((NSPasteboard, NSButton?, NSPoint) -> Bool)?
     var performTabDrop: ((NSPasteboard, NSButton?, NSPoint) -> Bool)?
+    /// Shows a speaker at the trailing edge, like browser tabs playing audio.
+    var showsAudioIndicator = false {
+        didSet { if showsAudioIndicator != oldValue { updateAudioIndicator() } }
+    }
+    /// Whether the tab's pin badge covers the button's top trailing corner; the speaker moves clear of it.
+    var hasPinBadge = false {
+        didSet { if hasPinBadge != oldValue { updateAudioIndicator() } }
+    }
+    private(set) var audioIndicator: NSImageView?
+
+    override class var cellClass: AnyClass? {
+        get { WorkspaceTabButtonCell.self }
+        set {}
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateAudioIndicator()
+    }
+
+    private func updateAudioIndicator() {
+        let pinWidth: CGFloat = hasPinBadge ? 14 : 0
+        // A narrow tab keeps its application icon instead.
+        let visible = showsAudioIndicator && bounds.width >= 36 + pinWidth
+        if visible, audioIndicator == nil {
+            let indicator = WorkspaceTabIndicatorView()
+            indicator.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: nil)
+            indicator.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+            indicator.imageScaling = .scaleProportionallyDown
+            indicator.contentTintColor = .secondaryLabelColor
+            indicator.setAccessibilityElement(false)
+            addSubview(indicator)
+            audioIndicator = indicator
+        }
+        audioIndicator?.isHidden = !visible
+        audioIndicator?.frame = NSRect(x: bounds.maxX - pinWidth - 17, y: (bounds.height - 16) / 2,
+                                       width: 16, height: 16)
+        let inset = visible ? pinWidth + 20 : 0
+        if let cell = cell as? WorkspaceTabButtonCell, cell.trailingInset != inset {
+            cell.trailingInset = inset
+            needsDisplay = true
+        }
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? { makeContextMenu?() }
 

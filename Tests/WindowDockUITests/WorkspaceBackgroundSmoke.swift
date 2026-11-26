@@ -89,9 +89,13 @@ enum WorkspaceBackgroundSmoke {
             let constraintOnly = CommandLine.arguments.contains("--constraint-notice-only")
             let enhancedUIOnly = CommandLine.arguments.contains("--enhanced-ui-only")
             let emptyWorkspaceOnly = CommandLine.arguments.contains("--empty-workspace-only")
+            let audioOnly = CommandLine.arguments.contains("--audio-indicator-only")
             let failures: [String]
             if CommandLine.arguments.contains("--new-tab-only") {
                 failures = WindowSessionSmoke.runNewTabChecks() + checkThumbnailSelection()
+            } else if audioOnly {
+                failures = checkAudioIndicatorLayout() + WindowSessionSmoke.runAudioIndicatorChecks()
+                    + checkAudioPlaybackDetection()
             } else if emptyWorkspaceOnly {
                 failures = WindowSessionSmoke.runEmptyWorkspaceDeletionChecks() + checkWindowPicker()
             } else if enhancedUIOnly {
@@ -130,6 +134,8 @@ enum WorkspaceBackgroundSmoke {
                         .runChecks() + checkWindowPicker() + checkThumbnailSelection() + runChecks() +
                         checkCompactLayout()
                         + checkGridLayout() + checkTabMoveRouting() + checkNativeWindowDrops()
+                        + checkAudioIndicatorLayout() + WindowSessionSmoke.runAudioIndicatorChecks()
+                        + checkAudioPlaybackDetection()
             }
             if let previous {
                 if #available(macOS 14, *) { application.yieldActivation(to: previous) }
@@ -139,6 +145,8 @@ enum WorkspaceBackgroundSmoke {
                 print(
                     CommandLine.arguments.contains("--new-tab-only")
                         ? "PASS: inline start pages, selection, replacement, failure and closing"
+                        : audioOnly
+                        ? "PASS: tab speakers for applications playing audio"
                         : emptyWorkspaceOnly
                         ? "PASS: empty-workspace deletion, last-tab transfer and deferred cleanup"
                         : nestedOnly
@@ -159,7 +167,7 @@ enum WorkspaceBackgroundSmoke {
                         ?
                         "PASS: front-window-only app activation, Dock menu workspace switch, titlebar focus, auto-hidden tab bar click, tab drop key and activation refit"
                         :
-                        "PASS: window drop feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking and resize")
+                        "PASS: window drop feedback, 2D grid, tab moves, picker, lifecycle, compact layout, masking, resize and tab speakers")
                 exit(0)
             }
             for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
@@ -1115,6 +1123,197 @@ enum WorkspaceBackgroundSmoke {
             || moves[0].1 != 2 || chrome.gridAreas.contains(where: { !$0.subviews.isEmpty })
         {
             failures.append("tab drop into a nested pane failed to route or clean up all leaf overlays")
+        }
+        return failures
+    }
+
+    /// Speakers on the tabs of applications playing audio: placement beside the close button and the pin badge, the
+    /// title kept clear of them, crowded tabs, and updates during a tab drag.
+    @MainActor
+    private static func checkAudioIndicatorLayout() -> [String] {
+        var failures: [String] = []
+        let host = WorkspaceWindow(
+            contentRect: NSRect(x: 120, y: 120, width: 960, height: 640),
+            styleMask: [.borderless, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false)
+        host.isReleasedWhenClosed = false
+        host.isOpaque = false
+        host.backgroundColor = .clear
+        let chrome = WorkspaceChromeView(frame: .zero)
+        chrome.workspaceButton.title = "Workspace 1"
+        host.contentView = chrome
+        defer { host.close() }
+        /// Pixels the button draws between `minX` and `maxX`, leaving out its speaker.
+        func ink(_ button: WorkspaceTabButton, from minX: CGFloat, to maxX: CGFloat) -> Int {
+            let indicator = button.audioIndicator
+            let hidden = indicator?.isHidden ?? true
+            indicator?.isHidden = true
+            defer { indicator?.isHidden = hidden }
+            guard let bitmap = button.bitmapImageRepForCachingDisplay(in: button.bounds) else { return -1 }
+            button.cacheDisplay(in: button.bounds, to: bitmap)
+            let scale = CGFloat(bitmap.pixelsWide) / button.bounds.width
+            let columns = max(0, Int(minX * scale)) ..< min(bitmap.pixelsWide, Int((maxX * scale).rounded(.up)))
+            var count = 0
+            for y in 0 ..< bitmap.pixelsHigh {
+                for x in columns where (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 { count += 1 }
+            }
+            return count
+        }
+        let icon = NSWorkspace.shared.icon(forFile: "/System/Library/CoreServices/Finder.app")
+        let title = "Application — A window title long enough to be truncated in its tab"
+        var items = [
+            WorkspaceTabItem(id: UUID(), title: title, icon: icon, selected: true),
+            WorkspaceTabItem(id: UUID(), title: title, icon: icon, selected: false, playingAudio: true),
+            WorkspaceTabItem(id: UUID(), title: title, icon: icon, selected: false, pinned: true, playingAudio: true),
+        ]
+        let tabs = chrome.setTabs(items)
+        chrome.layoutSubtreeIfNeeded()
+        let widths = tabs.map(\.view.frame.width)
+        if widths.contains(where: { abs($0 - widths[0]) > 0.5 }) {
+            failures.append("speakers changed tab widths: \(widths)")
+        }
+        if tabs[0].select.audioIndicator?.isHidden == false {
+            failures.append("a silent tab shows a speaker")
+        }
+        for (index, tab) in tabs.enumerated().dropFirst() {
+            let select = tab.select
+            guard let indicator = select.audioIndicator, !indicator.isHidden, indicator.superview === select else {
+                failures.append("tab \(index) playing audio shows no speaker")
+                continue
+            }
+            let frame = indicator.frame
+            let pin = tab.view.subviews.compactMap { $0 as? NSImageView }.first { !$0.isHidden }
+                .map { tab.view.convert($0.frame, to: select) }
+            let trailing = pin?.minX ?? select.bounds.maxX
+            if !select.bounds.contains(frame) || trailing - frame.maxX < 0 || trailing - frame.maxX > 4
+                || abs(frame.midY - select.bounds.midY) > 0.5
+            {
+                failures.append("tab \(index): speaker \(frame) is not centered before \(trailing) in \(select.bounds)")
+            }
+            if let pin, pin.intersects(frame) {
+                failures.append("tab \(index): speaker \(frame) overlaps the pin badge \(pin)")
+            }
+            if ink(select, from: frame.minX, to: select.bounds.maxX) != 0 {
+                failures.append("tab \(index): the title runs under the speaker")
+            }
+            if ink(select, from: 18, to: frame.minX) == 0 {
+                failures.append("tab \(index): the title disappeared beside the speaker")
+            }
+        }
+        if let speaker = tabs[1].select.audioIndicator?.frame,
+           ink(tabs[0].select, from: speaker.minX, to: tabs[0].select.bounds.maxX) <= 0
+        {
+            failures.append("a silent tab's title stops short of the speaker's place")
+        }
+
+        chrome.beginTabDrag(source: tabs[1].select, token: "audio-indicator-probe")
+        items[0].playingAudio = true
+        items[1].playingAudio = false
+        chrome.updateTabs(items)
+        if !tabs[1].view.isFloating || chrome.tabs.arrangedSubviews.contains(tabs[1].view) {
+            failures.append("updating speakers ended a tab drag")
+        }
+        if tabs[0].select.audioIndicator?.isHidden != false || tabs[1].select.audioIndicator?.isHidden == false {
+            failures.append("speakers did not follow playback during a tab drag")
+        }
+        chrome.endTabDrag()
+
+        let crowded = chrome.setTabs((0 ..< 25).map { _ in
+            WorkspaceTabItem(id: UUID(), title: title, icon: icon, selected: false, playingAudio: true)
+        })
+        chrome.layoutSubtreeIfNeeded()
+        if let tab = crowded.first(where: {
+            $0.select.audioIndicator?.isHidden == false
+                || ($0.select.cell as? WorkspaceTabButtonCell)?.trailingInset != 0
+        }) {
+            failures.append("a crowded \(tab.select.frame.width)pt tab gave its app icon's place to a speaker")
+        }
+
+        // Narrow tabs have room for the speaker but not for an ellipsis; no sliver of the title may remain.
+        let smallIcon = icon.copy() as? NSImage
+        smallIcon?.size = NSSize(width: 16, height: 16)
+        for width: CGFloat in [40, 44] {
+            let button = WorkspaceTabButton(title: title, target: nil, action: nil)
+            button.isBordered = false
+            button.alignment = .left
+            button.imageHugsTitle = true
+            button.lineBreakMode = .byTruncatingTail
+            button.font = .systemFont(ofSize: 12, weight: .semibold)
+            button.image = smallIcon
+            button.imagePosition = .imageLeading
+            button.frame = NSRect(x: 20, y: 60, width: width, height: 28)
+            chrome.addSubview(button)
+            button.showsAudioIndicator = true
+            if button.audioIndicator?.isHidden != false || ink(button, from: 0, to: 18) == 0 {
+                failures.append("a \(width)pt tab did not show both its app icon and speaker")
+            }
+            if ink(button, from: 18, to: width) != 0 {
+                failures.append("a \(width)pt tab left a sliver of its title beside the speaker")
+            }
+            button.removeFromSuperview()
+        }
+        return failures
+    }
+
+    /// A child process's silent output counts as this application's playback, through Core Audio notifications alone.
+    @MainActor
+    private static func checkAudioPlaybackDetection() -> [String] {
+        guard #available(macOS 14.4, *) else {
+            print("Skipping audio playback detection: Core Audio process objects need macOS 14.4")
+            return []
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("WindowDockSilence-\(getpid()).wav")
+        let player = Process()
+        defer {
+            if player.isRunning { player.terminate() }
+            try? FileManager.default.removeItem(at: url)
+        }
+        // Six seconds of 16-bit mono silence at 44.1 kHz, which outlasts the wait for an output device to start.
+        let samples = 44100 * 6
+        var wav = Data()
+        func append<T: FixedWidthInteger>(_ value: T) {
+            withUnsafeBytes(of: value.littleEndian) { wav.append(contentsOf: $0) }
+        }
+        // A PCM WAVE header: format 1, one channel, 44.1 kHz, 2-byte frames of 16-bit samples.
+        wav.append(contentsOf: Array("RIFF".utf8))
+        append(UInt32(36 + samples * 2))
+        wav.append(contentsOf: Array("WAVEfmt ".utf8))
+        append(UInt32(16))
+        append(UInt16(1))
+        append(UInt16(1))
+        append(UInt32(44100))
+        append(UInt32(44100 * 2))
+        append(UInt16(2))
+        append(UInt16(16))
+        wav.append(contentsOf: Array("data".utf8))
+        append(UInt32(samples * 2))
+        wav.append(Data(count: samples * 2))
+        do { try wav.write(to: url) } catch { return ["could not write a silent sound: \(error)"] }
+
+        let monitor = AudioPlaybackMonitor(hold: 0.3)
+        monitor.start()
+        func wait(until condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+            return condition()
+        }
+        if monitor.audibleApplications.contains(getpid()) {
+            return ["this application counted as playing audio before it played any"]
+        }
+        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        player.arguments = ["-v", "0", url.path]
+        do { try player.run() } catch { return ["could not start afplay: \(error)"] }
+        var failures: [String] = []
+        if !wait(until: { monitor.audibleApplications.contains(getpid()) }) {
+            failures.append(
+                "a child process playing audio did not mark this application as playing"
+                    + (player.isRunning ? "" : " (afplay exited with \(player.terminationStatus))"))
+        }
+        player.terminate()
+        player.waitUntilExit()
+        if !wait(until: { !monitor.audibleApplications.contains(getpid()) }) {
+            failures.append("this application still counted as playing after its child process stopped")
         }
         return failures
     }

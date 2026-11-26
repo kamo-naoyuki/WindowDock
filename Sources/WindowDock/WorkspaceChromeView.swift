@@ -80,6 +80,7 @@ struct WorkspaceTabItem {
     var displayed = false
     var pinned = false
     var tabSwitchTarget = false
+    var playingAudio = false
 }
 
 final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
@@ -1591,15 +1592,22 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         return tabSizing
     }
 
+    /// Updates the current tabs in place. Unlike `setTabs`, it keeps a tab drag going and doesn't animate.
+    func updateTabs(_ items: [WorkspaceTabItem]) {
+        guard items.map(\.id) == tabSizing.map(\.id) else { return }
+        for (tab, item) in zip(tabSizing, items) { configure(tab, for: item) }
+    }
+
     @discardableResult
     func appendTab(
         id: UUID = UUID(), title: String, toolTip: String? = nil, icon: NSImage? = nil, selected: Bool,
         displayed: Bool = false,
-        pinned: Bool = false, tabSwitchTarget: Bool = false) -> Tab {
+        pinned: Bool = false, tabSwitchTarget: Bool = false, playingAudio: Bool = false) -> Tab {
         endCloseSizing()
         let tab = makeTab(id: id)
         configure(tab, for: WorkspaceTabItem(id: id, title: title, toolTip: toolTip, icon: icon, selected: selected,
-                                             displayed: displayed, pinned: pinned, tabSwitchTarget: tabSwitchTarget))
+                                             displayed: displayed, pinned: pinned, tabSwitchTarget: tabSwitchTarget,
+                                             playingAudio: playingAudio))
         tabSizing.append(tab)
         tabs.addArrangedSubview(tab.view)
         tabScroll.isHidden = false
@@ -1705,6 +1713,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         tab.close.toolTip = closeTitle
         tab.close.setAccessibilityLabel(closeTitle)
         tab.pin.isHidden = !item.pinned
+        select.hasPinBadge = item.pinned
+        select.showsAudioIndicator = item.playingAudio
         tab.view.setSelectedAppearance(item.selected)
         tab.view.layer?.borderWidth = item.tabSwitchTarget ? 2 : (item.displayed ? 1 : 0)
         tab.view.layer?.borderColor = (item.pinned ? NSColor.systemOrange : NSColor.controlAccentColor)

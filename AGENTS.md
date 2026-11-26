@@ -49,6 +49,7 @@ When you find or are asked to fix a bug, follow this order:
   - `WindowDragTracking.swift` – `WindowServerWindow` and `WorkspaceWindowDragTracker`, which detects foreign-window drags from sampled WindowServer frames.
   - `WorkspaceTabDragRoute.swift` – decides whether a dragged tab stays in its workspace, transfers to another, or does nothing.
   - `WindowHitTesting.swift` – recognizes a click on an own window that just activated the app.
+  - `AudioPlayback.swift` – which applications a process playing audio counts for (itself, its responsible process, their ancestors), and how long a stopped application stays audible.
 - `WindowDock` (`Sources/WindowDock`): the app (depends on Core and Sparkle).
 
 ## Where things are (`Sources/WindowDock`)
@@ -62,7 +63,8 @@ When you find or are asked to fix a bug, follow this order:
 | All Accessibility API calls (`WindowAccess`), `WindowAccessClient` (injectable for tests), `WindowCandidate`, window scanning, window-server list | `Accessibility.swift` |
 | Workspace NSWindow (`WorkspaceWindow`), resize/drag background view, coverage | `WorkspaceBackgroundView.swift` |
 | Tab bar, grid selectors, notices, drop-target UI, tab context menu (`WorkspaceChromeView`), `WorkspaceNotice`, `WorkspaceSplitLayout` | `WorkspaceChromeView.swift` |
-| Tab button, tab-move drag session, per-pane tab drop overlay | `WorkspaceTabDrag.swift` |
+| Tab button (including its speaker while the app plays audio), tab-move drag session, per-pane tab drop overlay | `WorkspaceTabDrag.swift` |
+| Applications playing audio, from Core Audio process objects (macOS 14.4+; notification-driven, no polling), for tab speakers (`AudioPlaybackMonitor`) | `AudioPlaybackMonitor.swift` |
 | Pane grid layout (`WorkspaceGridSize` up to 4×4, `WorkspaceGridView`) | `WorkspaceGridView.swift` |
 | Ctrl+Tab shortcut context, registered-window check for window drags (`WorkspaceWindowDragRegistration`) | `WorkspaceInput.swift` |
 | "Add windows" sheet | `WindowPicker.swift` |
