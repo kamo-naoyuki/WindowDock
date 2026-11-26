@@ -175,7 +175,14 @@ final class WorkspaceTabGroup: NSStackView {
 
 /// Keeps the title and image clear of indicators drawn over the button's trailing edge.
 final class WorkspaceTabButtonCell: NSButtonCell {
+    private static let combinedIconSide: CGFloat = 14
+    private static let combinedIconGap: CGFloat = 3
+
     var trailingInset: CGFloat = 0
+    /// The windows of a combined tab, whose title is their names joined.
+    var combinedWindows: [(name: String, icon: NSImage?)] = []
+    /// The title as last drawn, with the icons and shortened names of a combined tab.
+    private(set) var drawnTitle: NSAttributedString?
 
     override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
         var frame = cellFrame
@@ -183,7 +190,41 @@ final class WorkspaceTabButtonCell: NSButtonCell {
         super.drawInterior(withFrame: frame, in: controlView)
     }
 
+    /// Shows each window of a combined tab as its icon and name, shortening the names rather than dropping the last.
+    private func combinedTitle(_ title: NSAttributedString, width: CGFloat) -> NSAttributedString? {
+        let names = combinedWindows.map(\.name)
+        guard !names.isEmpty, title.length > 0, title.string == CombinedTabTitle.joined(names) else { return nil }
+        let attributes = title.attributes(at: 0, effectiveRange: nil)
+        let font = attributes[.font] as? NSFont ?? .systemFont(ofSize: NSFont.systemFontSize)
+        let side = Self.combinedIconSide
+        let iconCount = combinedWindows.filter { $0.icon != nil }.count
+        // The slack absorbs rounding between the separately measured names and the whole title.
+        let textWidth = width - CGFloat(iconCount) * (side + Self.combinedIconGap) - 2
+        let fitted = CombinedTabTitle.fitted(names, width: textWidth) {
+            NSAttributedString(string: $0, attributes: attributes).size().width
+        }
+        let result = NSMutableAttributedString()
+        for (index, window) in combinedWindows.enumerated() {
+            if index > 0 {
+                result.append(NSAttributedString(string: CombinedTabTitle.separator, attributes: attributes))
+            }
+            if let icon = window.icon {
+                let attachment = NSTextAttachment()
+                attachment.image = icon
+                attachment.bounds = NSRect(x: 0, y: (font.capHeight - side) / 2, width: side, height: side)
+                var iconAttributes = attributes
+                iconAttributes[.attachment] = attachment
+                iconAttributes[.kern] = Self.combinedIconGap
+                result.append(NSAttributedString(string: "\u{FFFC}", attributes: iconAttributes))
+            }
+            result.append(NSAttributedString(string: fitted[index], attributes: attributes))
+        }
+        return result
+    }
+
     override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+        let title = combinedTitle(title, width: frame.width) ?? title
+        drawnTitle = title
         // Beside an indicator, a title without room for its ellipsis would leave just a sliver of a glyph.
         if trailingInset > 0, frame.width < title.size().width {
             let ellipsis = NSAttributedString(

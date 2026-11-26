@@ -202,6 +202,12 @@ private let translations: [String: [String]] = [
     "左右に分割": ["Split Left and Right", "左右分割", "좌우로 분할", "Dividir a izquierda y derecha"],
     "上下に分割": ["Split Top and Bottom", "上下分割", "상하로 분할", "Dividir arriba y abajo"],
     "ペインを閉じる": ["Close Pane", "关闭窗格", "패널 닫기", "Cerrar panel"],
+    "表示中のペインを1つのタブにまとめる": [
+        "Combine Shown Panes into One Tab", "将显示的窗格合并为一个标签页",
+        "표시 중인 패널을 하나의 탭으로 합치기", "Combinar los paneles visibles en una pestaña",
+    ],
+    "タブのまとめを解除": ["Ungroup Tab", "取消合并标签页", "탭 묶음 해제", "Desagrupar pestaña"],
+    "まとめたタブ": ["Combined Tab", "合并的标签页", "합친 탭", "Pestaña combinada"],
     "ペインの配置を変更できませんでした。": [
         "Could not change the pane layout.", "无法更改窗格布局。",
         "패널 배치를 변경하지 못했습니다.", "No se pudo cambiar la disposición de los paneles.",

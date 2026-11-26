@@ -318,6 +318,304 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    /// A combined tab keeps its own panes: selecting it shows them, any other tab brings back the normal panes, which
+    /// change independently, and ungrouping keeps what is shown.
+    static func runPaneGroupChecks() -> [String] {
+        var failures: [String] = []
+        let (session, model) = fixture(registering: [0, 1, 2, 3])
+        let ids = session.windows.map(\.id)
+        let halves = WorkspaceGridSize(columns: 2, rows: 1)
+        let single = WorkspaceGridSize(columns: 1, rows: 1)
+        session.setGrid(halves)
+        session.moveWindow(ids[0], toCell: 0)
+        session.moveWindow(ids[1], toCell: 1)
+        guard session.cells == [ids[0], ids[1]], let group = session.combineVisiblePanes() else {
+            return ["the combined tab fixture could not combine two shown panes"]
+        }
+        let groupFrames = [model.windows[0].frame, model.windows[1].frame]
+        if session.tabEntries != [group, ids[2], ids[3]] || session.groupMembers(group) != [ids[0], ids[1]]
+            || session.activeGroupID != group || session.cells != [ids[0], ids[1]] || session.canCombineVisiblePanes
+        {
+            failures.append("combining the shown panes did not make one tab that shows them")
+        }
+        if session.basePaneState.gridSize != single || session.basePaneState.customLayout != nil
+            || session.basePaneState.cells != [ids[2]] || !session.basePaneState.pinnedCells.isEmpty
+        {
+            failures.append("combining did not return the normal panes to one pane showing the next tab")
+        }
+        session.select(ids[3])
+        if session.activeGroupID != nil || session.gridSize != single || session.cells != [ids[3]] {
+            failures.append("selecting another tab after combining did not show it in one pane")
+        }
+        session.setGrid(halves)
+        session.select(group)
+        session.moveWindow(ids[3], toCell: 1)
+        if session.groupMembers(group) != [ids[0], ids[3]] || session.tabEntries != [group, ids[1], ids[2]] {
+            failures.append("moving a tab into a combined tab's pane did not swap it into the combined tab")
+        }
+        session.select(ids[2])
+        if Set(session.cells.compactMap { $0 }) != [ids[1], ids[2]] {
+            failures.append("the normal panes still showed a window that moved into the combined tab")
+        }
+        session.select(group)
+        session.moveWindow(ids[1], toCell: 1)
+        session.select(ids[2])
+        if session.activeGroupID != nil || session.gridSize != halves || session.selectedID != ids[2]
+            || Set(session.cells.compactMap { $0 }) != [ids[2], ids[3]]
+        {
+            failures.append("selecting another tab did not return to the normal panes")
+        }
+        session.setGrid(single)
+        session.select(group)
+        if session.activeGroupID != group || session.gridSize != halves || session.cells != [ids[0], ids[1]]
+            || [model.windows[0].frame, model.windows[1].frame] != groupFrames
+        {
+            failures.append("selecting the combined tab did not bring back its panes and window frames")
+        }
+        session.select(ids[3])
+        if session.activeGroupID != nil || session.gridSize != single || session.cells != [ids[3]] {
+            failures.append("changing the normal panes changed the combined tab, or returning to them lost the change")
+        }
+        session.cycle(1)
+        let cycledToGroup = session.activeGroupID == group && session.cells == [ids[0], ids[1]]
+        session.cycle(1)
+        if !cycledToGroup || session.activeGroupID != nil || session.cells != [ids[2]] {
+            failures.append("Control+Tab did not step through the combined tab like any other tab")
+        }
+
+        session.select(group)
+        model.operations.removeAll()
+        session.ungroup(group)
+        if session.activeGroupID != nil || session.isPaneGroup(group) || session.tabEntries != ids
+            || session.cells != [ids[0], ids[1]] || session.gridSize != halves || !model.operations.isEmpty
+        {
+            failures.append("ungrouping the shown combined tab changed what was shown or kept the combined tab")
+        }
+        session.select(ids[2])
+        if session.gridSize != halves || !session.cells.contains(ids[2]) {
+            failures.append("ungrouping did not keep its panes as the normal panes")
+        }
+
+        session.moveWindow(ids[0], toCell: 0)
+        session.moveWindow(ids[1], toCell: 1)
+        guard let regrouped = session.combineVisiblePanes() else {
+            return failures + ["the combined tab fixture could not combine the panes again"]
+        }
+        session.select(ids[3])
+        if !session.remove(ids[1], closeWindow: false) || session.groupMembers(regrouped) != [ids[0]]
+            || session.tabEntries != [regrouped, ids[2], ids[3]] || model.windows[1].frame != model.windows[1]
+            .originalFrame
+        {
+            failures.append("releasing a combined tab's hidden window did not leave the rest of the combined tab")
+        }
+        if !session.remove(regrouped, closeWindow: false) || session.isPaneGroup(regrouped)
+            || session.windows.map(\.id) != [ids[2], ids[3]] || model.windows[0].frame != model.windows[0].originalFrame
+        {
+            failures.append("releasing a combined tab did not release all of its windows")
+        }
+
+        let (restored, _) = fixture(registering: [0, 1, 2, 3])
+        let restoredIDs = restored.windows.map(\.id)
+        restored.restorePaneGroups([
+            PaneState(
+                gridSize: halves, customLayout: nil, cells: [restoredIDs[1], restoredIDs[0]], activeCell: 1,
+                pinnedCells: [], lastUnpinnedCell: 1, assignments: [:]),
+            // Windows already in a combined tab cannot join another one.
+            PaneState(
+                gridSize: halves, customLayout: nil, cells: [restoredIDs[0], nil], activeCell: 0,
+                pinnedCells: [], lastUnpinnedCell: 0, assignments: [:]),
+        ])
+        guard let restoredGroup = restored.tabEntries.first(where: restored.isPaneGroup) else {
+            return failures + ["restoring a combined tab did not create it"]
+        }
+        if restored.activeGroupID != nil || restored.tabEntries.count != 3
+            || restored.groupMembers(restoredGroup) != [restoredIDs[1], restoredIDs[0]]
+            || restored.cells.contains(restoredIDs[0]) || restored.cells.contains(restoredIDs[1])
+        {
+            failures.append("restoring a combined tab showed its windows in the normal panes or duplicated a window")
+        }
+        restored.select(restoredGroup)
+        if restored.cells != [restoredIDs[1], restoredIDs[0]] || restored.selectedID != restoredIDs[0] {
+            failures.append("a restored combined tab did not show its saved panes")
+        }
+        return failures
+    }
+
+    /// The combine button, the combined tab's title and context menu, and saving and restoring combined tabs.
+    static func runPaneGroupUIChecks() -> [String] {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
+            return ["combined tab fixture needs the Dock for an application with a bundle identifier"]
+        }
+        var failures: [String] = []
+        let model = Model(windowCount: 4)
+        let restoredModel = Model(windowCount: 4)
+        let controller = WorkspaceController(name: "Combined tabs", access: access(for: model))
+        let restored = WorkspaceController(name: "Restored combined tabs", access: access(for: restoredModel))
+        defer {
+            for controller in [controller, restored] {
+                controller.quitting = true
+                controller.window.orderOut(nil)
+            }
+        }
+        guard let chrome = controller.window.contentView as? WorkspaceChromeView else {
+            return ["combined tab fixture could not find its chrome"]
+        }
+        let window = controller.window
+        window.setFrame(NSRect(x: 120, y: 140, width: 900, height: 600), display: false)
+        func candidates(_ model: Model) -> [WindowCandidate] {
+            model.windows.indices.map {
+                WindowCandidate(element: model.windows[$0].element, application: dock, title: "Pane \($0)")
+            }
+        }
+        func tabButtons() -> [NSButton] {
+            chrome.layoutSubtreeIfNeeded()
+            return chrome.tabs.arrangedSubviews.compactMap {
+                ($0 as? WorkspaceTabGroup)?.arrangedSubviews.first as? NSButton
+            }.sorted { $0.tag < $1.tag }
+        }
+        func event(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(
+                with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        func combineItem() -> NSMenuItem? {
+            let menu = controller.activePaneMenu()
+            menu.update()
+            return menu.item(withTitle: L("表示中のペインを1つのタブにまとめる"))
+        }
+        controller.session.add(candidates(model))
+        chrome.layoutSubtreeIfNeeded()
+        if chrome.combineButton.isEnabled || combineItem()?.isEnabled != false {
+            failures.append("combining was available with a single pane")
+        }
+        let halves = WorkspaceGridSize(columns: 2, rows: 1)
+        let single = WorkspaceGridSize(columns: 1, rows: 1)
+        let ids = controller.session.windows.map(\.id)
+        controller.session.setGrid(halves)
+        controller.session.moveWindow(ids[0], toCell: 0)
+        controller.session.moveWindow(ids[1], toCell: 1)
+        guard chrome.combineButton.isEnabled, combineItem()?.isEnabled == true,
+              let action = chrome.combineButton.action,
+              NSApp.sendAction(action, to: chrome.combineButton.target, from: chrome.combineButton),
+              let group = controller.session.activeGroupID
+        else { return failures + ["the combine button could not combine two shown panes"] }
+        if tabButtons().map(\.title) != ["Pane 0|Pane 1", "Pane 2", "Pane 3"] {
+            failures.append("the combined tab was not one tab titled after its windows: \(tabButtons().map(\.title))")
+        }
+        if tabButtons().first?.image != nil
+            || (tabButtons().first?.cell as? WorkspaceTabButtonCell)?.combinedWindows
+            .map({ $0.icon != nil }) != [true, true]
+        {
+            failures.append("the combined tab had its own icon instead of one icon per window")
+        }
+        chrome.showsTabIconsOnly = true
+        if let iconTab = tabButtons().first,
+           iconTab.image?.isTemplate != false || !iconTab.title.isEmpty || iconTab
+           .accessibilityLabel() != "Pane 0|Pane 1"
+           || (iconTab.cell as? WorkspaceTabButtonCell)?.combinedWindows.isEmpty != true
+        {
+            failures.append("an icon-only combined tab did not show its windows' icons under its windows' names")
+        }
+        chrome.showsTabIconsOnly = false
+        if !chrome.combineButton.isEnabled || !chrome.combineButtonUngroups
+            || chrome.combineButton.accessibilityLabel() != L("タブのまとめを解除") || combineItem()?.isEnabled != false
+        {
+            failures.append("the combine button did not turn into ungrouping while a combined tab was shown")
+        }
+
+        // Save while the combined tab is shown, with different normal panes.
+        controller.session.select(ids[2])
+        controller.session.setGrid(single)
+        controller.session.select(group)
+        do {
+            let saved = try JSONDecoder().decode(
+                SavedWorkspace.self, from: JSONEncoder().encode(controller.savedWorkspace()))
+            if saved.windows.map(\.title) != ["Pane 0", "Pane 1", "Pane 2", "Pane 3"]
+                || saved.columns != 1 || saved.rows != 1
+                || saved.paneGroups != [
+                    SavedPaneGroup(columns: 2, rows: 1, cells: [0, 1], activeCell: 1, pinnedPanes: []),
+                ]
+            {
+                failures.append("saving did not keep the normal panes and the combined tab apart: \(saved)")
+            }
+            let available = candidates(restoredModel)
+            restored.restoreLayout(saved)
+            let matches = SavedLayout.matches(saved.windows, among: available) { element in
+                restoredModel.windows[try restoredModel.index(of: element)].frame
+            }
+            restored.session.add(available)
+            restored.restorePaneGroups(saved, windows: available, matches: matches)
+            let restoredIDs = restored.session.windows.map(\.id)
+            let restoredGroup = restored.session.tabEntries.first(where: restored.session.isPaneGroup)
+            if restored.session.tabEntries.count != 3 || restored.session.gridSize != single
+                || restoredGroup.map(restored.session.groupMembers) != [restoredIDs[0], restoredIDs[1]]
+            {
+                failures.append("restoring did not recreate the combined tab next to the normal panes")
+            }
+        } catch {
+            failures.append("combined tab persistence failed: \(error)")
+        }
+
+        chrome.onReorderTabs?([1, 0, 2])
+        if controller.session.tabEntries != [ids[2], group, ids[3]]
+            || controller.session.windows.map(\.id) != [ids[2], ids[0], ids[1], ids[3]]
+        {
+            failures.append("reordering the tab bar split up the combined tab's windows")
+        }
+
+        guard let groupTab = tabButtons().first(where: { $0.title.contains(CombinedTabTitle.separator) }) else {
+            return failures + ["the combined tab disappeared"]
+        }
+        let menu = groupTab.menu(for: event(.rightMouseDown))
+        menu?.update()
+        guard let ungroup = menu?.item(withTitle: L("タブのまとめを解除")), ungroup.isEnabled,
+              menu?.item(withTitle: L("ペイン")) == nil
+        else { return failures + ["the combined tab's context menu had no ungroup item, or had pane items"] }
+        guard let ungroupAction = ungroup.action, NSApp.sendAction(ungroupAction, to: ungroup.target, from: ungroup)
+        else { return failures + ["the combined tab's ungroup item could not be chosen"] }
+        if controller.session.isPaneGroup(group) || controller.session.cells != [ids[0], ids[1]]
+            || tabButtons().count != 4 || combineItem()?.isEnabled != true
+        {
+            failures.append("ungrouping from the context menu did not return to separate tabs showing the same panes")
+        }
+
+        // A narrow combined tab shortens each window's name rather than cutting off the later ones.
+        let longName = "window-driven-workspace.md — window_switcher — a document with a long name"
+        model.titles = [0: longName, 1: "ssh ks000", 2: "Pane 2", 3: "Pane 3"]
+        controller.session.pruneClosedWindows()
+        guard let combineAction = chrome.combineButton.action,
+              NSApp.sendAction(combineAction, to: chrome.combineButton.target, from: chrome.combineButton),
+              let longGroup = controller.session.activeGroupID,
+              let longTab = tabButtons().first(where: { $0.title.contains(CombinedTabTitle.separator) }),
+              let longCell = longTab.cell as? WorkspaceTabButtonCell,
+              let bitmap = longTab.bitmapImageRepForCachingDisplay(in: longTab.bounds)
+        else { return failures + ["the combine button could not combine windows with long names"] }
+        longTab.cacheDisplay(in: longTab.bounds, to: bitmap)
+        let drawnTitle = longCell.drawnTitle ?? NSAttributedString()
+        var drawnIcons = 0
+        drawnTitle.enumerateAttribute(.attachment, in: NSRange(location: 0, length: drawnTitle.length)) { value, _, _ in
+            if (value as? NSTextAttachment)?.image != nil { drawnIcons += 1 }
+        }
+        let drawn = drawnTitle.string.replacingOccurrences(of: "\u{FFFC}", with: "")
+        let drawnNames = drawn.components(separatedBy: CombinedTabTitle.separator)
+        if longTab.title != longName + "|ssh ks000" || drawnNames.count != 2 || !drawnNames[0].hasPrefix("win")
+            || !drawnNames[0].hasSuffix("…") || !drawnNames[1].hasPrefix("ssh") || drawnIcons != 2
+        {
+            failures.append(
+                "a narrow combined tab did not show every window's icon and part of its name: \(drawn), "
+                    + "\(drawnIcons) icons, width \(longTab.bounds.width)")
+        }
+        NSApp.sendAction(combineAction, to: chrome.combineButton.target, from: chrome.combineButton)
+        if controller.session.isPaneGroup(longGroup) || controller.session.cells != [ids[0], ids[1]]
+            || chrome.combineButtonUngroups || !chrome.combineButton.isEnabled
+            || chrome.combineButton.accessibilityLabel() != L("表示中のペインを1つのタブにまとめる")
+        {
+            failures.append("the combine button did not ungroup the shown combined tab")
+        }
+        return failures
+    }
+
     static func runTabSelectionFeedbackChecks() -> [String] {
         var failures: [String] = []
         for autoHide in [false, true] {
@@ -4068,6 +4366,8 @@ enum WindowSessionSmoke {
         failures += runNewTabChecks()
         failures += runNestedPaneChecks()
         failures += runPanePinChecks()
+        failures += runPaneGroupChecks()
+        failures += runPaneGroupUIChecks()
         failures += runTabSelectionFeedbackChecks()
         failures += runNestedPaneUIChecks()
         failures += runNestedPaneLimitChecks()

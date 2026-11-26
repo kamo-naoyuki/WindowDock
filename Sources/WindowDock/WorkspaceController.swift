@@ -50,6 +50,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     private var reportedManagedWindowDragSamplingFailure = false
     private var startPages: [UUID: NSHostingView<NewTabPage>] = [:]
     private var tabIDs: [UUID] { session.tabIDs }
+    /// The tab bar's entries: tabs and combined tabs.
+    private var tabEntries: [UUID] { session.tabEntries }
     private var windowObservers: [pid_t: WindowEventObserver] = [:]
     private var windowRaisePending = false
     private var windowRaiseScheduled = false
@@ -266,8 +268,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.session.setPanePinned(!self.session.isPanePinned(index), at: index)
         }
         workspace.paneForTab = { [weak self] tab in
-            guard let self, self.tabIDs.indices.contains(tab) else { return nil }
-            return self.session.cellIndex(for: self.tabIDs[tab])
+            guard let self, self.tabEntries.indices.contains(tab) else { return nil }
+            return self.session.cellIndex(for: self.tabEntries[tab])
         }
         workspace.stage.onCustomLayoutChange = { [weak self] layout in
             guard let self else { return }
@@ -287,18 +289,20 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             for id in request.ids { self.session.remove(id, closeWindow: request.closeWindows) }
         }
         workspace.onMoveTab = { [weak self] tab, cell in
-            guard let self, self.tabIDs.indices.contains(tab) else { return }
-            self.session.moveWindow(self.tabIDs[tab], toCell: cell)
+            guard let self, self.tabEntries.indices.contains(tab) else { return }
+            self.session.moveWindow(self.tabEntries[tab], toCell: cell)
         }
         workspace.onReorderTabs = { [weak self] order in
-            guard let self, order.count == self.tabIDs.count,
-                  Set(order) == Set(self.tabIDs.indices)
-            else { return }
-            self.session.reorderWindows(order.map { self.tabIDs[$0] })
+            guard let self else { return }
+            let entries = self.tabEntries
+            guard order.count == entries.count, Set(order) == Set(entries.indices) else { return }
+            self.session.reorderTabEntries(order.map { entries[$0] })
         }
         workspace.onTabDragBegin = { [weak self] index, token, button in
-            guard let self, self.restorePrompt == nil, self.tabIDs.indices.contains(index) else { return }
-            self.onTabDragBegin?(self.tabIDs[index], token, button)
+            guard let self, self.restorePrompt == nil, self.tabEntries.indices.contains(index),
+                  !self.session.isPaneGroup(self.tabEntries[index])
+            else { return }
+            self.onTabDragBegin?(self.tabEntries[index], token, button)
         }
         workspace.onTabDragEnd = { [weak self] token, board, point, cancelled in
             self?.onTabDragEnd?(token, board, point, cancelled)
@@ -309,10 +313,20 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
         workspace.onExternalTabDrop = { [weak self] token, button, index, cell in
             guard let self, self.acceptsWindowDrag else { return false }
-            return self.onExternalTabDrop?(token, button, index, cell) == true
+            return self.onExternalTabDrop?(token, button, index.map(self.session.tabIndex(forEntryAt:)), cell) == true
         }
         workspace.onPaneLayoutChange = { [weak self] in
             DispatchQueue.main.async { self?.syncIfVisible() }
+        }
+        workspace.canCombinePanes = { [weak self] in self?.canCombinePanes ?? false }
+        workspace.onCombinePanes = { [weak self] in self?.combinePanes() }
+        workspace.onUngroupShownTab = { [weak self] in
+            guard let self, let group = self.session.activeGroupID else { return }
+            self.session.ungroup(group)
+        }
+        workspace.onUngroupTab = { [weak self] tab in
+            guard let self, self.tabEntries.indices.contains(tab) else { return }
+            self.session.ungroup(self.tabEntries[tab])
         }
         workspace.onToolbarMenuTracking = { [weak self] isOpen in
             guard let self else { return }
@@ -415,41 +429,77 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             tab.close.tag = index
         }
         workspace.showManagedWindows(!tabIDs.isEmpty)
+        workspace.setCombineButton(
+            ungroups: session.activeGroupID != nil, enabled: session.activeGroupID != nil || canCombinePanes
+        )
         updateStartPages()
-        if let selected = tabs.first(where: { $0.id == session.selectedID }) { workspace.revealTab(selected.view) }
+        let selectedEntry = session.activeGroupID ?? session.selectedID
+        if let selected = tabs.first(where: { $0.id == selectedEntry }) { workspace.revealTab(selected.view) }
         window.invalidateShadow()
     }
 
     private func tabItems() -> [WorkspaceTabItem] {
-        tabIDs.map { id in
-            let selected = id == session.selectedID
-            let cell = session.cellIndex(for: id)
-            let displayed = session.isSplit && cell != nil
-            let side =
-                session.isSplit
-                    ? cell.map {
-                        session.customLayout == nil
-                            ? L("%d行%d列 · ", $0 / session.gridSize.columns + 1, $0 % session.gridSize.columns + 1)
-                            : L("ペイン %d", $0 + 1) + " · "
-                    } ?? "" : ""
-            let candidate = session.managedByID[id]?.candidate
-            let title = candidate.map { $0.title.isEmpty ? $0.application.localizedName ?? "App" : $0.title }
-                ?? L("新しいタブ")
-            let pinned = cell.map { session.isPanePinned($0) } ?? false
-            let playingAudio = candidate.map { audio.isPlaying($0) } ?? false
-            return WorkspaceTabItem(
-                id: id,
-                title: side + title,
-                toolTip: side + (candidate?.label ?? title) + (pinned ? " · " + L("固定中") : "")
-                    + (playingAudio ? " · " + L("音声を再生中") : ""),
-                icon: candidate?.application.icon,
-                selected: selected,
-                displayed: displayed,
-                pinned: pinned,
-                tabSwitchTarget: cell == session.tabSwitchCell,
-                playingAudio: playingAudio
-            )
+        tabEntries.map { id in
+            session.isPaneGroup(id) ? paneGroupTabItem(id) : tabItem(id)
         }
+    }
+
+    private func tabTitle(_ id: UUID) -> String {
+        guard let candidate = session.managedByID[id]?.candidate else { return L("新しいタブ") }
+        return candidate.title.isEmpty ? candidate.application.localizedName ?? "App" : candidate.title
+    }
+
+    private func paneGroupTabItem(_ group: UUID) -> WorkspaceTabItem {
+        let members = session.groupMembers(group)
+        let names = members.map(tabTitle)
+        let title = CombinedTabTitle.joined(names)
+        let labels = members.map { session.managedByID[$0]?.candidate.label ?? L("新しいタブ") }
+        let playingAudio = members.contains { id in
+            session.managedByID[id].map { audio.isPlaying($0.candidate) } ?? false
+        }
+        let active = session.activeGroupID == group
+        return WorkspaceTabItem(
+            id: group,
+            title: title,
+            toolTip: L("まとめたタブ") + " · " + labels.joined(separator: " | ")
+                + (playingAudio ? " · " + L("音声を再生中") : ""),
+            icon: nil,
+            selected: active,
+            displayed: active,
+            playingAudio: playingAudio,
+            paneGroup: true,
+            combinedWindows: members.indices
+                .map { (names[$0], session.managedByID[members[$0]]?.candidate.application.icon) }
+        )
+    }
+
+    private func tabItem(_ id: UUID) -> WorkspaceTabItem {
+        let selected = id == session.selectedID
+        let cell = session.cellIndex(for: id)
+        let displayed = session.isSplit && cell != nil
+        let side =
+            session.isSplit
+                ? cell.map {
+                    session.customLayout == nil
+                        ? L("%d行%d列 · ", $0 / session.gridSize.columns + 1, $0 % session.gridSize.columns + 1)
+                        : L("ペイン %d", $0 + 1) + " · "
+                } ?? "" : ""
+        let candidate = session.managedByID[id]?.candidate
+        let title = tabTitle(id)
+        let pinned = cell.map { session.isPanePinned($0) } ?? false
+        let playingAudio = candidate.map { audio.isPlaying($0) } ?? false
+        return WorkspaceTabItem(
+            id: id,
+            title: side + title,
+            toolTip: side + (candidate?.label ?? title) + (pinned ? " · " + L("固定中") : "")
+                + (playingAudio ? " · " + L("音声を再生中") : ""),
+            icon: candidate?.application.icon,
+            selected: selected,
+            displayed: displayed,
+            pinned: pinned,
+            tabSwitchTarget: session.activeGroupID == nil && cell == session.tabSwitchCell,
+            playingAudio: playingAudio
+        )
     }
 
     /// Reconfigures the tabs in place: `renderTabs` would end a tab drag and scroll to the selected tab.
@@ -1085,6 +1135,54 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         session.setPinnedCells(saved.pinnedPanes ?? [])
     }
 
+    /// The workspace's record for the saved layout: the normal panes and each combined tab.
+    func savedWorkspace() -> SavedWorkspace {
+        let windows = session.windows.filter { $0.candidate.application.bundleIdentifier != nil }
+        let base = session.basePaneState
+        let groups = session.paneGroupStates.compactMap { _, state -> SavedPaneGroup? in
+            let cells = state.cells.map { id in id.flatMap { id in windows.firstIndex { $0.id == id } } }
+            guard cells.contains(where: { $0 != nil }) else { return nil }
+            return SavedPaneGroup(
+                columns: state.gridSize.columns, rows: state.gridSize.rows, paneLayout: state.customLayout,
+                cells: cells, activeCell: state.activeCell, pinnedPanes: state.pinnedCells.sorted()
+            )
+        }
+        return SavedWorkspace(
+            name: name,
+            windows: windows.map {
+                SavedWindow(
+                    bundleID: $0.candidate.application.bundleIdentifier ?? "", title: $0.candidate.title,
+                    frame: $0.originalFrame
+                )
+            },
+            columns: base.gridSize.columns, rows: base.gridSize.rows, autoHideTabs: autoHideTabs,
+            paneLayout: base.customLayout, pinnedPanes: base.pinnedCells.sorted(), tabBarPosition: tabBarPosition,
+            autoGroupBundleIDs: autoGroupBundleIDs.isEmpty ? nil : autoGroupBundleIDs,
+            paneGroups: groups.isEmpty ? nil : groups
+        )
+    }
+
+    /// Recreates saved combined tabs once the restored windows are tabs.
+    /// `matches` maps saved window indices to indices in `windows`.
+    func restorePaneGroups(_ saved: SavedWorkspace, windows: [WindowCandidate], matches: [Int: Int]) {
+        guard let groups = saved.paneGroups, !groups.isEmpty else { return }
+        let ids = matches.compactMapValues { index -> UUID? in
+            guard windows.indices.contains(index) else { return nil }
+            return session.windows.first { $0.candidate.isSameWindow(as: windows[index]) }?.id
+        }
+        session.restorePaneGroups(groups.map { group in
+            PaneState(
+                gridSize: WorkspaceGridSize(columns: group.columns, rows: group.rows),
+                customLayout: group.paneLayout,
+                cells: group.cells.map { $0.flatMap { ids[$0] } },
+                activeCell: group.activeCell,
+                pinnedCells: Set(group.pinnedPanes),
+                lastUnpinnedCell: group.activeCell,
+                assignments: [:]
+            )
+        })
+    }
+
     var tabBarPosition: TabBarPosition { workspace.tabBarPosition }
 
     func setShowsTabIconsOnly(_ enabled: Bool) {
@@ -1202,13 +1300,21 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     @objc private func selectTab(_ sender: NSButton) {
-        guard tabIDs.indices.contains(sender.tag) else { return }
-        session.select(tabIDs[sender.tag], activate: true)
+        guard tabEntries.indices.contains(sender.tag) else { return }
+        session.select(tabEntries[sender.tag], activate: true)
     }
 
     @objc private func removeTab(_ sender: NSButton) {
-        guard tabIDs.indices.contains(sender.tag) else { return }
-        session.remove(tabIDs[sender.tag])
+        guard tabEntries.indices.contains(sender.tag) else { return }
+        session.remove(tabEntries[sender.tag])
+    }
+
+    var canCombinePanes: Bool { restorePrompt == nil && session.canCombineVisiblePanes }
+
+    /// Turns the shown panes into one combined tab.
+    func combinePanes() {
+        guard canCombinePanes else { return }
+        session.combineVisiblePanes()
     }
 
     func removeSelected() {
@@ -1293,10 +1399,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     private func autoGroupMenuItems(forTab tab: Int) -> [NSMenuItem] {
-        guard tabIDs.indices.contains(tab) else { return [] }
+        guard tabEntries.indices.contains(tab), !session.isPaneGroup(tabEntries[tab]) else { return [] }
         let available = autoGrouping != nil && restorePrompt == nil
         var items: [NSMenuItem] = []
-        if let application = session.managedByID[tabIDs[tab]]?.candidate.application {
+        if let application = session.managedByID[tabEntries[tab]]?.candidate.application {
             let toggle = NSMenuItem(
                 title: L("「%@」の新しいウィンドウを自動でこのワークスペースに追加", application.localizedName ?? L("対象アプリ")),
                 action: nil, keyEquivalent: ""
@@ -1503,7 +1609,9 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     func hideWindowDropTarget() { workspace.hideWindowDropTarget() }
 
-    func windowDropInsertionIndex(at point: NSPoint) -> Int { workspace.tabInsertionIndex(at: point) }
+    func windowDropInsertionIndex(at point: NSPoint) -> Int {
+        session.tabIndex(forEntryAt: workspace.tabInsertionIndex(at: point))
+    }
 
     func acceptsWindowDrop(at point: NSPoint) -> Bool {
         acceptsWindowDrag && workspace.acceptsWindowDrop(at: point)

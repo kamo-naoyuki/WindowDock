@@ -676,15 +676,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func savedWorkspace(_ controller: WorkspaceController) -> SavedWorkspace {
-        SavedWorkspace(
-            name: controller.name,
-            windows: controller.session.windows.compactMap { window in
-                guard let id = window.candidate.application.bundleIdentifier else { return nil }
-                return SavedWindow(bundleID: id, title: window.candidate.title, frame: window.originalFrame)
-            }, columns: controller.session.gridSize.columns, rows: controller.session.gridSize.rows,
-            autoHideTabs: controller.autoHideTabs, paneLayout: controller.session.customLayout,
-            pinnedPanes: controller.session.pinnedCells.sorted(), tabBarPosition: controller.tabBarPosition,
-            autoGroupBundleIDs: controller.autoGroupBundleIDs.isEmpty ? nil : controller.autoGroupBundleIDs)
+        controller.savedWorkspace()
     }
 
     /// Saves a workspace that has windows or collects apps. A workspace being restored keeps its saved record.

@@ -17,7 +17,10 @@ enum WorkspaceRestore {
                     controller.restoreLayout(saved)
                     // A window can be claimed elsewhere while the user reviews the later workspaces.
                     let available = windows.filter { !controller.session.isClaimedElsewhere($0) }
+                    // Match before adding: adding moves the windows away from their saved frames.
+                    let matches = saved.paneGroups == nil ? [:] : SavedLayout.matches(saved.windows, among: available)
                     if !available.isEmpty { controller.session.add(available) }
+                    controller.restorePaneGroups(saved, windows: available, matches: matches)
                 }
                 open.first?.controller.present()
                 return

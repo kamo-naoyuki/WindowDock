@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds and runs the AppKit smoke harnesses against real windows (not SwiftPM targets).
-# Usage: Tests/WindowDockUITests/run-smoke.sh [--restore-only | --finder-scan-only | --new-window-only | --new-tab-only | --tab-layout-only | --hover-help-only | --tab-move-only | --window-drop-only | --activation-only | --shortcut-only | --nested-split-only | --focus-sync-only | --window-refit-only | --window-follow-only | --constraint-notice-only | --enhanced-ui-only | --empty-workspace-only | --auto-group-only | --audio-indicator-only | --stage-manager-only]
+# Usage: Tests/WindowDockUITests/run-smoke.sh [--restore-only | --finder-scan-only | --new-window-only | --new-tab-only | --tab-layout-only | --hover-help-only | --tab-move-only | --window-drop-only | --activation-only | --shortcut-only | --nested-split-only | --focus-sync-only | --window-refit-only | --window-follow-only | --constraint-notice-only | --enhanced-ui-only | --empty-workspace-only | --auto-group-only | --audio-indicator-only | --pane-group-only | --stage-manager-only]
 # --stage-manager-only turns Stage Manager on while it runs, which rearranges the desktop, so a full run skips it.
 set -euo pipefail
 cd "$(dirname "$0")/../.."

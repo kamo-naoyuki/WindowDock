@@ -27,6 +27,18 @@ enum PaneSplitRestriction: Error {
     case minimumSize(apps: String)
 }
 
+/// A pane layout and the tabs its panes show.
+struct PaneState {
+    var gridSize: WorkspaceGridSize
+    var customLayout: PaneLayout?
+    var cells: [UUID?]
+    var activeCell: Int
+    var pinnedCells: Set<Int>
+    var lastUnpinnedCell: Int
+    /// The panes hidden tabs wait behind.
+    var assignments: [UUID: Int]
+}
+
 @MainActor
 final class WindowSession {
     private static let frameRoundingTolerance = CGSize(width: 12, height: 20)
@@ -48,6 +60,12 @@ final class WindowSession {
     private(set) var activeCell = 0
     private(set) var pinnedCells: Set<Int> = []
     private var lastUnpinnedCell = 0
+    /// Combined tabs. Each keeps the pane state it shows; the live panes are the state of `activeGroupID`.
+    /// A window belongs to at most one combined tab: the one whose panes show it.
+    private var paneGroups: [UUID: PaneState] = [:]
+    private(set) var activeGroupID: UUID?
+    /// The panes of the tabs outside combined tabs, kept while a combined tab is shown.
+    private var baseState: PaneState?
     var onChange: (() -> Void)?
     var closesWindowsOnRelease = false {
         didSet { if oldValue != closesWindowsOnRelease { onChange?() } }
@@ -133,7 +151,8 @@ final class WindowSession {
             newColumns: customLayout == nil ? size.columns : size.cellCount,
             newRows: customLayout == nil ? size.rows : 1,
             windowIDs: tabIDs,
-            assignments: assignments)
+            assignments: assignments,
+            fillIDs: paneFillIDs)
         cells = result.cells
         activeCell = result.activeCell
         assignments = result.assignments
@@ -150,7 +169,7 @@ final class WindowSession {
         let result = GridReflow.reflow(
             oldColumns: cells.count, oldCells: cells, activeCell: activeCell,
             newColumns: layout.paneCount, newRows: 1,
-            windowIDs: tabIDs, assignments: assignments)
+            windowIDs: tabIDs, assignments: assignments, fillIDs: paneFillIDs)
         pinnedCells = Set(pinnedCells.filter { $0 < layout.paneCount })
         applyPaneLayout(layout, reflow: result)
     }
@@ -171,7 +190,7 @@ final class WindowSession {
               let split = layout.splittingPane(at: index, axis: axis),
               let result = PaneReflow.split(
                   cells: cells, activeCell: activeCell, at: index,
-                  windowIDs: tabIDs, assignments: assignments)
+                  windowIDs: paneFillIDs, assignments: assignments)
         else { return .failure(.layout) }
         if !minimumSizes.isEmpty {
             let bounds = currentTargets().values.reduce(CGRect.null) { $0.union($1) }
@@ -284,6 +303,212 @@ final class WindowSession {
         }
     }
 
+    // MARK: Combined tabs
+
+    /// The tab bar entries: tabs, with each combined tab's windows replaced by the combined tab's ID.
+    var tabEntries: [UUID] {
+        guard !paneGroups.isEmpty else { return tabIDs }
+        var entries: [UUID] = []
+        var seen: Set<UUID> = []
+        for id in tabIDs {
+            if let group = groupID(containing: id) {
+                if seen.insert(group).inserted { entries.append(group) }
+            } else {
+                entries.append(id)
+            }
+        }
+        return entries
+    }
+
+    func isPaneGroup(_ id: UUID) -> Bool { paneGroups[id] != nil }
+
+    /// The combined tab whose panes show a tab.
+    func groupID(containing id: UUID) -> UUID? {
+        if let activeGroupID, cells.contains(id) { return activeGroupID }
+        return paneGroups.first { $0.key != activeGroupID && $0.value.cells.contains(id) }?.key
+    }
+
+    /// A combined tab's tabs in pane order.
+    func groupMembers(_ group: UUID) -> [UUID] {
+        guard let state = paneGroups[group] else { return [] }
+        return (group == activeGroupID ? cells : state.cells).compactMap { $0 }
+    }
+
+    /// The pane state a combined tab shows.
+    func paneState(ofGroup group: UUID) -> PaneState? {
+        group == activeGroupID ? livePaneState : paneGroups[group]
+    }
+
+    var canCombineVisiblePanes: Bool {
+        activeGroupID == nil && cells.count > 1 && cells.filter { $0 != nil }.count > 1
+    }
+
+    /// Turns the shown panes into one combined tab that keeps their layout and tabs.
+    /// The normal panes go back to one pane, showing the tab after the combined tab.
+    @discardableResult
+    func combineVisiblePanes() -> UUID? {
+        guard canCombineVisiblePanes else { return nil }
+        let members = cells.compactMap { $0 }
+        var next = 0
+        if let first = tabIDs.firstIndex(where: members.contains) {
+            var order = tabIDs.filter { !members.contains($0) }
+            order.insert(contentsOf: members, at: first)
+            tabIDs = order
+            next = first + members.count
+        }
+        let others = looseTabIDs.filter { !members.contains($0) }
+        let shown = tabIDs[next...].first(where: others.contains) ?? tabIDs[..<next].last(where: others.contains)
+        let group = UUID()
+        paneGroups[group] = livePaneState
+        baseState = PaneState(
+            gridSize: .single, customLayout: nil, cells: [shown], activeCell: 0, pinnedCells: [],
+            lastUnpinnedCell: 0, assignments: Dictionary(uniqueKeysWithValues: others.map { ($0, 0) }))
+        activeGroupID = group
+        onChange?()
+        return group
+    }
+
+    /// Turns a combined tab back into separate tabs; what is shown stays the same.
+    func ungroup(_ group: UUID) {
+        guard paneGroups.removeValue(forKey: group) != nil else { return }
+        if activeGroupID == group {
+            activeGroupID = nil
+            baseState = nil
+        }
+        onChange?()
+    }
+
+    /// The normal panes, even while a combined tab is shown.
+    var basePaneState: PaneState { baseState ?? livePaneState }
+
+    /// Each combined tab's pane state, with the live state for the shown one.
+    var paneGroupStates: [(id: UUID, state: PaneState)] {
+        tabEntries.compactMap { entry in paneState(ofGroup: entry).map { (entry, $0) } }
+    }
+
+    /// Recreates saved combined tabs (shown as inactive) from pane states whose cells hold this session's tab IDs.
+    func restorePaneGroups(_ states: [PaneState]) {
+        guard activeGroupID == nil else { return }
+        let known = Set(tabIDs)
+        var restored = false
+        for var state in states {
+            guard state.customLayout?.isValid ?? state.gridSize.isValid,
+                  state.cells.count == state.customLayout?.paneCount ?? state.gridSize.cellCount
+            else { continue }
+            let grouped = groupedIDs
+            state.cells = state.cells.map { $0.flatMap { known.contains($0) && !grouped.contains($0) ? $0 : nil } }
+            let members = state.cells.compactMap { $0 }
+            guard !members.isEmpty, Set(members).count == members.count else { continue }
+            state.activeCell = state.cells.indices.contains(state.activeCell) ? state.activeCell : 0
+            state.pinnedCells = Set(state.pinnedCells.filter { state.cells.indices.contains($0) })
+            state.assignments = state.assignments.filter { known.contains($0.key) }
+            for (index, id) in state.cells.enumerated() {
+                if let id { state.assignments[id] = index }
+            }
+            paneGroups[UUID()] = state
+            restored = true
+        }
+        guard restored else { return }
+        applyPaneState(excludingGroupedTabs(from: livePaneState))
+        clearPresentation()
+        onChange?()
+        presentVisibleWindows()
+    }
+
+    /// The tab index where a tab bar entry starts; the end for an index past the last entry.
+    func tabIndex(forEntryAt index: Int) -> Int {
+        let entries = tabEntries
+        guard entries.indices.contains(index) else { return tabIDs.count }
+        let entry = entries[index]
+        let members = paneGroups[entry] == nil ? [entry] : groupMembers(entry)
+        return tabIDs.firstIndex(where: members.contains) ?? tabIDs.count
+    }
+
+    private var groupedIDs: Set<UUID> {
+        var ids: Set<UUID> = []
+        for (group, state) in paneGroups {
+            ids.formUnion((group == activeGroupID ? cells : state.cells).compactMap { $0 })
+        }
+        return ids
+    }
+
+    /// Tabs outside combined tabs.
+    private var looseTabIDs: [UUID] {
+        let grouped = groupedIDs
+        return tabIDs.filter { !grouped.contains($0) }
+    }
+
+    /// The tabs that may fill empty panes: a combined tab only shows its own tabs.
+    private var paneFillIDs: [UUID] { activeGroupID == nil ? looseTabIDs : [] }
+
+    private var livePaneState: PaneState {
+        PaneState(
+            gridSize: gridSize, customLayout: customLayout, cells: cells, activeCell: activeCell,
+            pinnedCells: pinnedCells, lastUnpinnedCell: lastUnpinnedCell, assignments: assignments)
+    }
+
+    private func applyPaneState(_ state: PaneState) {
+        gridSize = state.gridSize
+        customLayout = state.customLayout
+        cells = state.cells
+        activeCell = cells.indices.contains(state.activeCell) ? state.activeCell : 0
+        pinnedCells = state.pinnedCells
+        lastUnpinnedCell = state.lastUnpinnedCell
+        normalizePaneSwitchState()
+        let fallback = tabSwitchCell ?? 0
+        var next: [UUID: Int] = [:]
+        for id in tabIDs {
+            if let index = cellIndex(for: id) {
+                next[id] = index
+            } else if let stored = state.assignments[id], cells.indices.contains(stored) {
+                next[id] = stored
+            } else if let current = assignments[id], cells.indices.contains(current) {
+                next[id] = current
+            } else {
+                next[id] = fallback
+            }
+        }
+        assignments = next
+    }
+
+    /// Keeps the windows of combined tabs out of normal panes; other tabs take the panes they leave.
+    private func excludingGroupedTabs(from state: PaneState) -> PaneState {
+        let grouped = groupedIDs
+        var state = state
+        for index in state.cells.indices where state.cells[index].map(grouped.contains) == true {
+            state.cells[index] = tabIDs.first { !grouped.contains($0) && !state.cells.contains($0) }
+        }
+        return state
+    }
+
+    /// Shows a combined tab's panes, or the normal panes for nil, remembering the panes shown until now.
+    /// Callers report the change and present the windows.
+    private func switchPaneState(to group: UUID?) {
+        guard group != activeGroupID, group.map({ paneGroups[$0] != nil }) ?? true else { return }
+        let live = livePaneState
+        if let activeGroupID {
+            paneGroups[activeGroupID] = live
+        } else {
+            baseState = live
+        }
+        activeGroupID = group
+        if let group, let state = paneGroups[group] {
+            applyPaneState(state)
+        } else {
+            applyPaneState(excludingGroupedTabs(from: baseState ?? live))
+            baseState = nil
+        }
+        clearPresentation()
+    }
+
+    /// The tab that replaces a removed one in an unsplit workspace: the next normal tab, none in a combined tab.
+    private func replacementTab(near index: Int) -> UUID? {
+        guard activeGroupID == nil else { return nil }
+        let loose = Set(looseTabIDs)
+        let split = min(index, tabIDs.count)
+        return tabIDs[split...].first(where: loose.contains) ?? tabIDs[..<split].last(where: loose.contains)
+    }
+
     func focusVisibleWindow(_ id: UUID) {
         if let index = cellIndex(for: id) { activateCell(index) }
     }
@@ -295,6 +520,11 @@ final class WindowSession {
             $0.pid == window.candidate.application.processIdentifier && cells.contains($0.page)
         }) else { return }
         let id = window.id
+        guard groupID(containing: id) == activeGroupID else {
+            // The window belongs to other panes; show them, as clicking its tab would.
+            select(id)
+            return
+        }
         let previousAssignment = assignments[id]
         var changed = false
         var targetCell: Int?
@@ -441,6 +671,7 @@ final class WindowSession {
     }
 
     func newTab(id: UUID = UUID()) {
+        switchPaneState(to: nil)
         tabIDs.append(id)
         let cell = tabSwitchCell ?? activeCell
         let displaced = cells[cell]
@@ -520,14 +751,25 @@ final class WindowSession {
         let window = try register(candidate, id: UUID())
         tabIDs.append(window.id)
         let preferred = tabSwitchCell ?? activeCell
-        let empty = cells.indices.contains(preferred) && cells[preferred] == nil
-            ? preferred : cells.indices.first { cells[$0] == nil && !pinnedCells.contains($0) }
-        if let empty {
-            cells[empty] = window.id
-            assignments[window.id] = empty
-            onChange?()
-            synchronize(bringToFront: false, raiseWindows: false, showShortcutHint: false)
-            return window.id
+        if activeGroupID != nil {
+            // A combined tab only shows its own windows. The new tab waits for the normal panes instead.
+            if var base = baseState,
+               let empty = base.cells.indices.first(where: { base.cells[$0] == nil && !base.pinnedCells.contains($0) })
+            {
+                base.cells[empty] = window.id
+                base.assignments[window.id] = empty
+                baseState = base
+            }
+        } else {
+            let empty = cells.indices.contains(preferred) && cells[preferred] == nil
+                ? preferred : cells.indices.first { cells[$0] == nil && !pinnedCells.contains($0) }
+            if let empty {
+                cells[empty] = window.id
+                assignments[window.id] = empty
+                onChange?()
+                synchronize(bringToFront: false, raiseWindows: false, showShortcutHint: false)
+                return window.id
+            }
         }
         assignments[window.id] = preferred
         onChange?()
@@ -543,6 +785,8 @@ final class WindowSession {
     }
 
     private func add(_ candidates: [WindowCandidate], originalFrame: CGRect?, at insertionIndex: Int? = nil) {
+        let leavesGroup = activeGroupID != nil && candidates.contains { !contains($0) }
+        if leavesGroup { switchPaneState(to: nil) }
         var added: [ManagedWindow] = []
         var errors: [Error] = []
         for candidate in candidates where !contains(candidate) {
@@ -571,12 +815,25 @@ final class WindowSession {
             cells[empty] = window.id
             assignments[window.id] = empty
         }
-        if let last = added.last { select(last.id) }
+        if let last = added.last {
+            select(last.id)
+        } else if leavesGroup {
+            onChange?()
+            presentVisibleWindows()
+        }
         report(errors)
     }
 
+    /// Selects a tab, or a combined tab by its entry ID. A tab shown by other panes brings those panes back.
     func select(_ id: UUID, activate: Bool = false) {
+        if paneGroups[id] != nil {
+            selectGroup(id, activate: activate)
+            return
+        }
         guard tabIDs.contains(id) else { return }
+        let group = groupID(containing: id)
+        let switching = group != activeGroupID
+        if switching { switchPaneState(to: group) }
         var displaced: UUID?
         if let index = cellIndex(for: id) {
             activeCell = index
@@ -584,6 +841,7 @@ final class WindowSession {
         } else {
             guard let cell = tabSwitchCell else {
                 onChange?()
+                if switching { presentVisibleWindows() }
                 return
             }
             displaced = cells[cell]
@@ -592,11 +850,19 @@ final class WindowSession {
             activeCell = cell
             lastUnpinnedCell = cell
         }
-        replacePresentation(of: displaced, with: id)
+        if !switching { replacePresentation(of: displaced, with: id) }
         onChange?()
         if activate, managedByID[id] != nil { focus(id) }
         presentVisibleWindows()
         if activate, isStartPage(id) { onFocusStartPage?() }
+    }
+
+    private func selectGroup(_ group: UUID, activate: Bool) {
+        switchPaneState(to: group)
+        onChange?()
+        if activate, let id = selectedID, managedByID[id] != nil { focus(id) }
+        presentVisibleWindows()
+        if activate, selectedID.map(isStartPage) == true { onFocusStartPage?() }
     }
 
     private func select(_ id: UUID, inCell cell: Int, activate: Bool) {
@@ -638,7 +904,9 @@ final class WindowSession {
     }
 
     func moveWindow(_ id: UUID, toCell destination: Int) {
-        guard tabIDs.contains(id), cells.indices.contains(destination) else { return }
+        guard tabIDs.contains(id), cells.indices.contains(destination),
+              [nil, activeGroupID].contains(groupID(containing: id))
+        else { return }
         if let source = cellIndex(for: id) {
             guard source != destination else { return }
             cells.swapAt(source, destination)
@@ -663,20 +931,33 @@ final class WindowSession {
         onChange?()
     }
 
+    /// Reorders the tab bar entries; each combined tab keeps its windows together.
+    func reorderTabEntries(_ orderedEntries: [UUID]) {
+        let entries = tabEntries
+        guard orderedEntries.count == entries.count, Set(orderedEntries) == Set(entries) else { return }
+        reorderWindows(orderedEntries.flatMap { entry in
+            paneGroups[entry] == nil ? [entry] : tabIDs.filter(groupMembers(entry).contains)
+        })
+    }
+
     @discardableResult
     func transferWindow(_ id: UUID, to destination: WindowSession, at insertionIndex: Int? = nil, cell: Int? = nil)
         -> Bool
     {
         let insertion = insertionIndex ?? destination.tabIDs.count
-        let targetCell = cell ?? destination.activeCell
+        // Without a pane, the tab joins the destination's normal panes rather than a combined tab.
+        let destinationState = cell == nil ? destination.baseState ?? destination.livePaneState
+            : destination.livePaneState
+        let targetCell = cell ?? destinationState.activeCell
         guard self !== destination, let index = tabIDs.firstIndex(of: id),
               managedByID[id].map({ !destination.contains($0.candidate) }) ?? true,
               (0 ... destination.tabIDs.count).contains(insertion),
-              destination.cells.indices.contains(targetCell)
+              destinationState.cells.indices.contains(targetCell)
         else {
             onMessage?(.attention(L("タブを移動できませんでした。移動先と対象ウィンドウを確認してください。")))
             return false
         }
+        if cell == nil { destination.switchPaneState(to: nil) }
         tabIDs.remove(at: index)
         destination.tabIDs.insert(id, at: insertion)
         destination.managedByID[id] = managedByID.removeValue(forKey: id)
@@ -688,7 +969,7 @@ final class WindowSession {
         assignments.removeValue(forKey: id)
         pendingClosedIDs.remove(id)
         if !isSplit, cells[0] == id {
-            cells[0] = tabIDs.isEmpty ? nil : tabIDs[min(index, tabIDs.count - 1)]
+            cells[0] = replacementTab(near: index)
         }
         reconcilePanes()
         destination.cells[targetCell] = id
@@ -715,6 +996,7 @@ final class WindowSession {
             source.managedByID[id].map { !contains($0.candidate) } ?? false
         }
         guard !ids.isEmpty else { return 0 }
+        switchPaneState(to: nil)
         for id in ids {
             source.tabIDs.removeAll { $0 == id }
             tabIDs.append(id)
@@ -755,15 +1037,29 @@ final class WindowSession {
     }
 
     func cycle(_ offset: Int) {
-        guard let cell = tabSwitchCell else { return }
-        let candidates = tabIDs.filter { id in
-            guard let index = cellIndex(for: id) else { return true }
-            return index == cell
+        guard !paneGroups.isEmpty else {
+            guard let cell = tabSwitchCell else { return }
+            let candidates = tabIDs.filter { id in
+                guard let index = cellIndex(for: id) else { return true }
+                return index == cell
+            }
+            guard candidates.count > 1 else { return }
+            let index = candidates.firstIndex { cellIndex(for: $0) == cell } ?? (offset > 0 ? -1 : 0)
+            let next = ((index + offset) % candidates.count + candidates.count) % candidates.count
+            select(candidates[next], inCell: cell, activate: true)
+            return
+        }
+        let switchCell = tabSwitchCell
+        let candidates = tabEntries.filter { entry in
+            guard paneGroups[entry] == nil, activeGroupID == nil else { return true }
+            guard let switchCell else { return false }
+            return cellIndex(for: entry).map { $0 == switchCell } ?? true
         }
         guard candidates.count > 1 else { return }
-        let index = candidates.firstIndex { cellIndex(for: $0) == cell } ?? (offset > 0 ? -1 : 0)
+        let current = activeGroupID ?? switchCell.flatMap { cells[$0] }
+        let index = current.flatMap(candidates.firstIndex(of:)) ?? (offset > 0 ? -1 : 0)
         let next = ((index + offset) % candidates.count + candidates.count) % candidates.count
-        select(candidates[next], inCell: cell, activate: true)
+        select(candidates[next], activate: true)
     }
 
     func sync() {
@@ -1175,6 +1471,9 @@ final class WindowSession {
 
     @discardableResult
     func remove(_ id: UUID, closeWindow: Bool) -> Bool {
+        if paneGroups[id] != nil {
+            return groupMembers(id).reduce(true) { remove($1, closeWindow: closeWindow) && $0 }
+        }
         guard let index = tabIDs.firstIndex(of: id) else { return true }
         if let window = managedByID[id], closeWindow {
             let number = access.windowID(window.candidate.element) ?? kCGNullWindowID
@@ -1205,7 +1504,7 @@ final class WindowSession {
         managedByID.removeValue(forKey: id)
         tabIDs.remove(at: index)
         if !isSplit, cells[0] == id {
-            cells[0] = tabIDs.isEmpty ? nil : tabIDs[min(index, tabIDs.count - 1)]
+            cells[0] = replacementTab(near: index)
         }
         requestedFrames.removeValue(forKey: id)
         suspendedWindowIDs.remove(id)
@@ -1300,14 +1599,49 @@ final class WindowSession {
 
     private func reconcilePanes() {
         let ids = Set(tabIDs)
+        func scrub(_ state: inout PaneState) {
+            state.cells = state.cells.map { $0.flatMap { ids.contains($0) ? $0 : nil } }
+            state.assignments = state.assignments.filter { ids.contains($0.key) }
+        }
+        for (group, var state) in paneGroups where group != activeGroupID {
+            scrub(&state)
+            paneGroups[group] = state.cells.contains { $0 != nil } ? state : nil
+        }
+        if var base = baseState {
+            let vacated = base.cells.indices.filter { base.cells[$0].map(ids.contains) == false }
+            scrub(&base)
+            let loose = looseTabIDs
+            for index in vacated {
+                base.cells[index] = loose.first { !base.cells.contains($0) }
+                if let id = base.cells[index] { base.assignments[id] = index }
+            }
+            baseState = base
+        }
+        var vacated: [Int] = []
         for index in cells.indices {
             if let id = cells[index], !ids.contains(id) {
                 cells[index] = nil
-                cells[index] = tabIDs.first(where: { !cells.contains($0) })
+                vacated.append(index)
             }
+        }
+        if let activeGroupID, !cells.contains(where: { $0 != nil }) {
+            // The combined tab lost its last tab; show the normal panes again.
+            paneGroups[activeGroupID] = nil
+            self.activeGroupID = nil
+            applyPaneState(excludingGroupedTabs(from: baseState ?? livePaneState))
+            baseState = nil
+            vacated = []
+        }
+        if activeGroupID == nil {
+            let loose = looseTabIDs
+            for index in vacated {
+                cells[index] = loose.first { !cells.contains($0) }
+            }
+        }
+        for index in cells.indices {
             if let id = cells[index] { assignments[id] = index }
         }
-        if tabIDs.count <= 1, customLayout == nil { configureGrid(.single) }
+        if activeGroupID == nil, looseTabIDs.count <= 1, customLayout == nil { configureGrid(.single) }
         clearPresentation()
     }
 

@@ -32,4 +32,14 @@ final class GridReflowTests: XCTestCase {
         XCTAssertEqual(r.cells, ["a", "b", nil])
         XCTAssertEqual(r.activeCell, 1)
     }
+
+    func testGrowingFillsOnlyFromAllowedWindows() {
+        let r = GridReflow.reflow(
+            oldColumns: 1, oldCells: ["a"], activeCell: 0, newColumns: 3, newRows: 1,
+            windowIDs: ["a", "b", "c"], assignments: ["a": 0, "b": 0, "c": 0], fillIDs: ["a", "c"]
+        )
+        XCTAssertEqual(r.cells, ["a", "c", nil])
+        XCTAssertEqual(r.assignments["b"], 0)
+        XCTAssertEqual(r.assignments["c"], 1)
+    }
 }

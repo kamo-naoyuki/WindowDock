@@ -107,6 +107,10 @@ struct WorkspaceTabItem {
     var pinned = false
     var tabSwitchTarget = false
     var playingAudio = false
+    /// A combined tab: it shows a remembered pane state, so its tab only reorders when dragged.
+    var paneGroup = false
+    /// The windows of a combined tab, each shown as its icon and a name shortened to keep every window visible.
+    var combinedWindows: [(name: String, icon: NSImage?)] = []
 }
 
 final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
@@ -160,7 +164,15 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     var onTabDragEnd: ((String, NSPasteboard, NSPoint, Bool) -> Void)?
     var acceptsExternalTab: ((String, NSButton?) -> Bool)?
     var onExternalTabDrop: ((String, NSButton?, Int?, Int?) -> Bool)?
+    var canCombinePanes: (() -> Bool)?
+    var onCombinePanes: (() -> Void)?
+    var onUngroupTab: ((Int) -> Void)?
+    /// Ungroups the combined tab being shown, from the combine button.
+    var onUngroupShownTab: (() -> Void)?
+    private(set) var combineButtonUngroups = false
     let addButton = makeButton(symbol: "plus", title: L("新しいタブ"), width: 26)
+    let combineButton = makeButton(
+        symbol: "rectangle.stack.badge.plus", title: L("表示中のペインを1つのタブにまとめる"), width: 26)
     let permissionButton = makeButton(symbol: "gearshape", title: L("権限設定"), width: 26)
     let columnSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let rowSelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -195,6 +207,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     private var dragGroup: WorkspaceTabGroup?
     private var dragPlaceholder: NSView?
     private var dragToken: String?
+    /// The dragged tab is a combined tab: it can only change its place in the tab bar.
+    private var dragReordersOnly = false
     private var dragInitialOrder: [Int]?
     private var dragAnchorX: CGFloat = 0
     private var dragAnchorY: CGFloat = 0
@@ -584,6 +598,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         dragSpace.toolTip = L("ドラッグして移動 / ダブルクリックで最大化")
         configureSelector(columnSelector, prefix: L("横"))
         configureSelector(rowSelector, prefix: L("縦"))
+        combineButton.target = self
+        combineButton.action = #selector(combineButtonPressed)
+        combineButton.isEnabled = false
         workspaceButton.isBordered = false
         workspaceButton.font = .boldSystemFont(ofSize: 12)
         workspaceButton.contentTintColor = .secondaryLabelColor
@@ -601,8 +618,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         minimumName.priority = NSLayoutConstraint.Priority(480)
         minimumName.isActive = true
         let bar = NSStackView(views: [
-            titlebarControls, workspaceButton, tabScroll, addButton, dragSpace, columnSelector, rowSelector,
-            permissionButton,
+            titlebarControls, workspaceButton, tabScroll, addButton, dragSpace, combineButton, columnSelector,
+            rowSelector, permissionButton,
         ])
         toolbar = bar
         let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
@@ -830,7 +847,26 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         addSplit(L("左右に分割"), .horizontal, #selector(splitPaneHorizontally(_:)))
         addSplit(L("上下に分割"), .vertical, #selector(splitPaneVertically(_:)))
         add(L("ペインを閉じる"), gridAreas.count > 1 ? #selector(closePane(_:)) : nil)
+        menu.addItem(.separator())
+        add(L("表示中のペインを1つのタブにまとめる"), canCombinePanes?() == true ? #selector(combinePanes) : nil)
         return menu
+    }
+
+    @objc private func combinePanes() { onCombinePanes?() }
+    @objc private func combineButtonPressed() { combineButtonUngroups ? onUngroupShownTab?() : onCombinePanes?() }
+    @objc private func ungroupTabFromMenu(_ item: NSMenuItem) { onUngroupTab?(item.tag) }
+
+    /// While a combined tab is shown, the combine button ungroups it instead.
+    func setCombineButton(ungroups: Bool, enabled: Bool) {
+        combineButton.isEnabled = enabled
+        guard ungroups != combineButtonUngroups else { return }
+        combineButtonUngroups = ungroups
+        let title = ungroups ? L("タブのまとめを解除") : L("表示中のペインを1つのタブにまとめる")
+        combineButton.image = NSImage(
+            systemSymbolName: ungroups ? "rectangle.stack.badge.minus" : "rectangle.stack.badge.plus",
+            accessibilityDescription: title)
+        combineButton.toolTip = title
+        combineButton.setAccessibilityLabel(title)
     }
 
     @objc private func splitPaneHorizontally(_ item: NSMenuItem) { onSplitPane?(item.tag, .horizontal) }
@@ -1169,7 +1205,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             screenPoint: point)
     }
 
-    func beginTabDrag(source: NSButton, token: String, anchor: NSPoint? = nil, previewImage: NSImage? = nil) {
+    func beginTabDrag(
+        source: NSButton, token: String, anchor: NSPoint? = nil, previewImage: NSImage? = nil,
+        reordersOnly: Bool = false) {
         endCloseSizing()
         endTabDrag()
         guard let group = source.superview as? WorkspaceTabGroup,
@@ -1178,6 +1216,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let frame = group.frame
         dragSource = source
         dragToken = token
+        dragReordersOnly = reordersOnly
         dragInitialOrder = orderedTabTags()
         let sourceAnchor = anchor ?? NSPoint(x: source.bounds.midX, y: source.bounds.midY)
         dragAnchorX = tabs.convert(sourceAnchor, from: source).x - frame.minX
@@ -1206,7 +1245,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         window?.orderFrontRegardless()
         window?.displayIfNeeded()
         CATransaction.flush()
-        onTabDragBegin?(source.tag, token, source)
+        if !reordersOnly { onTabDragBegin?(source.tag, token, source) }
     }
 
     func endTabDrag(at destination: Int? = nil) {
@@ -1234,6 +1273,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         dragGroup = nil
         dragPlaceholder = nil
         dragToken = nil
+        dragReordersOnly = false
         dragInitialOrder = nil
         dragAnchorX = 0
         dragAnchorY = 0
@@ -1281,8 +1321,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         guard acceptsTabDrag(pasteboard: pasteboard, source: source),
               window != nil, let dragGroup
         else { return false }
-        highlightPane(paneDropIndex(at: screenPoint))
-        if tabRowContains(screenPoint) {
+        highlightPane(dragReordersOnly ? nil : paneDropIndex(at: screenPoint))
+        if tabRowContains(screenPoint) || dragReordersOnly {
             enterTabReorderMode()
         } else {
             enterPaneTabDragMode()
@@ -1473,23 +1513,15 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     private func tabContextMenu(for button: NSButton) -> NSMenu {
         let menu = NSMenu()
         menu.delegate = self
-        let move = NSMenuItem(title: L("配置を入れ替え"), action: nil, keyEquivalent: "")
-        let destinations = NSMenu()
-        for index in gridAreas.indices {
-            let row = index / gridSize.columns + 1
-            let column = index % gridSize.columns + 1
-            let title = stage.customLayout == nil ? L("%d行 %d列", row, column) : L("ペイン %d", index + 1)
-            let item = NSMenuItem(title: title, action: #selector(moveTabFromMenu(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = index
-            item.representedObject = WorkspaceTabMoveItem(button)
-            destinations.addItem(item)
-        }
-        move.submenu = destinations
-        menu.addItem(move)
-        if let pane = paneForTab?(button.tag) {
-            let item = menu.addItem(withTitle: L("ペイン"), action: nil, keyEquivalent: "")
-            item.submenu = paneMenu(for: pane)
+        let isPaneGroup = tabSizing.indices.contains(button.tag)
+            && tabItems[tabSizing[button.tag].id]?.paneGroup == true
+        if isPaneGroup {
+            let ungroup = menu.addItem(
+                withTitle: L("タブのまとめを解除"), action: #selector(ungroupTabFromMenu(_:)), keyEquivalent: "")
+            ungroup.target = self
+            ungroup.tag = button.tag
+        } else {
+            addPaneItems(to: menu, for: button)
         }
         if let items = autoGroupMenuItems?(button.tag), !items.isEmpty {
             menu.addItem(.separator())
@@ -1525,6 +1557,27 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             addRelease(title, indexes, closeWindows: closesWindowsOnRelease)
         }
         return menu
+    }
+
+    private func addPaneItems(to menu: NSMenu, for button: NSButton) {
+        let move = NSMenuItem(title: L("配置を入れ替え"), action: nil, keyEquivalent: "")
+        let destinations = NSMenu()
+        for index in gridAreas.indices {
+            let row = index / gridSize.columns + 1
+            let column = index % gridSize.columns + 1
+            let title = stage.customLayout == nil ? L("%d行 %d列", row, column) : L("ペイン %d", index + 1)
+            let item = NSMenuItem(title: title, action: #selector(moveTabFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.representedObject = WorkspaceTabMoveItem(button)
+            destinations.addItem(item)
+        }
+        move.submenu = destinations
+        menu.addItem(move)
+        if let pane = paneForTab?(button.tag) {
+            let item = menu.addItem(withTitle: L("ペイン"), action: nil, keyEquivalent: "")
+            item.submenu = paneMenu(for: pane)
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -1707,15 +1760,22 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let select = WorkspaceTabButton(title: "", target: nil, action: nil)
         select.chrome = self
         select.onDragBegin = { [weak self] button, token, anchor, image in
-            self?.beginTabDrag(source: button, token: token, anchor: anchor, previewImage: image)
+            guard let self else { return }
+            let reordersOnly = self.tabItems[id]?.paneGroup == true
+            self.beginTabDrag(
+                source: button, token: token, anchor: anchor, previewImage: image, reordersOnly: reordersOnly)
             button.onDragEnd = { [weak self] board, point, cancelled in
+                if reordersOnly {
+                    self?.finishTabDrag(commit: !cancelled)
+                    return
+                }
                 self?.onTabDragEnd?(token, board, point, cancelled)
                 self?.finishTabDrag(commit: false)
             }
         }
         select.onDragMove = { [weak self, weak select] board, point in
             guard let self, let select, let token = self.dragToken else { return }
-            if let route = self.onTabDragMove {
+            if let route = self.onTabDragMove, !self.dragReordersOnly {
                 route(token, board, select, point)
             } else {
                 self.updateFloatingTab(pasteboard: board, source: select, screenPoint: point)
@@ -1794,8 +1854,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let select = tab.select
         let iconOnly = showsTabIconsOnly
         select.title = iconOnly ? "" : item.title
-        let image = item
-            .icon ?? (iconOnly ? NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil) : nil)
+        (select.cell as? WorkspaceTabButtonCell)?.combinedWindows = iconOnly ? [] : item.combinedWindows
+        let image = item.icon ?? (iconOnly ? Self.combinedIcon(item.combinedWindows.compactMap(\.icon)) : nil)
+            ?? (iconOnly ? NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil) : nil)
         let icon = image?.copy() as? NSImage
         icon?.size = NSSize(width: 16, height: 16)
         select.image = icon
@@ -1819,6 +1880,23 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         tab.view.layer?.borderWidth = item.tabSwitchTarget ? 2 : (item.displayed ? 1 : 0)
         tab.view.layer?.borderColor = (item.pinned ? NSColor.systemOrange : NSColor.controlAccentColor)
             .withAlphaComponent(item.tabSwitchTarget ? 0.9 : 0.6).cgColor
+    }
+
+    /// The icons of a combined tab's windows merged into one tab icon, for tabs that show only icons.
+    private static func combinedIcon(_ icons: [NSImage]) -> NSImage? {
+        guard icons.count > 1 else { return icons.first }
+        let shown = Array(icons.prefix(4))
+        return NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in
+            let frames = shown.count == 2
+                ? [NSRect(x: 0, y: 5, width: 11, height: 11), NSRect(x: 5, y: 0, width: 11, height: 11)]
+                : shown.indices.map {
+                    NSRect(x: CGFloat($0 % 2) * 8, y: CGFloat(1 - $0 / 2) * 8, width: 8, height: 8)
+                }
+            for (icon, frame) in zip(shown, frames) {
+                icon.draw(in: frame)
+            }
+            return true
+        }
     }
 
     func revealTab(_ view: NSView) {

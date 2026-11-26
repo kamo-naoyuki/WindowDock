@@ -8,6 +8,17 @@ struct SavedWindow: Codable {
     var frame: CGRect
 }
 
+/// A combined tab's panes.
+struct SavedPaneGroup: Codable, Equatable {
+    var columns: Int
+    var rows: Int
+    var paneLayout: PaneLayout?
+    /// Indices into the workspace's saved windows; nil for an empty pane or a start page.
+    var cells: [Int?]
+    var activeCell: Int
+    var pinnedPanes: [Int]
+}
+
 struct SavedWorkspace: Codable {
     var name: String
     var windows: [SavedWindow]
@@ -19,6 +30,7 @@ struct SavedWorkspace: Codable {
     var tabBarPosition: TabBarPosition? = nil
     /// Apps whose new windows are collected into this workspace.
     var autoGroupBundleIDs: [String]? = nil
+    var paneGroups: [SavedPaneGroup]? = nil
 
     var gridSize: WorkspaceGridSize? {
         guard let columns, let rows else { return nil }
@@ -75,14 +87,23 @@ enum SavedLayout {
         _ saved: [SavedWindow], among candidates: [WindowCandidate],
         frameOf: (AXUIElement) throws -> CGRect = WindowAccess.frame
     ) -> [Int] {
-        var matches: [Int] = []
+        let matched = matches(saved, among: candidates, frameOf: frameOf)
+        return saved.indices.compactMap { matched[$0] }
+    }
+
+    /// The candidate index each saved window matches, keyed by the saved window's index.
+    static func matches(
+        _ saved: [SavedWindow], among candidates: [WindowCandidate],
+        frameOf: (AXUIElement) throws -> CGRect = WindowAccess.frame
+    ) -> [Int: Int] {
+        var matches: [Int: Int] = [:]
         var claimed = Set<Int>()
         let bundles = Set(saved.map(\.bundleID))
         let frames = candidates.map { candidate -> CGRect? in
             guard let id = candidate.application.bundleIdentifier, bundles.contains(id) else { return nil }
             return try? frameOf(candidate.element)
         }
-        for entry in saved {
+        for (savedIndex, entry) in saved.enumerated() {
             var best: (index: Int, score: Int)?
             for (index, candidate) in candidates.enumerated()
                 where !claimed.contains(index) && candidate.application.bundleIdentifier == entry.bundleID {
@@ -98,7 +119,7 @@ enum SavedLayout {
             }
             if let best {
                 claimed.insert(best.index)
-                matches.append(best.index)
+                matches[savedIndex] = best.index
             }
         }
         return matches

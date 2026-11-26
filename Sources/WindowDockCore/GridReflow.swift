@@ -8,6 +8,7 @@ public struct GridReflowResult<ID: Hashable> {
 
 public enum GridReflow {
     /// Re-places windows after the grid changes size, keeping each one in its row/column when it still fits.
+    /// Empty cells are filled from `fillIDs` (all of `windowIDs` when nil).
     public static func reflow<ID: Hashable>(
         oldColumns: Int,
         oldCells: [ID?],
@@ -15,7 +16,8 @@ public enum GridReflow {
         newColumns: Int,
         newRows: Int,
         windowIDs: [ID],
-        assignments: [ID: Int]
+        assignments: [ID: Int],
+        fillIDs: [ID]? = nil
     ) -> GridReflowResult<ID> {
         let oldSelected = oldCells[activeCell]
         let row = min(activeCell / oldColumns, newRows - 1)
@@ -40,7 +42,7 @@ public enum GridReflow {
                 cells[active] = oldSelected
             }
         }
-        for id in windowIDs where !cells.contains(where: { $0 == id }) {
+        for id in fillIDs ?? windowIDs where !cells.contains(where: { $0 == id }) {
             guard let empty = cells.firstIndex(where: { $0 == nil }) else { break }
             cells[empty] = id
         }

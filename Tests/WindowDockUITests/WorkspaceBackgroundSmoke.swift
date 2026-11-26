@@ -103,9 +103,12 @@ enum WorkspaceBackgroundSmoke {
             let emptyWorkspaceOnly = CommandLine.arguments.contains("--empty-workspace-only")
             let audioOnly = CommandLine.arguments.contains("--audio-indicator-only")
             let autoGroupOnly = CommandLine.arguments.contains("--auto-group-only")
+            let paneGroupOnly = CommandLine.arguments.contains("--pane-group-only")
             let failures: [String]
             if CommandLine.arguments.contains("--new-tab-only") {
                 failures = WindowSessionSmoke.runNewTabChecks() + checkThumbnailSelection()
+            } else if paneGroupOnly {
+                failures = WindowSessionSmoke.runPaneGroupChecks() + WindowSessionSmoke.runPaneGroupUIChecks()
             } else if windowFollowOnly {
                 failures = WindowSessionSmoke.runManagedWindowFollowChecks()
                     + WindowSessionSmoke.runManagedWindowSettledFollowChecks()
@@ -166,6 +169,8 @@ enum WorkspaceBackgroundSmoke {
                 print(
                     CommandLine.arguments.contains("--new-tab-only")
                         ? "PASS: inline start pages, selection, replacement, failure and closing"
+                        : paneGroupOnly
+                        ? "PASS: combined pane tabs, switching, ungrouping and persistence"
                         : autoGroupOnly
                         ? "PASS: automatic app grouping"
                         : audioOnly
