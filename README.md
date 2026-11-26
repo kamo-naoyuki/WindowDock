@@ -21,7 +21,7 @@ open dist/WindowDock.app
 
 On first launch, allow WindowDock to move and resize windows in **System Settings → Privacy & Security → Accessibility**.
 
-Click **+** (or press **⌘T** in WindowDock) to open a new tab. Pick an existing window by its preview, app icon and title, or click one of your ten most recently added apps to open a **new window**. For other apps, use **Choose Another App to Launch…**. If the app is already running, it needs a New Window command; WindowDock won't reuse an old window instead. The new window takes the place of the new tab.
+Click **+** (or press **⌘T** in WindowDock) to open a new tab. Pick an existing window by its preview, app icon and title, or open a **new window** from **Apps Recently Added to Tabs**: the last ten apps whose windows you added as tabs in any workspace. For other apps, use **Choose Another App to Launch…**. If the app isn't running, WindowDock launches it. If it's already running, WindowDock uses its New Window command; apps without one can't be opened this way, and WindowDock won't reuse an old window instead. The new window takes the place of the new tab.
 
 To add several windows as separate tabs, **⌘-click** individual thumbnails or **Shift-click** the first and last thumbnails of a range, then click **Add**. You can also click **Select Multiple** and check thumbnails without holding a key. To include every available window of an app, check one of its thumbnails and click **Select All Windows of App** before adding.
 

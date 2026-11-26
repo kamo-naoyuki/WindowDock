@@ -287,10 +287,20 @@ private let translations: [String: [String]] = [
         "Allow Screen Recording for Previews…", "允许录屏以显示预览…", "미리보기를 위해 화면 기록 허용…",
         "Permitir la grabación de pantalla para ver vistas previas…",
     ],
-    "最近追加したアプリ": ["Recently Added Apps", "最近添加的应用", "최근 추가한 앱", "Apps añadidas recientemente"],
-    "ウィンドウを追加すると、ここにアプリが表示されます。": [
-        "Add a window to see its app here.", "添加窗口后，其应用会显示在这里。", "창을 추가하면 해당 앱이 여기에 표시됩니다.",
-        "Añade una ventana para ver su app aquí.",
+    "最近タブに追加したアプリ": [
+        "Apps Recently Added to Tabs", "最近添加到标签页的应用", "최근 탭에 추가한 앱", "Apps añadidas recientemente a pestañas",
+    ],
+    "どのワークスペースでも、ウィンドウをタブに追加するとそのアプリがここに新しい順で表示されます（最大10個）。": [
+        "When you add a window as a tab in any workspace, its app appears here, newest first (up to 10).",
+        "在任意工作区中将窗口添加为标签页后，其应用会按从新到旧显示在这里（最多 10 个）。",
+        "어느 작업 공간에서든 창을 탭으로 추가하면 해당 앱이 최신순으로 여기에 표시됩니다(최대 10개).",
+        "Al añadir una ventana como pestaña en cualquier espacio de trabajo, su app aparece aquí, de la más reciente a la más antigua (hasta 10).",
+    ],
+    "アプリを選ぶと新しいウィンドウを開いて、このタブに追加します。起動していないアプリは起動し、起動中のアプリでは「新規ウィンドウ」を実行します。": [
+        "Choose an app to open a new window in this tab. Apps that aren’t running are launched; running apps use their New Window command.",
+        "选择应用后，会打开新窗口并添加到此标签页。未运行的应用会被启动；已运行的应用会执行“新建窗口”。",
+        "앱을 선택하면 새 창을 열어 이 탭에 추가합니다. 실행 중이 아닌 앱은 실행하고, 실행 중인 앱은 '새 창' 명령을 사용합니다.",
+        "Elige una app para abrir una ventana nueva en esta pestaña. Si no está abierta, se abre; si ya lo está, se usa su comando Nueva ventana.",
     ],
     "その他のアプリを選んで起動…": [
         "Choose Another App to Launch…", "选择其他应用并启动…", "다른 앱을 선택하여 실행…", "Elegir otra app para abrir…",

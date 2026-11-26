@@ -1,6 +1,7 @@
 import AppKit
 import PDFKit
 import QuartzCore
+import SwiftUI
 import WindowDockCore
 
 private final class TabLayoutDragInfo: NSObject, NSDraggingInfo {
@@ -58,6 +59,11 @@ private final class PaneCellProbe: NSView {
     override func mouseDown(with event: NSEvent) {
         mouseDownCount += 1
     }
+}
+
+/// Lets a fixture reach above the menu bar so any item can be placed under the pointer.
+private final class UnconstrainedWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 private final class FrameChangeProbe: WorkspaceBackgroundView {
@@ -130,6 +136,128 @@ enum TabLayoutSmoke {
         if shown, !NSApp.isActive { return nil }
         let hit = window.contentView?.superview?.hitTest(window.mouseLocationOutsideOfEventStream)
         return "Expected inactive tooltip ‘\(expected)’ (detached=\(detached), hit=\((hit as? NSButton)?.title ?? "-"), displayed=\(lastTip))"
+    }
+
+    /// Standalone smoke: like the hover-help check, moves each glowing item under the still pointer in turn.
+    @MainActor
+    private static func checkHoverGlow(_ root: some View, size: NSSize, items names: [String]) -> [String] {
+        let host = NSHostingView(rootView: root.frame(width: size.width, height: size.height)
+            .environment(\.accessibilityEnabled, true))
+        let window = UnconstrainedWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: .borderless,
+                                         backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+        window.contentView = host
+        defer { window.close() }
+        func pump(for seconds: TimeInterval, until done: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !done(), Date() < deadline {
+                if let event = NSApp.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 0.02),
+                                               inMode: .default, dequeue: true) {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        // The glow's border runs along each item's edge; a neighbor's glow can reach its side edges.
+        func edgeColor(_ frame: NSRect) -> NSColor? {
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let point = host.convert(NSPoint(x: frame.midX, y: frame.maxY - 1), from: nil)
+            let scale = CGFloat(bitmap.pixelsWide) / host.bounds.width
+            let y = host.isFlipped ? point.y : host.bounds.height - point.y
+            return bitmap.colorAt(x: Int(point.x * scale), y: Int(y * scale))?.usingColorSpace(.deviceRGB)
+        }
+        func distance(_ a: NSColor?, _ b: NSColor?) -> CGFloat {
+            guard let a, let b else { return 0 }
+            return abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent)
+                + abs(a.blueComponent - b.blueComponent)
+        }
+        func move(by offset: NSPoint) {
+            window.setFrameOrigin(NSPoint(x: window.frame.minX + offset.x, y: window.frame.minY + offset.y))
+        }
+        // Each item is a button whose label carries the glow. SwiftUI doesn't list a ScrollView's content as
+        // accessibility children, but hit-testing reaches it.
+        func itemFrames() -> [NSRect] {
+            var found: [String: NSRect] = [:]
+            for y in stride(from: 4.0, to: size.height, by: 20) {
+                for x in stride(from: 4.0, to: size.width, by: 20) {
+                    let point = window.convertPoint(toScreen: NSPoint(x: x, y: y))
+                    let node = host.accessibilityHitTest(point) as AnyObject?
+                    guard node?.accessibilityRole?() == .button, let label = node?.accessibilityLabel?(),
+                          let name = names.first(where: label.contains), let frame = node?.accessibilityFrame?()
+                    else { continue }
+                    found[name] = window.convertFromScreen(frame)
+                }
+            }
+            return names.compactMap { found[$0] }
+        }
+        let away = NSPoint(x: NSEvent.mouseLocation.x + 2000, y: NSEvent.mouseLocation.y + 2000)
+        window.setFrameOrigin(away)
+        window.orderFrontRegardless()
+        pump(for: 3) { itemFrames().count == names.count }
+        pump(for: 0.3)
+        let frames = itemFrames()
+        guard frames.count == names.count else { return ["expected \(names) to glow, found \(frames.count) items"] }
+        let visible = host.convert(host.bounds, to: nil)
+        guard frames.allSatisfy({ visible.contains($0) }) else { return ["\(names) are clipped in the fixture"] }
+        let resting = frames.map(edgeColor)
+        func glowing() -> [Bool] { zip(frames, resting).map { distance(edgeColor($0), $1) > 0.3 } }
+        var failures: [String] = []
+        for (index, name) in names.enumerated() {
+            let expected = frames.indices.map { $0 == index }
+            var hovered: [Bool] = []
+            var left: [Bool] = []
+            // Retry if the pointer was moved during the check.
+            for _ in 0 ..< 3 {
+                let mouse = NSEvent.mouseLocation
+                let center = window.convertPoint(toScreen: NSPoint(x: frames[index].midX, y: frames[index].midY))
+                move(by: NSPoint(x: mouse.x - center.x, y: mouse.y - center.y))
+                guard window.convertToScreen(frames[index]).contains(mouse) else {
+                    failures.append("couldn't place \(name) under the pointer")
+                    break
+                }
+                pump(for: 2) {
+                    hovered = glowing()
+                    return hovered == expected
+                }
+                pump(for: 0.3)
+                hovered = glowing()
+                move(by: NSPoint(x: 600, y: 0))
+                pump(for: 2) {
+                    left = glowing()
+                    return !left.contains(true)
+                }
+                window.setFrameOrigin(away)
+                if (hovered == expected && !left.contains(true)) || NSEvent.mouseLocation == mouse { break }
+            }
+            if hovered != expected { failures.append("hovering \(name) made \(hovered) of \(names) glow") }
+            if left.contains(true) {
+                failures.append("\(left) of \(names) kept glowing after the pointer left \(name)")
+            }
+        }
+        if NSApp.isActive { failures.append("hover glow fixture should stay inactive") }
+        return failures
+    }
+
+    @MainActor
+    private static func checkNewTabHoverGlow() -> [String] {
+        var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        arguments["recentTabApplicationIDs"] = ["com.apple.finder", "com.apple.TextEdit"]
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        var access = WindowAccessClient()
+        access.isTrusted = { true }
+        access.scan = { WindowScan() }
+        let page = NewTabPage(access: access, isAvailable: { _ in true }, launch: { _ in [] },
+                              choose: { _ in false }, browse: { _ in })
+        let windows = (0 ..< 2).map {
+            WindowCandidate(element: AXUIElementCreateApplication(pid_t(910_100 + $0)), application: .current,
+                            title: "Glow \($0)")
+        }
+        return checkHoverGlow(page, size: NSSize(width: 560, height: 380), items: ["Finder", "TextEdit"])
+            + checkHoverGlow(WindowChoiceGrid(windows: windows, previews: nil) { _ in false },
+                             size: NSSize(width: 560, height: 260), items: ["Glow 0", "Glow 1"])
     }
 
     @MainActor
@@ -427,9 +555,11 @@ enum TabLayoutSmoke {
             app.finishLaunching()
             let failures = [false, true].flatMap { detached in
                 [true, false].compactMap { checkBackgroundHoverHelp(detached: detached, workspaceName: $0) }
-            }
+            } + checkNewTabHoverGlow()
             for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
-            if failures.isEmpty { print("PASS: visible tab and workspace help while another app stays active") }
+            if failures.isEmpty {
+                print("PASS: visible tab and workspace help, and new tab hover glow, while another app stays active")
+            }
             exit(failures.isEmpty ? 0 : 1)
         }
         let host = WorkspaceWindow(

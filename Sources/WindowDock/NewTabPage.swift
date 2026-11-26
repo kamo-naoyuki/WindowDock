@@ -77,10 +77,12 @@ struct NewTabPage: View {
     @ViewBuilder
     private var launchActions: some View {
         Divider()
-        Text(L("最近追加したアプリ")).font(.headline)
-        if recent.isEmpty {
-            Text(L("ウィンドウを追加すると、ここにアプリが表示されます。")).foregroundStyle(.secondary)
-        } else {
+        Text(L("最近タブに追加したアプリ")).font(.headline)
+        Text(L("どのワークスペースでも、ウィンドウをタブに追加するとそのアプリがここに新しい順で表示されます（最大10個）。"))
+            .foregroundStyle(.secondary)
+        Text(L("アプリを選ぶと新しいウィンドウを開いて、このタブに追加します。起動していないアプリは起動し、起動中のアプリでは「新規ウィンドウ」を実行します。"))
+            .foregroundStyle(.secondary)
+        if !recent.isEmpty {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 76, maximum: 96))], alignment: .leading) {
                 ForEach(recent, id: \.self) { url in
                     Button { request = Request(app: url) } label: {
@@ -88,7 +90,7 @@ struct NewTabPage: View {
                             Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
                                 .resizable().scaledToFit().frame(width: 40, height: 40)
                             Text(FileManager.default.displayName(atPath: url.path)).lineLimit(1)
-                        }.frame(maxWidth: .infinity).contentShape(Rectangle())
+                        }.frame(maxWidth: .infinity).hoverGlow()
                     }.buttonStyle(.plain)
                 }
             }
@@ -185,6 +187,7 @@ struct WindowChoiceGrid: View {
                                         .background(Circle().fill(.background)).padding(5)
                                 }
                             }
+                            .hoverGlow()
                     }.buttonStyle(.plain).help(window.label)
                         .accessibilityLabel(window.label)
                         .accessibilityAddTraits(checked ? .isSelected : [])
@@ -237,6 +240,26 @@ struct WindowChoiceGrid: View {
         }
         Button(restoring ? L("%d件を復元", rows.count) : L("%d件を追加", rows.count)) { _ = choose(rows.map { windows[$0] }) }
             .buttonStyle(.borderedProminent).disabled(rows.isEmpty)
+    }
+}
+
+private extension View {
+    func hoverGlow() -> some View { modifier(HoverGlow()) }
+}
+
+private struct HoverGlow: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8)
+        content.padding(6)
+            .background(shape.fill(Color.accentColor.opacity(hovering ? 0.14 : 0)))
+            .overlay(shape.strokeBorder(Color.accentColor.opacity(hovering ? 0.85 : 0), lineWidth: 1.5)
+                .shadow(color: Color.accentColor.opacity(hovering ? 0.6 : 0), radius: 5))
+            .contentShape(shape)
+            .onHover { hovering = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
     }
 }
 
