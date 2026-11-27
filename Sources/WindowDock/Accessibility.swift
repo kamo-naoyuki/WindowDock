@@ -422,18 +422,17 @@ enum BrowserWindowTabs: Equatable {
 
 /// Reads browser tabs for `AudioPlaybackMonitor`; tests replace it.
 struct BrowserTabSource {
-    /// Reads the windows' tabs and calls back on the main thread with one result per window, in order.
-    var read: ([AXUIElement], @escaping @MainActor @Sendable ([BrowserWindowTabs]) -> Void) -> Void
-    /// Returns an object that reports, on the main thread, changes that may concern the app's tabs until it's
-    /// released.
-    var observe: (pid_t, @escaping @MainActor @Sendable () -> Void) -> AnyObject?
+    /// One result per window in order, or nil if a drag interrupted the read. Calls back on the main thread.
+    var read: ([AXUIElement], @escaping @MainActor @Sendable ([BrowserWindowTabs]?) -> Void) -> Void
+    /// Delivers a token on the main thread. Releasing it stops the title-change callbacks.
+    var observe: (pid_t, @escaping @MainActor @Sendable () -> Void,
+                  @escaping @MainActor @Sendable (AnyObject?) -> Void) -> Void
     /// Drops what's remembered about the windows.
     var forget: ([AXUIElement]) -> Void
 
     static func accessibility() -> BrowserTabSource {
         let reader = BrowserTabStripReader()
-        return BrowserTabSource(
-            read: reader.read, observe: { BrowserTabObserver(pid: $0, onChange: $1) }, forget: reader.forget)
+        return BrowserTabSource(read: reader.read, observe: reader.observe, forget: reader.forget)
     }
 }
 
@@ -458,15 +457,47 @@ final class BrowserTabStripReader: @unchecked Sendable {
     /// Only used on `queue`.
     private var strips: [AXUIElement: Strip] = [:]
 
-    func read(_ windows: [AXUIElement], completion: @escaping @MainActor @Sendable ([BrowserWindowTabs]) -> Void) {
+    static func mouseDown() -> Bool { CGEventSource.buttonState(.combinedSessionState, button: .left) }
+
+    private enum Pause: Error { case dragging }
+
+    /// A drag can start after a read has already been queued or halfway through a crowded tab strip.
+    private static func yieldToDrag() throws {
+        if mouseDown() { throw Pause.dragging }
+    }
+
+    func read(_ windows: [AXUIElement], completion: @escaping @MainActor @Sendable ([BrowserWindowTabs]?) -> Void) {
         queue.async { [self] in
-            let tabs = windows.map(tabs(of:))
-            let runLoop = CFRunLoopGetMain()
-            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) {
-                MainActor.assumeIsolated { completion(tabs) }
+            do {
+                let tabs = try windows.map(tabs(of:))
+                Self.onMain { completion(tabs) }
+            } catch Pause.dragging {
+                Self.onMain { completion(nil) }
+            } catch {
+                WindowAccess.logger.error("Could not read browser tabs: \(error.localizedDescription)")
+                Self.onMain { completion(Array(repeating: .unavailable, count: windows.count)) }
             }
-            CFRunLoopWakeUp(runLoop)
         }
+    }
+
+    func observe(
+        _ pid: pid_t, onChange: @escaping @MainActor @Sendable () -> Void,
+        completion: @escaping @MainActor @Sendable (AnyObject?) -> Void) {
+        queue.async { [queue] in
+            let context = BrowserTabContext(onChange: onChange)
+            let registration = BrowserTabObserver.register(pid: pid, context: context)
+            Self.onMain {
+                completion(registration.map { BrowserTabObserver($0, context: context, queue: queue) })
+            }
+        }
+    }
+
+    private static func onMain(_ work: @escaping @MainActor @Sendable () -> Void) {
+        let runLoop = CFRunLoopGetMain()
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue) {
+            MainActor.assumeIsolated { work() }
+        }
+        CFRunLoopWakeUp(runLoop)
     }
 
     func forget(_ windows: [AXUIElement]) {
@@ -477,20 +508,21 @@ final class BrowserTabStripReader: @unchecked Sendable {
         }
     }
 
-    private func tabs(of window: AXUIElement) -> BrowserWindowTabs {
+    private func tabs(of window: AXUIElement) throws -> BrowserWindowTabs {
+        try Self.yieldToDrag()
         let now = ProcessInfo.processInfo.systemUptime
         switch strips[window] {
         case let .found(strip):
-            if let tabs = Self.tabs(in: strip), !tabs.isEmpty { return .tabs(tabs) }
+            if let tabs = try Self.tabs(in: strip), !tabs.isEmpty { return .tabs(tabs) }
         case let .missing(since) where now - since < Self.missingStripRecheck:
             return .noTabStrip
         default:
             break
         }
         strips[window] = nil
-        switch Self.findStrip(in: window) {
+        switch try Self.findStrip(in: window) {
         case let .found(strip):
-            guard let tabs = Self.tabs(in: strip) else { return .unavailable }
+            guard let tabs = try Self.tabs(in: strip) else { return .unavailable }
             // Safari's tab strip, for one, has no Chromium tabs.
             guard !tabs.isEmpty else {
                 strips[window] = .missing(since: now)
@@ -510,7 +542,7 @@ final class BrowserTabStripReader: @unchecked Sendable {
 
     /// Searches the window's groups for a tab group. Chrome names its views in AXDOMClassList; groups named after
     /// tabs are searched first, which reaches the strip in a few calls without listing the page's contents.
-    private static func findStrip(in window: AXUIElement) -> Search {
+    private static func findStrip(in window: AXUIElement) throws -> Search {
         var frontier: [(element: AXUIElement, depth: Int, preferred: Bool)] = [(window, 0, true)]
         var calls = 0
         while calls < 200, let next = frontier.firstIndex(where: \.preferred) ?? frontier.indices.first {
@@ -520,6 +552,7 @@ final class BrowserTabStripReader: @unchecked Sendable {
             if node.depth == 0, error == .invalidUIElement { return .gone }
             if error == .cannotComplete { return .unavailable }
             for child in found.first.flatMap({ $0 as? [AXUIElement] }) ?? [] {
+                try yieldToDrag()
                 let (error, info) = values(of: child, [kAXRoleAttribute, "AXDOMClassList"])
                 calls += 1
                 if error == .cannotComplete { return .unavailable }
@@ -535,11 +568,12 @@ final class BrowserTabStripReader: @unchecked Sendable {
     }
 
     /// The Chromium tabs in a tab group, or nil if it can't be read.
-    private static func tabs(in strip: AXUIElement) -> [BrowserTabAudio]? {
+    private static func tabs(in strip: AXUIElement) throws -> [BrowserTabAudio]? {
         let (error, found) = values(of: strip, [kAXChildrenAttribute])
         guard error == .success else { return nil }
         var tabs: [BrowserTabAudio] = []
         for element in found[0] as? [AXUIElement] ?? [] {
+            try yieldToDrag()
             let (error, tab) = values(
                 of: element,
                 [
@@ -605,14 +639,14 @@ private func browserTabCallback(
 
 /// Reports renamed elements of an app. Chrome renames a tab when it starts or stops playing or gets another alert, and
 /// renames the window when its tabs change.
-final class BrowserTabObserver {
+private final class BrowserTabObserver {
+    typealias Registration = (observer: AXObserver, app: AXUIElement)
     private let observer: AXObserver
     private let applicationElement: AXUIElement
     private let context: BrowserTabContext
-    private let runLoopSource: CFRunLoopSource
+    private let queue: DispatchQueue
 
-    /// The handler is called on the main thread.
-    init?(pid: pid_t, onChange: @escaping @MainActor @Sendable () -> Void) {
+    static func register(pid: pid_t, context: BrowserTabContext) -> Registration? {
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
         var createdObserver: AXObserver?
@@ -621,7 +655,6 @@ final class BrowserTabObserver {
             WindowAccess.logger.debug("Could not observe tabs for PID \(pid): \(createError.rawValue)")
             return nil
         }
-        let context = BrowserTabContext(onChange: onChange)
         let error = AXObserverAddNotification(
             createdObserver, appElement, kAXTitleChangedNotification as CFString,
             Unmanaged.passUnretained(context).toOpaque())
@@ -629,16 +662,24 @@ final class BrowserTabObserver {
             WindowAccess.logger.debug("Could not register title changes for PID \(pid): \(error.rawValue)")
             return nil
         }
-        observer = createdObserver
-        applicationElement = appElement
+        return (createdObserver, appElement)
+    }
+
+    init(_ registration: Registration, context: BrowserTabContext, queue: DispatchQueue) {
+        observer = registration.observer
+        applicationElement = registration.app
         self.context = context
-        runLoopSource = AXObserverGetRunLoopSource(createdObserver)
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        self.queue = queue
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
     }
 
     deinit {
-        AXObserverRemoveNotification(observer, applicationElement, kAXTitleChangedNotification as CFString)
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        queue.async { [observer, applicationElement, context] in
+            withExtendedLifetime(context) {
+                _ = AXObserverRemoveNotification(observer, applicationElement, kAXTitleChangedNotification as CFString)
+            }
+        }
     }
 }
 

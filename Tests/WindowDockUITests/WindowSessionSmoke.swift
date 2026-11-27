@@ -705,21 +705,31 @@ enum WindowSessionSmoke {
         let model = Model(windowCount: 3)
         var playing: Set<pid_t> = []
         var browserTabs: [Int: BrowserWindowTabs] = [:]
+        var reads = 0
+        var mouseDown = false
+        var dragOnNextRead = false
         var observations: [pid_t: Observation] = [:]
         weak var observedSelf: Observation?
         let tabSource = BrowserTabSource(
             read: { windows, completion in
+                reads += 1
+                if dragOnNextRead {
+                    dragOnNextRead = false
+                    mouseDown = true
+                    return completion(nil)
+                }
                 completion(windows.map { window in
                     (try? model.index(of: window)).flatMap { browserTabs[$0] } ?? .noTabStrip
                 })
             },
-            observe: { pid, onChange in
+            observe: { pid, onChange, completion in
                 let observation = Observation(onChange)
                 observations[pid] = observation
-                return observation
+                completion(observation)
             },
             forget: { _ in })
-        let audio = AudioPlaybackMonitor(hold: 0, playingApplications: { playing }, browserTabs: tabSource)
+        let audio = AudioPlaybackMonitor(
+            hold: 0, playingApplications: { playing }, browserTabs: tabSource, mouseDown: { mouseDown })
         let controller = WorkspaceController(name: "Audio indicator", access: access(for: model), audio: audio)
         defer {
             controller.quitting = true
@@ -758,11 +768,36 @@ enum WindowSessionSmoke {
         playing = [getpid()]
         audio.refresh()
         expect([false, false, false], "before the tabs were read", wait: false)
+        if observations[getpid()] != nil {
+            failures.append("rendering a tab synchronously registered a browser observer")
+        }
         expect([true, false, false], "while one browser window plays")
+        let beforeRefresh = reads
+        audio.refresh()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        if reads != beforeRefresh {
+            failures.append("unchanged Core Audio output rescanned an observed browser")
+        }
         browserTabs = [0: .tabs([.muted]), 1: .tabs([.otherAlert])]
         observedSelf = observations[getpid()]
         observations[getpid()]?.onChange()
-        expect([false, true, false], "after the browser renamed its tabs")
+        let beforeDrag = reads
+        CFRunLoopRunInMode(CFRunLoopMode(RunLoop.Mode.eventTracking.rawValue as CFString), 0.4, false)
+        if reads != beforeDrag {
+            failures.append("a tab rename started a browser scan during mouse tracking")
+        }
+        // During a native Chrome drag WindowDock's run loop remains in its default mode.
+        dragOnNextRead = true
+        RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+        if !mouseDown { failures.append("the pending browser read did not resume outside mouse tracking") }
+        let interrupted = reads
+        for _ in 0 ..< 10 { observations[getpid()]?.onChange() }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.55))
+        if reads != interrupted { failures.append("scanned the browser while its tab was being torn off") }
+        expect([true, false, false], "while tearing off the playing tab", wait: false)
+        mouseDown = false
+        expect([false, true, false], "after the browser tab drag ended")
+        if reads != interrupted + 1 { failures.append("the tab tear-off did not settle in one scan") }
         controller.session.select(controller.session.windows[1].id)
         expect([false, true, false], "after selecting another tab")
         guard let dragged = buttons[2].superview as? WorkspaceTabGroup else {

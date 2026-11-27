@@ -19,6 +19,8 @@ final class AudioPlaybackMonitor {
     private let playingApplications: () -> Set<pid_t>
     private let processes: CoreAudioProcesses?
     private let browserTabs: BrowserTabSource
+    private let mouseDown: () -> Bool
+    private static let tabReadDelay: TimeInterval = 0.25
     /// The windows asked about in each audible application.
     private var browsers: [pid_t: BrowserWindows] = [:]
     private var started = false
@@ -28,7 +30,8 @@ final class AudioPlaybackMonitor {
     /// `playingApplications` replaces Core Audio in tests; call `refresh()` to report changes to its output.
     init(
         hold: TimeInterval = 2, playingApplications: (() -> Set<pid_t>)? = nil,
-        browserTabs: BrowserTabSource? = nil) {
+        browserTabs: BrowserTabSource? = nil,
+        mouseDown: @escaping () -> Bool = BrowserTabStripReader.mouseDown) {
         recent = RecentlyAudibleApplications(hold: hold)
         if let playingApplications {
             processes = nil
@@ -39,6 +42,7 @@ final class AudioPlaybackMonitor {
             self.playingApplications = { processes.playingApplications() }
         }
         self.browserTabs = browserTabs ?? .accessibility()
+        self.mouseDown = mouseDown
     }
 
     func start() {
@@ -60,8 +64,14 @@ final class AudioPlaybackMonitor {
             RunLoop.main.add(timer, forMode: .common)
             holdTimer = timer
         }
-        for pid in browsers.keys {
-            if audible.contains(pid) { scheduleRead(of: pid, after: 0) } else { untrack(pid) }
+        for (pid, browser) in browsers {
+            if !audible.contains(pid) {
+                untrack(pid)
+            } else if case .unavailable = browser.observation {
+                scheduleRead(of: pid, after: Self.tabReadDelay)
+            } else if browser.tabs.values.contains(.unavailable) {
+                scheduleRead(of: pid, after: Self.tabReadDelay)
+            }
         }
         guard audible != audibleApplications else { return }
         audibleApplications = audible
@@ -89,8 +99,6 @@ final class AudioPlaybackMonitor {
 
     private func track(_ pid: pid_t) -> BrowserWindows {
         let browser = BrowserWindows()
-        // Chrome renames tabs in bursts; read them once.
-        browser.observer = browserTabs.observe(pid) { [weak self] in self?.scheduleRead(of: pid, after: 0.25) }
         browsers[pid] = browser
         return browser
     }
@@ -98,7 +106,6 @@ final class AudioPlaybackMonitor {
     private func untrack(_ pid: pid_t) {
         guard let browser = browsers.removeValue(forKey: pid) else { return }
         browser.timer?.invalidate()
-        browser.observer = nil
         browserTabs.forget(Array(browser.windows))
     }
 
@@ -113,23 +120,39 @@ final class AudioPlaybackMonitor {
         let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.read(pid) }
         }
-        RunLoop.main.add(timer, forMode: .common)
+        // Don't query a browser inside WindowDock's own event-tracking loop.
+        RunLoop.main.add(timer, forMode: .default)
         browser.timer = timer
     }
 
     private func read(_ pid: pid_t) {
         guard let browser = browsers[pid] else { return }
         browser.timer = nil
+        // A Chrome tab tear-off tracks the mouse in Chrome, not in our run loop.
+        guard !mouseDown() else { return scheduleRead(of: pid, after: Self.tabReadDelay) }
+        if case .notStarted = browser.observation {
+            browser.observation = .pending
+            browserTabs.observe(pid, { [weak self, weak browser] in
+                guard let self, let browser, browsers[pid] === browser else { return }
+                scheduleRead(of: pid, after: Self.tabReadDelay)
+            }, { [weak browser] observer in
+                browser?.observation = observer.map(BrowserWindows.Observation.active) ?? .unavailable
+            })
+        }
         browser.reading = true
         let windows = Array(browser.windows)
         browserTabs.read(windows) { [weak self, weak browser] tabs in
             guard let self, let browser, browsers[pid] === browser else { return }
+            browser.reading = false
+            guard let tabs, !mouseDown() else {
+                browser.readAgain = false
+                return scheduleRead(of: pid, after: Self.tabReadDelay)
+            }
             apply(tabs, of: windows, to: browser, pid: pid)
         }
     }
 
     private func apply(_ tabs: [BrowserWindowTabs], of windows: [AXUIElement], to browser: BrowserWindows, pid: pid_t) {
-        browser.reading = false
         let playing = browser.playingWindows
         for (window, tabs) in zip(windows, tabs) {
             switch tabs {
@@ -140,12 +163,12 @@ final class AudioPlaybackMonitor {
                 browser.tabs[window] = nil
             case .unavailable:
                 // Keep what was read before, or count the window as its application does.
-                if browser.tabs[window] == nil { browser.tabs[window] = .noTabStrip }
+                if browser.tabs[window] == nil { browser.tabs[window] = .unavailable }
             }
         }
         if browser.readAgain {
             browser.readAgain = false
-            scheduleRead(of: pid, after: 0)
+            scheduleRead(of: pid, after: Self.tabReadDelay)
         } else if browser.tabs.values.contains(where: Self.showsOtherAlert) {
             // Chrome tells nothing when an alert icon finishes fading out.
             scheduleRead(of: pid, after: 1)
@@ -176,9 +199,13 @@ final class AudioPlaybackMonitor {
 /// The windows asked about in an audible application, and their tabs once read.
 @MainActor
 private final class BrowserWindows {
+    enum Observation {
+        case notStarted, pending, active(AnyObject), unavailable
+    }
+
     var windows = Set<AXUIElement>()
     var tabs: [AXUIElement: BrowserWindowTabs] = [:]
-    var observer: AnyObject?
+    var observation = Observation.notStarted
     var timer: Timer?
     var reading = false
     /// Tabs changed while they were being read.
