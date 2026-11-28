@@ -20,8 +20,22 @@ private final class WorkspaceGridCell: NSView {
     override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
 }
 
+private final class DividerEqualizationRequest: NSObject {
+    enum Target {
+        case custom(path: [Int])
+        case grid(axis: PaneLayout.Axis)
+    }
+
+    let target: Target
+
+    init(_ target: Target) {
+        self.target = target
+    }
+}
+
 final class WorkspaceGridView: NSView {
     private(set) var gridSize = WorkspaceGridSize.single
+    private(set) var displayedGridSize: WorkspaceGridSize? = .single
     private(set) var customLayout: PaneLayout?
     private(set) var areas: [NSView] = []
     var onActivate: ((Int) -> Void)?
@@ -59,6 +73,7 @@ final class WorkspaceGridView: NSView {
         if size != gridSize || customLayout != nil {
             gridSize = size
             customLayout = nil
+            displayedGridSize = size
             paneMinimums = [:]
             nestedDividers = []
             columnWeights = Array(repeating: 1 / CGFloat(size.columns), count: size.columns)
@@ -173,6 +188,7 @@ final class WorkspaceGridView: NSView {
             var changed = lastBoundsSize != bounds.size
             lastBoundsSize = bounds.size
             nestedDividers = geometry.dividers
+            displayedGridSize = geometry.gridDimensions.map { WorkspaceGridSize(columns: $0.columns, rows: $0.rows) }
             for (area, frame) in zip(areas, geometry.panes) where area.frame != frame {
                 area.frame = frame
                 changed = true
@@ -372,6 +388,106 @@ final class WorkspaceGridView: NSView {
             }
             layoutCells()
             if next.type == .leftMouseUp { break }
+        }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let menu = dividerMenu(at: point) else { return super.menu(for: event) }
+        return menu
+    }
+
+    private func dividerMenu(at point: NSPoint) -> NSMenu? {
+        let menu = NSMenu()
+        if let customLayout {
+            guard let geometry = customLayout.geometry(
+                in: bounds, minimums: paneMinimums, dividerThickness: dividerThickness
+            ) else { return nil }
+            for divider in geometry.dividers where divider.frame.contains(point) {
+                let title = divider.axis == .horizontal
+                    ? "左右の分割を均等にする" : "上下の分割を均等にする"
+                let equalized = customLayout.equalizingSplit(atPath: divider.path)
+                menu.addItem(equalizeMenuItem(
+                    title: title, target: .custom(path: divider.path),
+                    enabled: equalized != nil && equalized != customLayout
+                ))
+            }
+        } else {
+            for column in 0 ..< (gridSize.columns - 1) where
+                abs(point.x - (areas[column].frame.maxX + dividerThickness / 2)) <= dividerThickness / 2
+            {
+                menu.addItem(equalizeMenuItem(
+                    title: "列を均等にする", target: .grid(axis: .horizontal),
+                    enabled: needsEqualizing(columnWeights)
+                ))
+            }
+            for row in 0 ..< (gridSize.rows - 1) where
+                abs(point.y - (areas[row * gridSize.columns].frame.minY - dividerThickness / 2))
+                <= dividerThickness / 2
+            {
+                menu.addItem(equalizeMenuItem(
+                    title: "行を均等にする", target: .grid(axis: .vertical),
+                    enabled: needsEqualizing(rowWeights)
+                ))
+            }
+        }
+        return menu.items.isEmpty ? nil : menu
+    }
+
+    private func equalizeMenuItem(
+        title: String, target: DividerEqualizationRequest.Target, enabled: Bool
+    ) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: L(title),
+            action: enabled ? #selector(equalizeDivider(_:)) : nil,
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.representedObject = DividerEqualizationRequest(target)
+        item.isEnabled = enabled
+        return item
+    }
+
+    private func needsEqualizing(_ weights: [CGFloat]) -> Bool {
+        guard weights.count > 1, let smallest = weights.min(), let largest = weights.max() else { return false }
+        return largest - smallest > 0.001
+    }
+
+    func canEqualizePane(at index: Int) -> Bool {
+        guard areas.indices.contains(index) else { return false }
+        if let customLayout {
+            guard let equalized = customLayout.equalizingSplit(containingPaneAt: index) else { return false }
+            return equalized != customLayout
+        }
+        return needsEqualizing(columnWeights) || needsEqualizing(rowWeights)
+    }
+
+    /// A tab in a preset grid shares its row and column tracks; a divider targets just one axis.
+    @discardableResult
+    func equalizeGrid(along axis: PaneLayout.Axis? = nil) -> Bool {
+        guard customLayout == nil else { return false }
+        let columns = axis != .vertical && needsEqualizing(columnWeights)
+        let rows = axis != .horizontal && needsEqualizing(rowWeights)
+        guard columns || rows else { return false }
+        if columns { columnWeights = Array(repeating: 1 / CGFloat(gridSize.columns), count: gridSize.columns) }
+        if rows { rowWeights = Array(repeating: 1 / CGFloat(gridSize.rows), count: gridSize.rows) }
+        layoutCells()
+        return true
+    }
+
+    @objc private func equalizeDivider(_ sender: NSMenuItem) {
+        guard let request = sender.representedObject as? DividerEqualizationRequest else { return }
+        switch request.target {
+        case .custom(let path):
+            guard let customLayout,
+                  let equalized = customLayout.equalizingSplit(atPath: path),
+                  equalized != customLayout
+            else { return }
+            self.customLayout = equalized
+            onCustomLayoutChange?(equalized)
+            layoutCells()
+        case .grid(let axis):
+            equalizeGrid(along: axis)
         }
     }
 }

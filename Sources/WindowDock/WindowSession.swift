@@ -19,6 +19,7 @@ struct ManagedWindow {
             // A closed window no longer has any state to restore.
             return
         }
+
     }
 }
 
@@ -43,6 +44,7 @@ struct PaneState {
 final class WindowSession {
     private static let frameRoundingTolerance = CGSize(width: 12, height: 20)
     private static let framePositionTolerance: CGFloat = 1
+    private static let lateFrameRequestInterval: TimeInterval = 3
     private static let constraintRecoveryDelay: TimeInterval = 3
 
     // Every tab has a position and a pane assignment. Start pages don't own an AX window.
@@ -60,6 +62,8 @@ final class WindowSession {
     private(set) var activeCell = 0
     private(set) var pinnedCells: Set<Int> = []
     private var lastUnpinnedCell = 0
+    private var previousSelectedID: UUID?
+    private var pinnedTabIDs: Set<UUID> = []
     /// Combined tabs. Each keeps the pane state it shows; the live panes are the state of `activeGroupID`.
     /// A window belongs to at most one combined tab: the one whose panes show it.
     private var paneGroups: [UUID: PaneState] = [:]
@@ -89,6 +93,8 @@ final class WindowSession {
     private var presentedFrames: [UUID: CGRect] = [:]
     /// The frames windows had once they were last aligned, to notice when they are moved, resized or maximized outside WindowDock.
     private var alignedFrames: [UUID: CGRect] = [:]
+    /// Frames recently requested for each window: a busy app can apply an earlier request after a later one.
+    private var recentFrameRequests: [UUID: [(frame: CGRect, time: TimeInterval)]] = [:]
     private var isSynchronizing = false
     private var resyncRequested = false
     private var resyncExcluding: UUID?
@@ -101,12 +107,49 @@ final class WindowSession {
     }
 
     var selectedID: UUID? { cells[activeCell] }
+    var numberedTabTargets: [UUID] {
+        let currentTab = activeGroupID ?? selectedID
+        return tabEntries.filter { $0 != currentTab }
+    }
+
+    var canSelectPreviousUsedTab: Bool {
+        previousSelectedID.map { $0 != selectedID && tabIDs.contains($0) } ?? false
+    }
+
     var tabSwitchCell: Int? {
         guard !cells.isEmpty else { return nil }
         if cells.indices.contains(lastUnpinnedCell), !pinnedCells.contains(lastUnpinnedCell) {
             return lastUnpinnedCell
         }
         return cells.indices.first { !pinnedCells.contains($0) }
+    }
+
+    func managedWindowID(forTabEntry tabID: UUID) -> UUID? {
+        if paneGroups[tabID] != nil {
+            return groupMembers(tabID).first { managedByID[$0] != nil }
+        }
+        return managedByID[tabID] == nil ? nil : tabID
+    }
+
+    func isTabPinned(_ tabID: UUID) -> Bool {
+        if paneGroups[tabID] != nil {
+            return groupMembers(tabID).contains { pinnedTabIDs.contains($0) }
+        }
+        return pinnedTabIDs.contains(tabID)
+    }
+
+    func setTabPinned(_ pinned: Bool, for tabID: UUID) {
+        guard let windowID = managedWindowID(forTabEntry: tabID) else { return }
+        guard isTabPinned(tabID) != pinned else { return }
+        if pinned {
+            pinnedTabIDs.insert(windowID)
+        } else {
+            let members = paneGroups[tabID] == nil ? [windowID] : groupMembers(tabID)
+            for id in members { pinnedTabIDs.remove(id) }
+        }
+        let previousOrder = tabIDs
+        reorderTabEntries(tabEntries)
+        if tabIDs == previousOrder { onChange?() }
     }
     var primaryID: UUID? { cells.first ?? nil }
     var secondaryID: UUID? { cells.count > 1 ? cells[1] : nil }
@@ -137,7 +180,6 @@ final class WindowSession {
         }
         guard size != gridSize || customLayout != nil else { return }
         configureGrid(size)
-        normalizePaneSwitchState()
         clearPresentation()
         onChange?()
         presentVisibleWindows()
@@ -158,6 +200,8 @@ final class WindowSession {
         assignments = result.assignments
         gridSize = size
         customLayout = nil
+        // Collapsing to one pane, e.g. when a window doesn't fit, must not keep that pane pinned.
+        normalizePaneSwitchState()
     }
 
     func setCustomLayout(_ layout: PaneLayout) {
@@ -239,6 +283,8 @@ final class WindowSession {
             lastUnpinnedCell -= 1
         }
         applyPaneLayout(removal.layout, reflow: result)
+        // Raising alone can leave the closed pane's window focused when the survivor belongs to another app.
+        if selectedID != nil { raiseSelected(activate: true) }
     }
 
     func updatePaneProportions(_ layout: PaneLayout) {
@@ -247,6 +293,18 @@ final class WindowSession {
             return
         }
         customLayout = layout
+    }
+
+    @discardableResult
+    func equalizePaneSplit(at index: Int) -> Bool {
+        guard let customLayout,
+              let equalized = customLayout.equalizingSplit(containingPaneAt: index),
+              equalized != customLayout
+        else { return false }
+        self.customLayout = equalized
+        onChange?()
+        realign(raiseWindows: false)
+        return true
     }
 
     private func applyPaneLayout(_ layout: PaneLayout, reflow: GridReflowResult<UUID>) {
@@ -264,9 +322,27 @@ final class WindowSession {
 
     func activateCell(_ index: Int) {
         guard cells.indices.contains(index), index != activeCell else { return }
+        let previousSelection = selectedID
         activeCell = index
+        recordSelectionChange(from: previousSelection)
         if !pinnedCells.contains(index) { lastUnpinnedCell = index }
         onChange?()
+    }
+
+    func activateAdjacentPane(_ direction: Int) -> UUID? {
+        guard direction == -1 || direction == 1 else { return nil }
+        let occupiedCells = cells.indices.filter { cells[$0] != nil }
+        guard occupiedCells.count > 1 else { return nil }
+        let current = occupiedCells.firstIndex(of: activeCell) ?? (direction > 0 ? -1 : 0)
+        let next = (current + direction + occupiedCells.count) % occupiedCells.count
+        let cell = occupiedCells[next]
+        activateCell(cell)
+        return cells[cell]
+    }
+
+    private func recordSelectionChange(from previousID: UUID?) {
+        guard let previousID, previousID != selectedID, tabIDs.contains(previousID) else { return }
+        previousSelectedID = previousID
     }
 
     func isPanePinned(_ index: Int) -> Bool { pinnedCells.contains(index) }
@@ -368,14 +444,28 @@ final class WindowSession {
         return group
     }
 
-    /// Turns a combined tab back into separate tabs; what is shown stays the same.
-    func ungroup(_ group: UUID) {
-        guard paneGroups.removeValue(forKey: group) != nil else { return }
-        if activeGroupID == group {
-            activeGroupID = nil
-            baseState = nil
+    /// Turns a combined tab back into separate tabs. Ungrouping the shown one brings back the normal panes, whose empty
+    /// panes take its windows.
+    func ungroup(_ group: UUID, activate: Bool = false) {
+        guard paneGroups[group] != nil else { return }
+        guard activeGroupID == group else {
+            paneGroups[group] = nil
+            onChange?()
+            return
         }
+        let previousSelection = selectedID
+        switchPaneState(to: nil)
+        paneGroups[group] = nil
+        let loose = looseTabIDs
+        for index in cells.indices where cells[index] == nil && !pinnedCells.contains(index) {
+            cells[index] = loose.first { !cells.contains($0) }
+            if let id = cells[index] { assignments[id] = index }
+        }
+        recordSelectionChange(from: previousSelection)
         onChange?()
+        if activate, let id = selectedID, managedByID[id] != nil { focus(id) }
+        presentVisibleWindows()
+        if activate, selectedID.map(isStartPage) == true { onFocusStartPage?() }
     }
 
     /// The normal panes, even while a combined tab is shown.
@@ -519,6 +609,7 @@ final class WindowSession {
         guard !pendingWindowLaunches.values.contains(where: {
             $0.pid == window.candidate.application.processIdentifier && cells.contains($0.page)
         }) else { return }
+        let previousSelection = selectedID
         let id = window.id
         guard groupID(containing: id) == activeGroupID else {
             // The window belongs to other panes; show them, as clicking its tab would.
@@ -554,6 +645,7 @@ final class WindowSession {
             changed = true
         }
         guard changed else { return }
+        recordSelectionChange(from: previousSelection)
         var errors: [Error] = []
         if previousAssignment != targetCell, !access.isFullScreen(window.candidate.element),
            let target = targetCell.flatMap({ currentTargets()[$0] })
@@ -604,12 +696,8 @@ final class WindowSession {
         let bundleID = Bundle(url: url)?.bundleIdentifier
         let reservation = bundleID.map(reserveLaunch(of:))
         defer { reservation.map(releaseLaunch) }
-        let instances = (bundleID.map(NSRunningApplication.runningApplications(withBundleIdentifier:))
-            ?? NSWorkspace.shared.runningApplications).filter { !$0.isTerminated }
-        let canonical = url.resolvingSymlinksInPath().standardizedFileURL
-        let matchingURL = instances.first { $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == canonical }
         // Launch Services can resolve another path to the same live instance. Don't reopen it and focus its old tab.
-        if let app = matchingURL ?? (bundleID == nil ? nil : instances.first) {
+        if let app = access.runningApplication(url) {
             return try await launchCandidates(for: app, from: page, alreadyRunning: true)
         }
         let config = NSWorkspace.OpenConfiguration()
@@ -618,8 +706,37 @@ final class WindowSession {
         return try await launchCandidates(for: app, from: page, alreadyRunning: false)
     }
 
-    func launchCandidates(for app: NSRunningApplication, from page: UUID,
-                          alreadyRunning: Bool) async throws -> [WindowCandidate] {
+    /// Chooses an item of the app's Dock menu as the Dock would, and returns the new windows it opened for the start
+    /// page. The Dock's own commands, such as Hide or Quit, don't wait for windows unless they launch the app.
+    func chooseDockMenuItem(_ path: DockMenuPath, in items: [DockMenuItem], of url: URL,
+                            from page: UUID) async throws -> [WindowCandidate] {
+        try Task.checkCancellation()
+        guard isStartPage(page), cells.contains(page) else { throw CancellationError() }
+        let choose = access.chooseDockMenuItem
+        let press = { try await Task.detached { try choose(path, url) }.value }
+        if let app = access.runningApplication(url) {
+            guard !items.isDockCommand(path) else {
+                try await press()
+                return []
+            }
+            return try await launchCandidates(for: app, from: page, alreadyRunning: true, request: press)
+        }
+        let reservation = Bundle(url: url)?.bundleIdentifier.map(reserveLaunch(of:))
+        defer { reservation.map(releaseLaunch) }
+        try await press()
+        for _ in 0 ..< 20 {
+            try await Task.sleep(nanoseconds: 250_000_000)
+            guard isStartPage(page), cells.contains(page) else { throw CancellationError() }
+            if let app = access.runningApplication(url) {
+                return try await launchCandidates(for: app, from: page, alreadyRunning: false)
+            }
+        }
+        return []
+    }
+
+    /// Waits for the app's new windows. For a running app, `request` asks it for one, its New Window command by default.
+    func launchCandidates(for app: NSRunningApplication, from page: UUID, alreadyRunning: Bool,
+                          request: (() async throws -> Void)? = nil) async throws -> [WindowCandidate] {
         try Task.checkCancellation()
         guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
             throw WindowAccessError(operation: L("新規ウィンドウの作成"), code: .actionUnsupported)
@@ -641,7 +758,7 @@ final class WindowSession {
                 return (old, Set(old.compactMap(number)))
             }.value
             try Task.checkCancellation()
-            try await access.requestNewWindow(app)
+            if let request { try await request() } else { try await access.requestNewWindow(app) }
         }
         let list = access.applicationWindows
         var previous: [WindowCandidate] = []
@@ -831,6 +948,7 @@ final class WindowSession {
             return
         }
         guard tabIDs.contains(id) else { return }
+        let previousSelection = selectedID
         let group = groupID(containing: id)
         let switching = group != activeGroupID
         if switching { switchPaneState(to: group) }
@@ -850,6 +968,7 @@ final class WindowSession {
             activeCell = cell
             lastUnpinnedCell = cell
         }
+        recordSelectionChange(from: previousSelection)
         if !switching { replacePresentation(of: displaced, with: id) }
         onChange?()
         if activate, managedByID[id] != nil { focus(id) }
@@ -858,7 +977,9 @@ final class WindowSession {
     }
 
     private func selectGroup(_ group: UUID, activate: Bool) {
+        let previousSelection = selectedID
         switchPaneState(to: group)
+        recordSelectionChange(from: previousSelection)
         onChange?()
         if activate, let id = selectedID, managedByID[id] != nil { focus(id) }
         presentVisibleWindows()
@@ -869,11 +990,13 @@ final class WindowSession {
         guard tabIDs.contains(id), cells.indices.contains(cell),
               !pinnedCells.contains(cell), cellIndex(for: id) == nil || cellIndex(for: id) == cell
         else { return }
+        let previousSelection = selectedID
         let displaced = cells[cell]
         cells[cell] = id
         assignments[id] = cell
         activeCell = cell
         lastUnpinnedCell = cell
+        recordSelectionChange(from: previousSelection)
         replacePresentation(of: displaced, with: id)
         onChange?()
         if activate, managedByID[id] != nil { focus(id) }
@@ -935,9 +1058,20 @@ final class WindowSession {
     func reorderTabEntries(_ orderedEntries: [UUID]) {
         let entries = tabEntries
         guard orderedEntries.count == entries.count, Set(orderedEntries) == Set(entries) else { return }
-        reorderWindows(orderedEntries.flatMap { entry in
+        let normalized = orderedEntries.filter(isTabPinned) + orderedEntries.filter { !isTabPinned($0) }
+        reorderWindows(normalized.flatMap { entry in
             paneGroups[entry] == nil ? [entry] : tabIDs.filter(groupMembers(entry).contains)
         })
+    }
+
+    func sortTabEntries(by key: (UUID) -> String) {
+        let current = tabEntries
+        let keyed = current.enumerated().map { index, id in (index: index, id: id, key: key(id)) }
+        let ordered = keyed.sorted {
+            let result = $0.key.localizedStandardCompare($1.key)
+            return result == .orderedSame ? $0.index < $1.index : result == .orderedAscending
+        }.map(\.id)
+        if ordered != current { reorderTabEntries(ordered) }
     }
 
     @discardableResult
@@ -957,6 +1091,7 @@ final class WindowSession {
             onMessage?(.attention(L("タブを移動できませんでした。移動先と対象ウィンドウを確認してください。")))
             return false
         }
+        if pinnedTabIDs.remove(id) != nil { destination.pinnedTabIDs.insert(id) }
         if cell == nil { destination.switchPaneState(to: nil) }
         tabIDs.remove(at: index)
         destination.tabIDs.insert(id, at: insertion)
@@ -979,6 +1114,8 @@ final class WindowSession {
             destination.lastUnpinnedCell = targetCell
         }
         destination.clearPresentation()
+        if !pinnedTabIDs.isEmpty { reorderTabEntries(tabEntries) }
+        if !destination.pinnedTabIDs.isEmpty { destination.reorderTabEntries(destination.tabEntries) }
         // Both ownership lists are updated before observers run; never restore the transferred window here.
         onChange?()
         destination.onChange?()
@@ -996,8 +1133,13 @@ final class WindowSession {
             source.managedByID[id].map { !contains($0.candidate) } ?? false
         }
         guard !ids.isEmpty else { return 0 }
+        var movedPinnedTabs = false
         switchPaneState(to: nil)
         for id in ids {
+            if source.pinnedTabIDs.remove(id) != nil {
+                pinnedTabIDs.insert(id)
+                movedPinnedTabs = true
+            }
             source.tabIDs.removeAll { $0 == id }
             tabIDs.append(id)
             managedByID[id] = source.managedByID.removeValue(forKey: id)
@@ -1016,6 +1158,10 @@ final class WindowSession {
         }
         source.reconcilePanes()
         clearPresentation()
+        if movedPinnedTabs {
+            source.reorderTabEntries(source.tabEntries)
+            reorderTabEntries(tabEntries)
+        }
         // Both ownership lists are updated before observers run; never restore a moved window here.
         source.onChange?()
         onChange?()
@@ -1062,12 +1208,20 @@ final class WindowSession {
         select(candidates[next], activate: true)
     }
 
-    func sync() {
-        synchronize(bringToFront: false)
+    func selectPreviousUsedTab() {
+        guard canSelectPreviousUsedTab, let previousSelectedID else {
+            self.previousSelectedID = nil
+            return
+        }
+        select(previousSelectedID, activate: true)
     }
 
-    func sync(excluding id: UUID) {
-        synchronize(bringToFront: false, raiseWindows: false, excluding: id)
+    func sync(showShortcutHint: Bool = true) {
+        synchronize(bringToFront: false, showShortcutHint: showShortcutHint)
+    }
+
+    func sync(excluding id: UUID, showShortcutHint: Bool = true) {
+        synchronize(bringToFront: false, raiseWindows: false, showShortcutHint: showShortcutHint, excluding: id)
     }
 
     /// Re-applies target frames and re-presents even if nothing appears to have changed.
@@ -1341,7 +1495,7 @@ final class WindowSession {
             } else if let selectedID, constraintWarningIDs.contains(selectedID) {
                 let app = constraintAppNames(for: [selectedID]) ?? L("対象アプリ")
                 onMessage?(.attention(L("%@のウィンドウがペインの大きさや位置に合わず、完全には収まりません。", app)))
-            } else if showShortcutHint, !frames.isEmpty {
+            } else if showShortcutHint, errors.isEmpty, !frames.isEmpty {
                 onMessage?(.information(L("⌃ Tab / ⌃ ⇧ Tab でタブを切替")))
             }
             report(errors)
@@ -1370,12 +1524,39 @@ final class WindowSession {
             requestedFrames[window.id] = frame
             return
         }
+        // A busy app can keep showing its previous frame, or the new size at its previous position, for a while. It can
+        // also apply a request whose Accessibility call timed out, so record the request before making it.
+        recordFrameRequest(actual, for: window.id)
+        recordFrameRequest(frame, for: window.id)
         if actual.size != frame.size {
             try access.setFrame(window.candidate.element, frame)
         } else {
             try access.setPosition(window.candidate.element, frame.origin)
         }
         requestedFrames[window.id] = frame
+    }
+
+    private func recordFrameRequest(_ frame: CGRect, for id: UUID) {
+        let now = ProcessInfo.processInfo.systemUptime
+        recentFrameRequests = recentFrameRequests.compactMapValues { requests in
+            let recent = requests.filter { now - $0.time < Self.lateFrameRequestInterval }
+            return recent.isEmpty ? nil : recent
+        }
+        recentFrameRequests[id, default: []].append((frame, now))
+    }
+
+    /// Whether a window shows a frame it had or WindowDock requested a moment ago, which a busy app reported late, rather
+    /// than a move or resize by the user. Position and size are compared separately, as they can be set separately.
+    func isLateFrameRequest(_ frame: CGRect, for id: UUID) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let requests = (recentFrameRequests[id] ?? []).filter { now - $0.time < Self.lateFrameRequestInterval }
+        return requests.contains {
+            abs(frame.minX - $0.frame.minX) <= Self.framePositionTolerance
+                && abs(frame.minY - $0.frame.minY) <= Self.framePositionTolerance
+        } && requests.contains {
+            abs(frame.width - $0.frame.width) <= Self.frameRoundingTolerance.width
+                && abs(frame.height - $0.frame.height) <= Self.frameRoundingTolerance.height
+        }
     }
 
     private func fits(_ actual: CGRect, requested: CGRect) -> Bool {
@@ -1503,6 +1684,8 @@ final class WindowSession {
         }
         managedByID.removeValue(forKey: id)
         tabIDs.remove(at: index)
+        pinnedTabIDs.remove(id)
+        if previousSelectedID == id { previousSelectedID = nil }
         if !isSplit, cells[0] == id {
             cells[0] = replacementTab(near: index)
         }
@@ -1586,6 +1769,7 @@ final class WindowSession {
         let ids = confirmed
         for id in ids { managedByID.removeValue(forKey: id) }
         tabIDs.removeAll { ids.contains($0) }
+        pinnedTabIDs.subtract(ids)
         requestedFrames = requestedFrames.filter { !ids.contains($0.key) }
         suspendedWindowIDs.subtract(ids)
         assignments = assignments.filter { !ids.contains($0.key) }
@@ -1663,10 +1847,17 @@ final class WindowSession {
     }
 
     private func report(_ errors: [Error]) {
-        guard !errors.isEmpty else { return }
+        var shown: [String] = []
         for error in errors {
-            WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
+            // A stale element means the window closed or was recreated; pruning drops or re-resolves it, so don't alarm.
+            if (error as? WindowAccessError)?.code == .invalidUIElement {
+                WindowAccess.logger.debug("\(error.localizedDescription, privacy: .public)")
+            } else {
+                WindowAccess.logger.error("\(error.localizedDescription, privacy: .public)")
+                shown.append(error.localizedDescription)
+            }
         }
-        onMessage?(.attention(errors.map(\.localizedDescription).joined(separator: " / ")))
+        guard !shown.isEmpty else { return }
+        onMessage?(.attention(shown.joined(separator: " / ")))
     }
 }

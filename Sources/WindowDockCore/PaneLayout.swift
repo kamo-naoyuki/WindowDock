@@ -130,6 +130,22 @@ public indirect enum PaneLayout: Codable, Equatable {
     public struct Geometry {
         public var panes: [CGRect]
         public var dividers: [Divider]
+
+        /// Counts shared tracks, regardless of the order in which the panes were split.
+        public var gridDimensions: (columns: Int, rows: Int)? {
+            guard let topLeft = panes.first else { return nil }
+            func aligned(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.5 }
+            let columns = panes.filter { aligned($0.maxY, topLeft.maxY) }
+            let rows = panes.filter { aligned($0.minX, topLeft.minX) }
+            guard columns.count <= maximumDivisions, rows.count <= maximumDivisions,
+                  columns.count * rows.count == panes.count,
+                  panes.allSatisfy({ pane in
+                      columns.contains { aligned($0.minX, pane.minX) && aligned($0.maxX, pane.maxX) }
+                          && rows.contains { aligned($0.minY, pane.minY) && aligned($0.maxY, pane.maxY) }
+                  })
+            else { return nil }
+            return (columns.count, rows.count)
+        }
     }
 
     public func minimumSize(_ sizes: [Int: CGSize], dividerThickness: CGFloat) -> CGSize? {
@@ -266,6 +282,46 @@ public indirect enum PaneLayout: Codable, Equatable {
         let sum = lengths.reduce(0, +)
         guard sum > 0 else { return nil }
         return replacingWeights(lengths.map { $0 / sum }, at: divider.path)
+    }
+
+    /// Equalizes the nearest split that contains the selected leaf, leaving other nested splits unchanged.
+    public func equalizingSplit(containingPaneAt index: Int) -> PaneLayout? {
+        guard isValid, index >= 0, index < paneCount else { return nil }
+        return equalizingSplit(at: index)
+    }
+
+    /// Equalizes the split identified by its path from the root, leaving other splits unchanged.
+    public func equalizingSplit(atPath path: [Int]) -> PaneLayout? {
+        guard isValid else { return nil }
+        var target = self
+        for index in path {
+            guard case .split(_, _, let children) = target, children.indices.contains(index) else { return nil }
+            target = children[index]
+        }
+        guard case .split(_, let weights, _) = target else { return nil }
+        return replacingWeights(Self.equalWeights(for: weights), at: path)
+    }
+
+    private func equalizingSplit(at index: Int) -> PaneLayout? {
+        guard case .split(let axis, let weights, var children) = self else { return nil }
+        var offset = 0
+        for child in children.indices {
+            let count = children[child].paneCount
+            if index < offset + count {
+                if let equalized = children[child].equalizingSplit(at: index - offset) {
+                    children[child] = equalized
+                    return .split(axis: axis, weights: weights, children: children)
+                }
+                return .split(axis: axis, weights: Self.equalWeights(for: weights), children: children)
+            }
+            offset += count
+        }
+        return nil
+    }
+
+    private static func equalWeights(for weights: [CGFloat]) -> [CGFloat] {
+        guard let first = weights.first, weights.contains(where: { $0 != first }) else { return weights }
+        return Array(repeating: 1, count: weights.count)
     }
 
     private func replacingWeights(_ replacement: [CGFloat], at path: [Int]) -> PaneLayout? {

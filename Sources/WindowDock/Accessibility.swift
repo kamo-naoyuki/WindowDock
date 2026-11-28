@@ -705,6 +705,13 @@ struct WindowAccessClient {
     var applicationWindows: (NSRunningApplication) -> [WindowCandidate]? = WindowAccess.applicationWindows
     var requestNewWindow: (NSRunningApplication) async throws -> Void = WindowAccess.requestNewWindow
     var allWindowIDs: (NSRunningApplication) -> [CGWindowID]? = WindowAccess.allWindowIDs(of:)
+    /// Reads the menu of the app's Dock icon, or nil when the app has no icon in the Dock. Briefly opens the menu.
+    var dockMenu: (URL) throws -> [DockMenuItem]? = WindowAccess.dockMenu(for:)
+    /// Whether the app has an icon in the Dock, without opening its menu.
+    var hasDockItem: (URL) -> Bool = WindowAccess.hasDockItem(for:)
+    var chooseDockMenuItem: (DockMenuPath, URL) throws -> Void = WindowAccess.chooseDockMenuItem
+    /// The running instance of the app at the URL, if any.
+    var runningApplication: (URL) -> NSRunningApplication? = WindowAccess.runningApplication(at:)
     /// Returns an object that keeps reporting the app's new windows until it's released, or nil if that failed.
     var observeWindowCreation: (NSRunningApplication, @escaping @Sendable (AXUIElement) -> Void) -> AnyObject? = {
         WindowCreationObserver(application: $0, onCreate: $1)
@@ -821,6 +828,7 @@ extension WindowAccess {
     }
 
     static func probe(_ element: AXUIElement) -> WindowProbeResult {
+        AXUIElementSetMessagingTimeout(element, 0.3)
         var title: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
         let currentTitle =
@@ -946,5 +954,145 @@ extension WindowAccess {
         }
         scan.windows.sort { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
         return scan
+    }
+}
+
+/// The menu the Dock shows for an app's icon. There's no API for another app's Dock menu, so it's read by opening
+/// the real menu briefly through Accessibility, and an item is chosen by opening the menu again and pressing it.
+extension WindowAccess {
+    /// Returns nil when the app has no Dock item, which is the case unless it's running or kept in the Dock.
+    static func dockMenu(for url: URL) throws -> [DockMenuItem]? {
+        guard let item = dockItem(for: url) else { return nil }
+        let menu = try openDockMenu(of: item)
+        defer { closeDockMenu(menu) }
+        return dockMenuItems(in: menu)
+    }
+
+    static func hasDockItem(for url: URL) -> Bool { dockItem(for: url) != nil }
+
+    /// Launch Services can resolve another path to the same live instance, so an app with the same bundle
+    /// identifier counts too.
+    static func runningApplication(at url: URL) -> NSRunningApplication? {
+        let bundleID = Bundle(url: url)?.bundleIdentifier
+        let instances = (bundleID.map(NSRunningApplication.runningApplications(withBundleIdentifier:))
+            ?? NSWorkspace.shared.runningApplications).filter { !$0.isTerminated }
+        let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+        let matchingURL = instances.first { $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == canonical }
+        return matchingURL ?? (bundleID == nil ? nil : instances.first)
+    }
+
+    static func chooseDockMenuItem(_ path: DockMenuPath, for url: URL) throws {
+        let operation = L("Dock メニューの「%@」の実行", path.steps.map(\.title).joined(separator: " › "))
+        guard let item = dockItem(for: url) else { throw WindowAccessError(operation: operation, code: .noValue) }
+        let menu = try openDockMenu(of: item)
+        guard let indices = path.indices(in: dockMenuItems(in: menu)),
+              let element = dockMenuElement(at: indices, in: menu),
+              (try? value(element, kAXEnabledAttribute) as? Bool) != false
+        else {
+            closeDockMenu(menu)
+            throw WindowAccessError(operation: operation, code: .noValue)
+        }
+        let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        guard result == .success || result == .cannotComplete else {
+            closeDockMenu(menu)
+            throw WindowAccessError(operation: operation, code: result)
+        }
+    }
+
+    private static func dockItem(for url: URL) -> AXUIElement? {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
+        else { return nil }
+        let application = AXUIElementCreateApplication(dock.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.5)
+        let target = url.resolvingSymlinksInPath().standardizedFileURL
+        let bundleID = Bundle(url: url)?.bundleIdentifier
+        var sameBundle: AXUIElement?
+        for list in (try? value(application, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
+            for item in (try? value(list, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
+                guard (try? value(item, kAXSubroleAttribute) as? String) == "AXApplicationDockItem",
+                      let location = (try? value(item, kAXURLAttribute)) as? URL else { continue }
+                if location.resolvingSymlinksInPath().standardizedFileURL == target { return item }
+                if sameBundle == nil, let bundleID, Bundle(url: location)?.bundleIdentifier == bundleID {
+                    sameBundle = item
+                }
+            }
+        }
+        return sameBundle
+    }
+
+    private static func openDockMenu(of item: AXUIElement) throws -> AXUIElement {
+        let operation = L("Dock メニューの表示")
+        let result = AXUIElementPerformAction(item, kAXShowMenuAction as CFString)
+        guard result == .success else { throw WindowAccessError(operation: operation, code: result) }
+        func itemCount(_ menu: AXUIElement) -> Int {
+            ((try? value(menu, kAXChildrenAttribute) as? [AXUIElement]) ?? []).count
+        }
+        let deadline = Date().addingTimeInterval(1)
+        repeat {
+            if let menu = ((try? value(item, kAXChildrenAttribute) as? [AXUIElement]) ?? []).first(where: {
+                (try? value($0, kAXRoleAttribute) as? String) == kAXMenuRole
+            }) {
+                // The app's own items arrive with the Dock's; make sure none are still being added.
+                var count = itemCount(menu)
+                while Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.03)
+                    let current = itemCount(menu)
+                    if current == count, current > 0 { break }
+                    count = current
+                }
+                return menu
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        } while Date() < deadline
+        throw WindowAccessError(operation: operation, code: .cannotComplete)
+    }
+
+    private static func closeDockMenu(_ menu: AXUIElement) {
+        let result = AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+        if result != .success { logger.error("Couldn't close the Dock menu: \(result.rawValue)") }
+    }
+
+    private static func dockMenuItems(in menu: AXUIElement) -> [DockMenuItem] {
+        let attributes = [kAXTitleAttribute, kAXEnabledAttribute, kAXIdentifierAttribute, kAXMenuItemMarkCharAttribute,
+                          kAXMenuItemPrimaryUIElementAttribute, kAXChildrenAttribute]
+        let elements = (try? value(menu, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        let rows = elements.map { element in
+            var fetched: CFArray?
+            let error = AXUIElementCopyMultipleAttributeValues(element, attributes as CFArray, [], &fetched)
+            let values = (error == .success ? fetched as? [AnyObject] : nil) ?? []
+            return attributes.indices.map { index -> AnyObject? in
+                guard values.indices.contains(index), !(values[index] is NSNull) else { return nil }
+                let value = values[index]
+                if CFGetTypeID(value) == AXValueGetTypeID(),
+                   AXValueGetType(value as! AXValue) == .axError { return nil }
+                return value
+            }
+        }
+        // Separators, section headers, and submenu titles have no action identifier. Should the Dock stop providing
+        // identifiers, every titled item without a submenu is treated as a command instead.
+        let identified = rows.contains { $0[2] != nil }
+        return zip(elements, rows).map { element, row in
+            let title = row[0] as? String ?? ""
+            let submenu = (row[5] as? [AXUIElement])?.first.map(dockMenuItems(in:)) ?? []
+            return DockMenuItem(
+                title: title,
+                isEnabled: row[1] as? Bool ?? false,
+                performsAction: submenu.isEmpty && (identified ? row[2] != nil : !title.isEmpty),
+                isChecked: !(row[3] as? String ?? "").isEmpty,
+                isAlternate: row[4].map { !CFEqual($0, element) } ?? false,
+                submenu: submenu)
+        }
+    }
+
+    private static func dockMenuElement(at indices: [Int], in menu: AXUIElement) -> AXUIElement? {
+        var menu: AXUIElement? = menu
+        var element: AXUIElement?
+        for index in indices {
+            guard let current = menu, let items = try? value(current, kAXChildrenAttribute) as? [AXUIElement],
+                  items.indices.contains(index) else { return nil }
+            element = items[index]
+            menu = (try? value(items[index], kAXChildrenAttribute) as? [AXUIElement])?.first
+        }
+        return element
     }
 }

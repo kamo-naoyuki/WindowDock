@@ -4,7 +4,7 @@ macOS 13+ AppKit app (Swift 5.10, SwiftPM). It groups other apps' windows into a
 
 ## Build / test
 
-- `swift build` – debug build. `bash build-app.sh` → `dist/WindowDock.app` (signs, embeds Sparkle). `build-dmg.sh` → DMG.
+- `swift build` – debug build. `bash build-app.sh` → `dist/WindowDock.app` (signs, embeds Sparkle; without `VERSION`, automatic update checks are off so Sparkle doesn't replace the local build with the latest release). `build-dmg.sh` → DMG.
 - `swift test` – runs only `Tests/WindowDockCoreTests` (needs full Xcode for XCTest).
 - `Tests/WindowDockUITests/*Smoke.swift` are manual smoke harnesses against real windows; they are **not** SwiftPM targets. Run them with `Tests/WindowDockUITests/run-smoke.sh` (compiles them with every app source except `App.swift`, so move logic worth testing out of `App.swift`; `--tab-move-only` / `--window-drop-only` / `--activation-only` run subsets; `--stage-manager-only` turns Stage Manager on for the run and restores the setting on exit, so full runs skip it). They open real windows, so other apps' windows moving in front can cause hit-test failures.
 - If `xcode-select -p` points at the Command Line Tools and `swift` fails, prefix commands with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.

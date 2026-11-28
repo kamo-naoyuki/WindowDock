@@ -34,6 +34,11 @@ private let translations: [String: [String]] = [
         "탭을 이동하지 못했습니다. 이동 대상과 창을 확인하세요.",
         "No se pudo mover la pestaña. Compruebe el destino y la ventana.",
     ],
+    "タブを固定": ["Pin Tab", "固定标签页", "탭 고정", "Fijar pestaña"],
+    "タブ固定中": ["Pinned tab", "已固定标签页", "고정된 탭", "Pestaña fijada"],
+    "タブを並べ替え": ["Sort Tabs", "排序标签页", "탭 정렬", "Ordenar pestañas"],
+    "アプリ名順": ["By App Name", "按应用名称", "앱 이름순", "Por nombre de app"],
+    "ウィンドウ名順": ["By Window Title", "按窗口标题", "창 제목순", "Por título de ventana"],
     "%@に失敗しました（Accessibility: %d）。権限や対象アプリの状態を確認してください。": [
         "%@ failed (Accessibility: %d). Check the permission and the state of the target app.",
         "%@失败（Accessibility：%d）。请检查权限和目标应用的状态。",
@@ -126,6 +131,10 @@ private let translations: [String: [String]] = [
         "Automatically hide the tab bar in new workspaces", "在新工作区中自动隐藏标签栏",
         "새 작업 공간에서 탭 막대 자동으로 숨기기", "Ocultar automáticamente la barra de pestañas en espacios de trabajo nuevos",
     ],
+    "メニューバーにカーソルを合わせると隠したタブバーを表示する": [
+        "Show Hidden Tab Bar When Pointing at the Menu Bar", "指针移到菜单栏时显示隐藏的标签栏",
+        "메뉴 막대를 가리키면 숨긴 탭 막대 표시", "Mostrar la barra de pestañas oculta al señalar la barra de menús",
+    ],
     "WindowDock を終了": ["Quit WindowDock", "退出 WindowDock", "WindowDock 종료", "Salir de WindowDock"],
     "タブ": ["Tabs", "标签页", "탭", "Pestañas"],
     "「%@」のタブを復元": ["Restore Tabs in “%@”", "恢复“%@”的标签页", "‘%@’의 탭 복원", "Restaurar pestañas en «%@»"],
@@ -146,6 +155,9 @@ private let translations: [String: [String]] = [
     "タブにアイコンだけを表示する（ウィンドウ名を隠す）": [
         "Show Only Icons in Tabs (Hide Window Names)", "标签页仅显示图标（隐藏窗口名称）",
         "탭에 아이콘만 표시(창 이름 숨기기)", "Mostrar solo iconos en las pestañas (ocultar nombres de ventana)",
+    ],
+    "タブバーをコンパクトにする": [
+        "Compact Tab Bar", "紧凑标签栏", "탭 막대를 간결하게 표시", "Barra de pestañas compacta",
     ],
     "タブが収まらないときは2段にする": [
         "Wrap crowded tabs into two rows", "标签页放不下时分为两行", "탭이 모두 들어가지 않으면 두 줄로 표시",
@@ -189,6 +201,17 @@ private let translations: [String: [String]] = [
     "すべてのタブを解除": ["Release All Tabs", "解除所有标签页", "모든 탭 해제", "Liberar todas las pestañas"],
     "次のタブ": ["Next Tab", "下一个标签页", "다음 탭", "Pestaña siguiente"],
     "前のタブ": ["Previous Tab", "上一个标签页", "이전 탭", "Pestaña anterior"],
+    "直前に使ったタブ": ["Previously Used Tab", "上次使用的标签页", "직전에 사용한 탭", "Pestaña usada anteriormente"],
+    "ウィンドウを検索…": ["Find Window…", "搜索窗口…", "윈도우 검색…", "Buscar ventana…"],
+    "ウィンドウを検索": ["Find Window", "搜索窗口", "윈도우 검색", "Buscar ventana"],
+    "アプリ名、ウィンドウ名、ワークスペース名で検索": [
+        "Search app, window, or workspace names", "搜索应用、窗口或工作区名称", "앱, 윈도우 또는 작업 공간 이름 검색",
+        "Buscar nombres de apps, ventanas o espacios de trabajo"
+    ],
+    "切り替え": ["Switch", "切换", "전환", "Cambiar"],
+    "タブにカーソルを合わせると切り替える": [
+        "Switch Tabs on Hover", "悬停时切换标签页", "탭에 마우스를 올려 전환", "Cambiar pestañas al pasar el cursor"
+    ],
     "最小化": ["Minimize", "最小化", "최소화", "Minimizar"],
     "最大化 / 復元": ["Maximize / Restore", "最大化 / 还原", "최대화 / 복원", "Maximizar / Restaurar"],
     "列数を1 / 2に切替": ["Toggle Columns 1 / 2", "切换列数 1 / 2", "열 수 1 / 2 전환", "Alternar columnas 1 / 2"],
@@ -202,6 +225,17 @@ private let translations: [String: [String]] = [
     "左右に分割": ["Split Left and Right", "左右分割", "좌우로 분할", "Dividir a izquierda y derecha"],
     "上下に分割": ["Split Top and Bottom", "上下分割", "상하로 분할", "Dividir arriba y abajo"],
     "ペインを閉じる": ["Close Pane", "关闭窗格", "패널 닫기", "Cerrar panel"],
+    "この分割を均等にする": [
+        "Equalize This Split", "均分此分割", "이 분할 균등하게 만들기", "Igualar esta división",
+    ],
+    "左右の分割を均等にする": [
+        "Equalize Left and Right Split", "均分左右分割", "좌우 분할 균등하게 만들기", "Igualar división izquierda y derecha",
+    ],
+    "上下の分割を均等にする": [
+        "Equalize Top and Bottom Split", "均分上下分割", "상하 분할 균등하게 만들기", "Igualar división superior e inferior",
+    ],
+    "列を均等にする": ["Equalize Columns", "均分列", "열 균등하게 만들기", "Igualar columnas"],
+    "行を均等にする": ["Equalize Rows", "均分行", "행 균등하게 만들기", "Igualar filas"],
     "表示中のペインを1つのタブにまとめる": [
         "Combine Shown Panes into One Tab", "将显示的窗格合并为一个标签页",
         "표시 중인 패널을 하나의 탭으로 합치기", "Combinar los paneles visibles en una pestaña",
@@ -332,6 +366,25 @@ private let translations: [String: [String]] = [
         "选择多个应用后，可以一起打开，或设置为自动将其新窗口添加到此工作区。",
         "여러 앱을 선택하면 한꺼번에 열거나, 새 창을 이 작업 공간에 자동으로 추가하도록 설정할 수 있습니다.",
         "Selecciona varias apps para abrirlas juntas o para que sus ventanas nuevas se añadan automáticamente a este espacio de trabajo.",
+    ],
+    "右クリックすると Dock のようなメニューを表示します。": [
+        "Right-click an app for a menu like its Dock menu.",
+        "右键点按应用可显示类似程序坞的菜单。",
+        "앱을 오른쪽 클릭하면 Dock과 비슷한 메뉴를 표시합니다.",
+        "Haz clic con el botón derecho en una app para ver un menú como el del Dock.",
+    ],
+    "Finderに表示": ["Show in Finder", "在访达中显示", "Finder에서 보기", "Mostrar en Finder"],
+    "新規ウィンドウ": ["New Window", "新建窗口", "새로운 윈도우", "Nueva ventana"],
+    "非表示": ["Hide", "隐藏", "가리기", "Ocultar"],
+    "非表示を解除": ["Show", "显示", "보기", "Mostrar"],
+    "強制終了": ["Force Quit", "强制退出", "강제 종료", "Forzar salida"],
+    "Dock のメニューを表示": ["Show Dock Menu", "显示程序坞菜单", "Dock 메뉴 보기", "Mostrar menú del Dock"],
+    "Dock メニューの表示": [
+        "showing the Dock menu", "显示程序坞菜单", "Dock 메뉴 표시", "mostrar el menú del Dock",
+    ],
+    "Dock メニューの「%@」の実行": [
+        "choosing “%@” in the Dock menu", "执行程序坞菜单中的“%@”", "Dock 메뉴의 '%@' 실행",
+        "elegir «%@» en el menú del Dock",
     ],
     "アプリを複数選択": [
         "Select Apps",

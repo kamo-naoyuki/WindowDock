@@ -17,6 +17,45 @@ enum TabOutsideDropAction: String, CaseIterable {
     }
 }
 
+struct TabWheelGesture {
+    private var switchedDuringGesture = false
+
+    mutating func direction(deltaY: CGFloat, phase: NSEvent.Phase, momentumPhase: NSEvent.Phase) -> Int? {
+        if phase.contains(.ended) || phase.contains(.cancelled) {
+            switchedDuringGesture = false
+            return nil
+        }
+        guard momentumPhase.isEmpty else { return nil }
+        if phase.isEmpty {
+            guard deltaY != 0 else { return nil }
+            return deltaY > 0 ? -1 : 1
+        }
+        if phase.contains(.began) { switchedDuringGesture = false }
+        guard !switchedDuringGesture, deltaY != 0 else { return nil }
+        switchedDuringGesture = true
+        return deltaY > 0 ? -1 : 1
+    }
+}
+
+struct TabHoverSwitchPolicy {
+    static let delayNanoseconds: UInt64 = 600_000_000
+    private(set) var hoveredTabID: UUID?
+
+    mutating func mouseEntered(_ id: UUID) {
+        hoveredTabID = id
+    }
+
+    mutating func mouseExited(_ id: UUID) -> Bool {
+        guard hoveredTabID == id else { return false }
+        hoveredTabID = nil
+        return true
+    }
+
+    func shouldSwitch(id: UUID, enabled: Bool, selectedID: UUID?, availableTabIDs: [UUID]) -> Bool {
+        enabled && hoveredTabID == id && selectedID != id && availableTabIDs.contains(id)
+    }
+}
+
 @MainActor
 final class TabOutsideDropSettings: NSObject {
     private static let key = "tabOutsideDropAction"
@@ -95,6 +134,9 @@ final class WorkspaceTabGroup: NSStackView {
     var isFloating = false {
         didSet { if isFloating { hovered = false } }
     }
+    var isTabPinned = false {
+        didSet { if oldValue != isTabPinned { updateBackground() } }
+    }
     private var selected: Bool?
     private var hovered = false {
         didSet { if oldValue != hovered { updateBackground() } }
@@ -102,6 +144,8 @@ final class WorkspaceTabGroup: NSStackView {
     var acceptsTabDrop: ((NSPasteboard, NSButton?) -> Bool)?
     var updateTabDrop: ((NSPasteboard, NSButton?, NSPoint) -> Bool)?
     var performTabDrop: ((NSPasteboard, NSButton?, NSPoint) -> Bool)?
+    var onScrollWheel: ((NSEvent) -> Bool)?
+    var onHover: ((Bool) -> Void)?
 
     init(views: [NSView]) {
         super.init(frame: .zero)
@@ -123,10 +167,21 @@ final class WorkspaceTabGroup: NSStackView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        if !isFloating { hovered = true }
+        if !isFloating {
+            hovered = true
+            onHover?(true)
+        }
     }
 
-    override func mouseExited(with event: NSEvent) { hovered = false }
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        onHover?(false)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if onScrollWheel?(event) == true { return }
+        super.scrollWheel(with: event)
+    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -136,8 +191,9 @@ final class WorkspaceTabGroup: NSStackView {
     private func updateBackground() {
         guard let selected else { return } // Drop previews have their own appearance.
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            let base = selected ? NSColor.controlBackgroundColor
+            let unpinned = selected ? NSColor.controlBackgroundColor
                 : NSColor.unemphasizedSelectedContentBackgroundColor.withAlphaComponent(0.35)
+            let base = isTabPinned ? unpinned.blended(withFraction: 0.16, of: .systemOrange) ?? unpinned : unpinned
             let color = hovered ? base.blended(withFraction: 0.13, of: .controlAccentColor) ?? base : base
             layer?.backgroundColor = color.cgColor
         }
@@ -241,6 +297,30 @@ private final class WorkspaceTabIndicatorView: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+final class WorkspaceTabNumberBadge: NSView {
+    var number: Int? {
+        didSet { needsDisplay = true }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let number else { return }
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2).fill()
+        let text = "\(number)" as NSString
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9, weight: .bold),
+            .foregroundColor: NSColor.white,
+        ]
+        let size = text.size(withAttributes: attributes)
+        text.draw(
+            at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
+            withAttributes: attributes
+        )
+    }
+}
+
 /// Tracks internal tab drags without requiring the destination to be the frontmost native window.
 final class WorkspaceTabButton: NSButton {
     weak var chrome: WorkspaceChromeView?
@@ -253,13 +333,17 @@ final class WorkspaceTabButton: NSButton {
     var performTabDrop: ((NSPasteboard, NSButton?, NSPoint) -> Bool)?
     /// Shows a speaker at the trailing edge, like browser tabs playing audio.
     var showsAudioIndicator = false {
-        didSet { if showsAudioIndicator != oldValue { updateAudioIndicator() } }
+        didSet { if showsAudioIndicator != oldValue { updateIndicators() } }
     }
     /// Whether the tab's pin badge covers the button's top trailing corner; the speaker moves clear of it.
     var hasPinBadge = false {
-        didSet { if hasPinBadge != oldValue { updateAudioIndicator() } }
+        didSet { if hasPinBadge != oldValue { updateIndicators() } }
     }
     private(set) var audioIndicator: NSImageView?
+    private(set) var shortcutNumberBadge: WorkspaceTabNumberBadge?
+    var shortcutNumber: Int? {
+        didSet { if shortcutNumber != oldValue { updateIndicators() } }
+    }
 
     override class var cellClass: AnyClass? {
         get { WorkspaceTabButtonCell.self }
@@ -268,11 +352,12 @@ final class WorkspaceTabButton: NSButton {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        updateAudioIndicator()
+        updateIndicators()
     }
 
-    private func updateAudioIndicator() {
+    private func updateIndicators() {
         let pinWidth: CGFloat = hasPinBadge ? 14 : 0
+        let showsNumber = shortcutNumber != nil && bounds.width >= 22 + pinWidth
         // A narrow tab keeps its application icon instead.
         let visible = showsAudioIndicator && bounds.width >= 36 + pinWidth
         if visible, audioIndicator == nil {
@@ -286,9 +371,20 @@ final class WorkspaceTabButton: NSButton {
             audioIndicator = indicator
         }
         audioIndicator?.isHidden = !visible
-        audioIndicator?.frame = NSRect(x: bounds.maxX - pinWidth - 17, y: (bounds.height - 16) / 2,
-                                       width: 16, height: 16)
-        let inset = visible ? pinWidth + 20 : 0
+        let audioHeight: CGFloat = showsNumber ? 14 : 16
+        let audioY = showsNumber ? 0 : (bounds.height - audioHeight) / 2
+        audioIndicator?.frame = NSRect(x: bounds.maxX - pinWidth - 17, y: audioY, width: 16, height: audioHeight)
+        if showsNumber, shortcutNumberBadge == nil {
+            let badge = WorkspaceTabNumberBadge()
+            badge.setAccessibilityElement(false)
+            addSubview(badge)
+            shortcutNumberBadge = badge
+        }
+        shortcutNumberBadge?.number = shortcutNumber
+        shortcutNumberBadge?.isHidden = !showsNumber
+        shortcutNumberBadge?.frame = NSRect(x: bounds.maxX - pinWidth - 17, y: bounds.maxY - 14,
+                                            width: 14, height: 14)
+        let inset = (visible || showsNumber) ? pinWidth + 20 : 0
         if let cell = cell as? WorkspaceTabButtonCell, cell.trailingInset != inset {
             cell.trailingInset = inset
             needsDisplay = true

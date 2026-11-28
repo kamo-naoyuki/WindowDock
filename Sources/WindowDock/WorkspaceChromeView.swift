@@ -78,6 +78,13 @@ private final class WorkspaceToolbarPanel: NSPanel {
 
 /// Paints the auto-hidden tab bar like the regular one; a vibrant material would gray out its tabs.
 private final class WorkspaceToolbarPanelBackground: NSView {
+    weak var chrome: WorkspaceChromeView?
+
+    /// Clicks on empty parts of the bar reach the workspace view when the bar is embedded; do the same here.
+    override func mouseDown(with event: NSEvent) {
+        chrome?.trackFrameChangeFromToolbar(with: event)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.windowBackgroundColor.setFill()
         dirtyRect.fill()
@@ -92,9 +99,139 @@ private final class WorkspaceToolbarDragSpace: NSView {
     }
 }
 
+/// Draw over the native bezel without intercepting a click, tooltip, or accessibility hit on the control.
+private final class WorkspaceControlHover: NSView {
+    private var hovering = false { didSet { needsDisplay = true } }
+    private var enabledObservation: NSKeyValueObservation?
+
+    init(on button: NSButton) {
+        super.init(frame: button.bounds)
+        autoresizingMask = [.width, .height]
+        setAccessibilityElement(false)
+        button.addSubview(self)
+        button.addTrackingArea(NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+        enabledObservation = button.observe(\.isEnabled) { [weak self] _, _ in self?.needsDisplay = true }
+    }
+
+    required init?(coder: NSCoder) { nil }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        hovering = false
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard hovering, (superview as? NSButton)?.isEnabled == true else { return }
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75), xRadius: 5, yRadius: 5)
+        NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
+        shape.fill()
+        NSColor.controlAccentColor.withAlphaComponent(0.85).setStroke()
+        shape.lineWidth = 1.5
+        shape.stroke()
+    }
+}
+
+/// The compact tab bar's trailing grip: hovering it shows the hidden controls, dragging it moves the workspace.
+private final class WorkspaceCompactControlsHandle: NSView {
+    weak var chrome: WorkspaceChromeView?
+    var isVertical = false { didSet { needsDisplay = true } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self,
+            userInfo: nil))
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func mouseEntered(with event: NSEvent) {
+        chrome?.updateCompactControlsHover(at: NSEvent.mouseLocation)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        chrome?.trackFrameChangeFromToolbar(with: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.secondaryLabelColor.setFill()
+        for offset in [-4.0, 0, 4] {
+            let center = isVertical ? NSPoint(x: bounds.midX + offset, y: bounds.midY)
+                : NSPoint(x: bounds.midX, y: bounds.midY + offset)
+            NSBezierPath(ovalIn: NSRect(x: center.x - 1.25, y: center.y - 1.25, width: 2.5, height: 2.5)).fill()
+        }
+    }
+}
+
+/// Holds the compact tab bar's controls above the tabs while they are shown.
+private final class WorkspaceCompactControlsTray: NSView {
+    weak var chrome: WorkspaceChromeView?
+    let stack = NSStackView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func mouseDown(with event: NSEvent) {
+        chrome?.trackFrameChangeFromToolbar(with: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        NSColor.windowBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.stroke()
+    }
+}
+
+/// Sizes of the tab bar; the compact tab bar trims the tabs' height and padding.
+private struct TabBarMetrics {
+    let tabHeight: CGFloat
+    let titleHeight: CGFloat
+    let leadingInset: CGFloat
+    let trailingInset: CGFloat
+    let titleSpacing: CGFloat
+    let toolbarSpacing: CGFloat
+    let toolbarInset: CGFloat
+    static let closeWidth: CGFloat = 18
+    /// Width a tab group adds around its title: insets, the gap and the × button.
+    var chromeWidth: CGFloat { leadingInset + titleSpacing + Self.closeWidth + trailingInset }
+    /// A pinned tab hides × and uses only the group's horizontal insets.
+    var pinnedChromeWidth: CGFloat { leadingInset + trailingInset }
+    var pinOffset: CGFloat { trailingInset + Self.closeWidth + titleSpacing }
+
+    static let regular = TabBarMetrics(
+        tabHeight: 32, titleHeight: 28, leadingInset: 8, trailingInset: 4, titleSpacing: 4, toolbarSpacing: 4,
+        toolbarInset: 6)
+    static let compact = TabBarMetrics(
+        tabHeight: 26, titleHeight: 22, leadingInset: 4, trailingInset: 2, titleSpacing: 2, toolbarSpacing: 2,
+        toolbarInset: 2)
+}
+
 struct TabReleaseRequest: Equatable {
     let ids: [UUID]
     let closeWindows: Bool
+}
+
+private struct TabPinRequest {
+    let id: UUID
+    let pinned: Bool
 }
 
 struct WorkspaceTabItem {
@@ -105,7 +242,10 @@ struct WorkspaceTabItem {
     var selected: Bool
     var displayed = false
     var pinned = false
+    var tabPinned = false
     var tabSwitchTarget = false
+    var shortcutNumber: Int? = nil
+    var canPinTab = false
     var playingAudio = false
     /// A combined tab: it shows a remembered pane state, so its tab only reorders when dragged.
     var paneGroup = false
@@ -137,6 +277,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             }
         }
     }
+    /// Tighter tabs without the workspace name; the controls after the tabs appear from a handle at the end.
+    var compactTabBar = false {
+        didSet { if compactTabBar != oldValue { applyCompactTabBar() } }
+    }
     let stage = WorkspaceGridView(frame: .zero)
     var gridSize: WorkspaceGridSize { stage.gridSize }
     var gridAreas: [NSView] { stage.areas }
@@ -145,13 +289,17 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     var onGridChange: ((WorkspaceGridSize) -> Void)?
     var splitRestriction: ((Int, PaneLayout.Axis) -> PaneSplitRestriction?)?
     var onSplitPane: ((Int, PaneLayout.Axis) -> Void)?
+    var onEqualizePane: ((Int) -> Void)?
     var onClosePane: ((Int) -> Void)?
     var isPanePinned: ((Int) -> Bool)?
     var onTogglePanePin: ((Int) -> Void)?
     var paneForTab: ((Int) -> Int?)?
     /// Menu items for automatically collecting the app of the tab at an index.
     var autoGroupMenuItems: ((Int) -> [NSMenuItem])?
+    var onSetTabPinned: ((UUID, Bool) -> Void)?
     var onActivateCell: ((Int) -> Void)?
+    var onTabScroll: ((Int) -> Void)?
+    var onTabHover: ((UUID, Bool) -> Void)?
     var onPaneLayoutChange: (() -> Void)?
     var onMoveTab: ((Int, Int) -> Void)?
     var onReorderTabs: (([Int]) -> Void)?
@@ -177,10 +325,24 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     let columnSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let rowSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let workspaceButton = NSButton(title: "", target: nil, action: nil)
+    /// Opens the workspace menu from the compact tab bar, which hides the workspace name.
+    let workspaceMenuButton = makeButton(symbol: "ellipsis.circle", title: L("ワークスペースの操作"), width: 26)
     var workspaceMenu: (() -> NSMenu)?
     private var toolbar: NSStackView!
     private let titlebarControls = NSView()
     private let toolbarHost = NSView()
+    private let dragSpace = WorkspaceToolbarDragSpace()
+    private var dragSpaceWidths: [NSLayoutConstraint] = []
+    private let compactHandle = WorkspaceCompactControlsHandle()
+    private var compactHandleSize: [NSLayoutConstraint] = []
+    private let compactTray = WorkspaceCompactControlsTray()
+    private var compactTrayConstraints: [NSLayoutConstraint] = []
+    private var clippedTabDividerLeading: NSLayoutConstraint!
+    private(set) var compactControlsRevealed = false
+    private var compactControlsExitDate: Date?
+    private var compactControlsTimer: Timer?
+    static let compactControlsHideDelay: TimeInterval = 0.3
+    private var metrics: TabBarMetrics { compactTabBar ? .compact : .regular }
     private var toolbarConstraints: [NSLayoutConstraint] = []
     private var toolbarOverlayConstraints: [NSLayoutConstraint] = []
     private var placementConstraints: [NSLayoutConstraint] = []
@@ -199,8 +361,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     private(set) var autoHiddenToolbarVisible = false
     private(set) var tabBarPosition: TabBarPosition = .top
     private static let minimumWorkspaceNameWidth: CGFloat = 48
-    /// Width a tab group adds around its title: insets, the gap and the × button.
-    private static let tabChromeWidth: CGFloat = 34
+    private static let verticalTabWidth: CGFloat = 180
     private var hasManagedWindows = false
     private var settingGrid = false
     private weak var dragSource: NSButton?
@@ -225,6 +386,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     private weak var tabDragPreviewImageView: NSImageView?
 
     private let tabScroll = NSScrollView()
+    private var tabPreviewPanel: NSPanel?
+    private weak var tabPreviewImageView: NSImageView?
+    var isTabPreviewVisible: Bool { tabPreviewPanel?.isVisible == true }
+    var tabPreviewFrame: NSRect? { tabPreviewPanel?.frame }
     private let clippedTabDivider = NSBox()
     private let notice = NSTextField(labelWithString: "")
     var currentNoticeText: String? { notice.isHidden ? nil : notice.stringValue }
@@ -240,6 +405,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let close: NSButton
         fileprivate let pin: NSImageView
         fileprivate let constraint: NSLayoutConstraint
+        fileprivate let titleHeight: NSLayoutConstraint
+        fileprivate let groupHeight: NSLayoutConstraint
+        fileprivate let pinTrailing: NSLayoutConstraint
     }
 
     private var tabSizing: [Tab] = []
@@ -248,6 +416,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     private var pointerInToolbar = false
     private var toolbarTracking: NSTrackingArea?
     private var closeSizing: (constraints: [NSLayoutConstraint], windowSize: NSSize)?
+    private var tabWheelGesture = TabWheelGesture()
+    private var tabReorderGesture = TabWheelGesture()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -262,7 +432,60 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     deinit {
         windowDropPanel?.close()
         tabDragPreviewPanel?.close()
+        tabPreviewPanel?.close()
         toolbarPanel?.close()
+    }
+
+    func showTabPreview(_ image: CGImage) {
+        if tabPreviewPanel == nil {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false)
+            panel.level = .floating
+            panel.backgroundColor = .clear
+            panel.isOpaque = false
+            panel.hasShadow = true
+            panel.ignoresMouseEvents = true
+            panel.hidesOnDeactivate = false
+            panel.isReleasedWhenClosed = false
+            panel.isExcludedFromWindowsMenu = true
+            panel.collectionBehavior = [.transient, .ignoresCycle]
+            let imageView = NSImageView()
+            imageView.imageScaling = .scaleNone
+            imageView.wantsLayer = true
+            imageView.layer?.backgroundColor = NSColor.clear.cgColor
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            panel.contentView?.addSubview(imageView)
+            NSLayoutConstraint.activate([
+                imageView.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor),
+                imageView.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor),
+                imageView.topAnchor.constraint(equalTo: panel.contentView!.topAnchor),
+                imageView.bottomAnchor.constraint(equalTo: panel.contentView!.bottomAnchor),
+            ])
+            tabPreviewPanel = panel
+            tabPreviewImageView = imageView
+        }
+        tabPreviewImageView?.image = NSImage(
+            cgImage: image, size: NSSize(width: image.width, height: image.height))
+        let panel = tabPreviewPanel!
+        panel.setContentSize(NSSize(width: image.width, height: image.height))
+        let size = panel.frame.size
+        let point = NSEvent.mouseLocation
+        let visible = NSScreen.screens.first(where: { $0.frame.contains(point) })?.visibleFrame
+            ?? NSScreen.main?.visibleFrame ?? .zero
+        var origin = NSPoint(x: point.x + 16, y: point.y + 16)
+        if origin.x + size.width > visible.maxX { origin.x = point.x - size.width - 16 }
+        if origin.y + size.height > visible.maxY { origin.y = point.y - size.height - 16 }
+        origin.x = min(max(origin.x, visible.minX), visible.maxX - size.width)
+        origin.y = min(max(origin.y, visible.minY), visible.maxY - size.height)
+        panel.setFrameOrigin(origin)
+        panel.orderFrontRegardless()
+    }
+
+    func hideTabPreview() {
+        tabPreviewPanel?.orderOut(nil)
     }
 
     override func layout() {
@@ -293,6 +516,39 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         self.closeSizing = nil
         updateTabWidths()
         needsLayout = true
+    }
+
+    private func handleTabScrollWheel(_ event: NSEvent, over id: UUID) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if flags == [.shift] {
+            let delta = event.deltaY == 0 ? event.deltaX : event.deltaY
+            guard let direction = tabReorderGesture.direction(
+                deltaY: delta, phase: event.phase, momentumPhase: event.momentumPhase)
+            else { return false }
+            _ = reorderTab(id, by: direction)
+            return true
+        }
+        guard flags.isEmpty,
+              onTabScroll != nil, !tabBarPosition.isVertical, !tabScroll.isHidden,
+              tabScroll.contentView.bounds.width >= tabs.bounds.width - 1,
+              let direction = tabWheelGesture.direction(
+                  deltaY: event.deltaY, phase: event.phase, momentumPhase: event.momentumPhase)
+        else { return false }
+        onTabScroll?(direction)
+        return true
+    }
+
+    @discardableResult
+    func reorderTab(_ id: UUID, by direction: Int) -> Bool {
+        guard abs(direction) == 1, let index = tabSizing.firstIndex(where: { $0.id == id }),
+              let onReorderTabs
+        else { return false }
+        let destination = index + direction
+        guard tabSizing.indices.contains(destination) else { return false }
+        var order = Array(tabSizing.indices)
+        order.swapAt(index, destination)
+        onReorderTabs(order)
+        return true
     }
 
     @objc private func updateClippedTabDivider() {
@@ -353,6 +609,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         NSLayoutConstraint.activate(position.isVertical ? verticalTabConstraints : horizontalTabConstraints)
         if autoHideTabBar { configureToolbarOverlay() }
         autoHideHandle.isVertical = position.isVertical
+        configureCompactControls()
         configurePlacement()
         if showsTabIconsOnly { reconfigureTabs() }
         updateTabWidths()
@@ -364,6 +621,125 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     func setWorkspaceName(_ name: String) {
         workspaceButton.title = name
         workspaceButton.toolTip = name
+    }
+
+    /// The controls that the compact tab bar keeps out of sight until its handle is hovered.
+    private var compactTrayControls: [NSView] { [combineButton, columnSelector, rowSelector, permissionButton] }
+
+    private func applyCompactTabBar() {
+        endTabDrag()
+        endCloseSizing()
+        hideWindowDropTarget()
+        let metrics = metrics
+        toolbar.spacing = metrics.toolbarSpacing
+        toolbar.edgeInsets = NSEdgeInsets(top: 0, left: metrics.toolbarInset, bottom: 0, right: metrics.toolbarInset)
+        clippedTabDividerLeading.constant = 1 - metrics.toolbarSpacing
+        workspaceButton.isHidden = compactTabBar
+        // The handle is the grip of the compact tab bar; the drag space only takes what the tabs leave.
+        for constraint in dragSpaceWidths {
+            constraint.constant = compactTabBar ? 0 : 30
+        }
+        if compactTabBar {
+            compactTray.stack.addArrangedSubview(workspaceMenuButton)
+            for view in compactTrayControls {
+                toolbar.removeArrangedSubview(view)
+                view.removeFromSuperview()
+                compactTray.stack.addArrangedSubview(view)
+            }
+            toolbar.addArrangedSubview(compactHandle)
+            toolbar.setVisibilityPriority(.mustHold, for: compactHandle)
+            toolbar.addSubview(compactTray, positioned: .above, relativeTo: nil)
+            configureCompactControls()
+        } else {
+            setCompactControlsRevealed(false)
+            NSLayoutConstraint.deactivate(compactHandleSize + compactTrayConstraints)
+            compactTray.removeFromSuperview()
+            toolbar.removeArrangedSubview(compactHandle)
+            compactHandle.removeFromSuperview()
+            compactTray.stack.removeArrangedSubview(workspaceMenuButton)
+            workspaceMenuButton.removeFromSuperview()
+            for view in compactTrayControls {
+                compactTray.stack.removeArrangedSubview(view)
+                view.removeFromSuperview()
+                toolbar.addArrangedSubview(view)
+                toolbar.setVisibilityPriority(.mustHold, for: view)
+            }
+        }
+        for tab in tabSizing {
+            applyMetrics(to: tab)
+        }
+        updateStripHeight()
+        updateTabWidths()
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        updateToolbarPanelFrame()
+    }
+
+    private func configureCompactControls() {
+        guard compactTabBar else { return }
+        let vertical = tabBarPosition.isVertical
+        NSLayoutConstraint.deactivate(compactHandleSize + compactTrayConstraints)
+        compactHandle.isVertical = vertical
+        compactHandleSize = [
+            compactHandle.widthAnchor.constraint(equalToConstant: vertical ? 40 : 12),
+            compactHandle.heightAnchor.constraint(equalToConstant: vertical ? 12 : 22),
+        ]
+        compactTray.stack.orientation = vertical ? .vertical : .horizontal
+        compactTray.stack.alignment = vertical ? .centerX : .centerY
+        compactTrayConstraints = vertical
+            ? [
+                compactTray.bottomAnchor.constraint(equalTo: compactHandle.topAnchor, constant: -2),
+                compactTray.centerXAnchor.constraint(equalTo: toolbar.centerXAnchor),
+            ]
+            : [
+                compactTray.trailingAnchor.constraint(equalTo: compactHandle.leadingAnchor, constant: -2),
+                compactTray.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            ]
+        NSLayoutConstraint.activate(compactHandleSize + compactTrayConstraints)
+    }
+
+    var compactControlsHandleScreenFrame: NSRect? { screenFrame(of: compactHandle) }
+    var compactControlsScreenFrame: NSRect? { screenFrame(of: compactTray) }
+
+    private func screenFrame(of view: NSView) -> NSRect? {
+        guard let window = view.window, !view.isHiddenOrHasHiddenAncestor else { return nil }
+        return window.convertToScreen(view.convert(view.bounds, to: nil))
+    }
+
+    /// Shows the compact tab bar's controls while the pointer is on its handle or on them, and hides them shortly
+    /// after it leaves.
+    func updateCompactControlsHover(at point: NSPoint, now: Date = Date()) {
+        guard compactTabBar, let handle = compactControlsHandleScreenFrame else {
+            setCompactControlsRevealed(false)
+            return
+        }
+        let overControls = compactControlsRevealed
+            && compactControlsScreenFrame.map { $0.insetBy(dx: -4, dy: -4).contains(point) } == true
+        if handle.insetBy(dx: -1, dy: -1).contains(point) || overControls {
+            setCompactControlsRevealed(true)
+        } else if compactControlsRevealed {
+            let exit = compactControlsExitDate ?? now
+            compactControlsExitDate = exit
+            if now.timeIntervalSince(exit) >= Self.compactControlsHideDelay { setCompactControlsRevealed(false) }
+        }
+    }
+
+    private func setCompactControlsRevealed(_ revealed: Bool) {
+        let revealed = revealed && compactTabBar
+        compactControlsExitDate = nil
+        guard compactControlsRevealed != revealed else { return }
+        compactControlsRevealed = revealed
+        compactTray.isHidden = !revealed
+        compactControlsTimer?.invalidate()
+        compactControlsTimer = nil
+        guard revealed else { return }
+        // A default-mode timer pauses while a control's menu is open, so the controls stay until it closes.
+        compactControlsTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { return timer.invalidate() }
+                self.updateCompactControlsHover(at: NSEvent.mouseLocation)
+            }
+        }
     }
 
     func setAutoHideTabBar(_ enabled: Bool) {
@@ -419,6 +795,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         } else {
             endCloseSizing()
             pointerInToolbar = false
+            setCompactControlsRevealed(false)
             toolbarPanel?.orderOut(nil)
         }
     }
@@ -446,6 +823,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         panel.onMouseDown = { [weak self] event in self?.onAutoHiddenToolbarMouseDown?(event) }
 
         let content = WorkspaceToolbarPanelBackground()
+        content.chrome = self
         panel.contentView = content
         toolbarPanel = panel
         toolbarPanelContent = content
@@ -466,40 +844,63 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         updatingTabWidths = true
         defer { updatingTabWidths = false }
 
-        let widths = tabSizing.map(\.constraint) + (windowDropPreviewWidth.map { [$0] } ?? [])
         if tabBarPosition.isVertical {
             setSecondRow(nil)
-            for width in widths where width.constant != 146 { width.constant = 146 }
-            let naturalHeight = CGFloat(widths.count) * 32 + CGFloat(max(0, widths.count - 1)) * tabs.spacing
+            let verticalContentWidth = Self.verticalTabWidth - metrics.chromeWidth
+            for tab in tabSizing where tab.constraint.constant != verticalContentWidth {
+                tab.constraint.constant = verticalContentWidth
+            }
+            if let windowDropPreviewWidth, windowDropPreviewWidth.constant != verticalContentWidth {
+                windowDropPreviewWidth.constant = verticalContentWidth
+            }
+            let count = tabSizing.count + (windowDropPreviewWidth == nil ? 0 : 1)
+            let naturalHeight = CGFloat(count) * metrics.tabHeight + CGFloat(max(0, count - 1)) * tabs.spacing
             let controls = toolbar.arrangedSubviews.filter { $0 !== tabScroll && !$0.isHidden }
             let fixedHeight = controls.reduce(CGFloat(0)) { $0 + $1.fittingSize.height }
                 + CGFloat(controls.count) * toolbar.spacing + toolbar.edgeInsets.top + toolbar.edgeInsets.bottom
             preferredVerticalTabHeight.constant = min(naturalHeight, max(0, bounds.height - 37 - fixedHeight))
             return
         }
-        let fixedGroupWidth = Self.tabChromeWidth
-        let nameWidth = min(ceil(workspaceButton.intrinsicContentSize.width), Self.minimumWorkspaceNameWidth)
-        let fixedControlsWidth = toolbar.arrangedSubviews
-            .filter { $0 !== tabScroll && $0 !== workspaceButton }
+        let fixedGroupWidth = metrics.chromeWidth
+        let nameWidth = workspaceButton.isHidden ? 0
+            : min(ceil(workspaceButton.intrinsicContentSize.width), Self.minimumWorkspaceNameWidth)
+        // Hidden views are detached from the bar and take no space.
+        let controls = toolbar.arrangedSubviews.filter { $0 !== tabScroll && !$0.isHidden }
+        let fixedControlsWidth = controls
+            .filter { $0 !== workspaceButton }
             .reduce(nameWidth) { $0 + $1.fittingSize.width }
-        let toolbarGaps = CGFloat(toolbar.arrangedSubviews.count - 1) * toolbar.spacing
+        let toolbarGaps = CGFloat(controls.count) * toolbar.spacing
         let availableWidth = max(
             0,
             bounds.width - fixedControlsWidth - toolbarGaps
                 - toolbar.edgeInsets.left - toolbar.edgeInsets.right)
+        let pinnedCount = tabSizing.filter { tabItems[$0.id]?.tabPinned == true }.count
+        let regularCount = tabSizing.count - pinnedCount + (windowDropPreviewWidth == nil ? 0 : 1)
+        let pinnedTotalWidth = CGFloat(pinnedCount)
+            * (WindowGeometry.iconOnlyTabContentWidth + metrics.pinnedChromeWidth)
+            + CGFloat(max(0, pinnedCount - 1)) * tabs.spacing
+        let dividerSpacing = pinnedCount > 0 && regularCount > 0 ? tabs.spacing : 0
+        let regularAvailableWidth = max(0, availableWidth - pinnedTotalWidth - dividerSpacing)
         let layout = WindowGeometry.horizontalTabRows(
-            count: widths.count, available: availableWidth, chrome: fixedGroupWidth, spacing: tabs.spacing,
+            count: regularCount, available: regularAvailableWidth, chrome: fixedGroupWidth, spacing: tabs.spacing,
             wrap: wrapsCrowdedTabs,
             maximumContent: showsTabIconsOnly ? WindowGeometry.iconOnlyTabContentWidth
                 : WindowGeometry.maximumTabContentWidth)
-        setSecondRow(layout.secondRow)
-        let targetWidth = layout.viewport
+        setSecondRow(layout.secondRow.map { $0 + pinnedCount })
+        let targetWidth = min(availableWidth, pinnedTotalWidth + dividerSpacing + layout.viewport)
         if abs(maximumTabWidth.constant - targetWidth) > 0.5 {
             maximumTabWidth.constant = targetWidth
             preferredTabWidth.constant = targetWidth
         }
-        for width in widths where abs(width.constant - layout.contentWidth) > 0.01 {
-            width.constant = layout.contentWidth
+        for tab in tabSizing {
+            let contentWidth = tabItems[tab.id]?.tabPinned == true
+                ? WindowGeometry.iconOnlyTabContentWidth : layout.contentWidth
+            if abs(tab.constraint.constant - contentWidth) > 0.01 {
+                tab.constraint.constant = contentWidth
+            }
+        }
+        if let windowDropPreviewWidth, abs(windowDropPreviewWidth.constant - layout.contentWidth) > 0.01 {
+            windowDropPreviewWidth.constant = layout.contentWidth
         }
     }
 
@@ -508,7 +909,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         guard closeSizing != nil, !tabBarPosition.isVertical, !tabSizing.isEmpty else { return }
         let split = min(tabs.secondRow ?? tabSizing.count, tabSizing.count)
         func extent(_ row: ArraySlice<Tab>) -> CGFloat {
-            row.reduce(0) { $0 + $1.constraint.constant + Self.tabChromeWidth }
+            row.reduce(0) {
+                let chrome = tabItems[$1.id]?.tabPinned == true ? metrics.pinnedChromeWidth : metrics.chromeWidth
+                return $0 + $1.constraint.constant + chrome
+            }
                 + CGFloat(max(0, row.count - 1)) * tabs.spacing
         }
         let content = max(extent(tabSizing[..<split]), extent(tabSizing[split...]))
@@ -521,7 +925,11 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     private func setSecondRow(_ split: Int?) {
         guard tabs.secondRow != split else { return }
         tabs.secondRow = split
-        let height = split == nil ? 32 : 64 + tabs.spacing
+        updateStripHeight()
+    }
+
+    private func updateStripHeight() {
+        let height = tabs.secondRow == nil ? metrics.tabHeight : 2 * metrics.tabHeight + tabs.spacing
         horizontalStripHeight.constant = height
         horizontalViewportHeight.constant = height
         horizontalHostHeight.constant = height + 2
@@ -546,9 +954,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         return button
     }
 
-    @objc private func showWorkspaceMenu() {
-        workspaceMenu?().popUp(
-            positioning: nil, at: NSPoint(x: 0, y: workspaceButton.bounds.height), in: workspaceButton)
+    @objc private func showWorkspaceMenu(_ sender: NSButton) {
+        workspaceMenu?().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
     }
 
     private func build() {
@@ -583,19 +990,25 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             tabs.leadingAnchor.constraint(equalTo: tabScroll.contentView.leadingAnchor),
             tabs.topAnchor.constraint(equalTo: tabScroll.contentView.topAnchor),
             tabs.widthAnchor.constraint(equalTo: tabScroll.contentView.widthAnchor),
-            tabScroll.widthAnchor.constraint(equalToConstant: 180),
+            tabScroll.widthAnchor.constraint(equalToConstant: Self.verticalTabWidth),
             tabScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
             preferredVerticalTabHeight,
         ]
         NSLayoutConstraint.activate(horizontalTabConstraints)
-        let dragSpace = WorkspaceToolbarDragSpace()
         dragSpace.chrome = self
-        dragSpace.widthAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
         dragSpace.heightAnchor.constraint(equalToConstant: 24).isActive = true
         let preferredDragWidth = dragSpace.widthAnchor.constraint(equalToConstant: 30)
         preferredDragWidth.priority = .defaultLow
-        preferredDragWidth.isActive = true
+        dragSpaceWidths = [dragSpace.widthAnchor.constraint(greaterThanOrEqualToConstant: 30), preferredDragWidth]
+        NSLayoutConstraint.activate(dragSpaceWidths)
         dragSpace.toolTip = L("ドラッグして移動 / ダブルクリックで最大化")
+        compactHandle.chrome = self
+        compactHandle.toolTip = L("ドラッグして移動 / ダブルクリックで最大化")
+        compactTray.chrome = self
+        compactTray.isHidden = true
+        compactTray.translatesAutoresizingMaskIntoConstraints = false
+        workspaceMenuButton.target = self
+        workspaceMenuButton.action = #selector(showWorkspaceMenu(_:))
         configureSelector(columnSelector, prefix: L("横"))
         configureSelector(rowSelector, prefix: L("縦"))
         combineButton.target = self
@@ -608,7 +1021,11 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         workspaceButton.alignment = .left
         workspaceButton.toolTip = L("ワークスペースの操作")
         workspaceButton.target = self
-        workspaceButton.action = #selector(showWorkspaceMenu)
+        workspaceButton.action = #selector(showWorkspaceMenu(_:))
+        for button in [addButton, workspaceButton, workspaceMenuButton, combineButton, columnSelector, rowSelector,
+                       permissionButton] {
+            _ = WorkspaceControlHover(on: button)
+        }
         // Hug the name tightly and let tabs take its space first; keep a short prefix visible.
         workspaceButton.setContentHuggingPriority(NSLayoutConstraint.Priority(490), for: .horizontal)
         workspaceButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -638,9 +1055,12 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         clippedTabDivider.setAccessibilityElement(false)
         clippedTabDivider.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(clippedTabDivider, positioned: .above, relativeTo: nil)
+        // Anchored to the tabs rather than the workspace name, which the compact tab bar hides.
+        clippedTabDividerLeading = clippedTabDivider.leadingAnchor.constraint(
+            equalTo: tabScroll.leadingAnchor, constant: 1 - bar.spacing)
         NSLayoutConstraint.activate([
-            clippedTabDivider.leadingAnchor.constraint(equalTo: workspaceButton.trailingAnchor, constant: 1),
-            clippedTabDivider.centerYAnchor.constraint(equalTo: workspaceButton.centerYAnchor),
+            clippedTabDividerLeading,
+            clippedTabDivider.centerYAnchor.constraint(equalTo: tabScroll.centerYAnchor),
             clippedTabDivider.widthAnchor.constraint(equalToConstant: 1),
             clippedTabDivider.heightAnchor.constraint(equalToConstant: 20),
         ])
@@ -662,7 +1082,10 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             if let overlay = self.paneDropOverlay, let area = overlay.superview {
                 overlay.frame = area.bounds
             }
-            if !self.settingGrid { self.onPaneLayoutChange?() }
+            if !self.settingGrid {
+                self.updateGridSelectors()
+                self.onPaneLayoutChange?()
+            }
         }
         gridContentAreas = stage.areas
         empty.alignment = .center
@@ -758,6 +1181,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         selector.addItem(withTitle: L("カスタム"))
         selector.lastItem?.isEnabled = false
         selector.menu?.autoenablesItems = false
+        // Keeps the auto-hidden tab bar while the pop-up menu is open.
+        selector.menu?.delegate = self
         selector.controlSize = .small
         selector.font = .systemFont(ofSize: 11)
         selector.toolTip = L("%@の分割数", prefix.trimmingCharacters(in: .whitespaces))
@@ -773,9 +1198,14 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let requested = WorkspaceGridSize(
             columns: columns < 4 ? columns + 1 : gridSize.columns,
             rows: rows < 4 ? rows + 1 : gridSize.rows)
-        columnSelector.selectItem(at: stage.customLayout == nil ? gridSize.columns - 1 : 4)
-        rowSelector.selectItem(at: stage.customLayout == nil ? gridSize.rows - 1 : 4)
+        updateGridSelectors()
         if requested != gridSize || stage.customLayout != nil { onGridChange?(requested) }
+    }
+
+    private func updateGridSelectors() {
+        let size = stage.displayedGridSize
+        columnSelector.selectItem(at: size.map { $0.columns - 1 } ?? PaneLayout.maximumDivisions)
+        rowSelector.selectItem(at: size.map { $0.rows - 1 } ?? PaneLayout.maximumDivisions)
     }
 
     func setGrid(_ size: WorkspaceGridSize, activeCell: Int) {
@@ -791,8 +1221,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         } else {
             stage.setGrid(size, activeCell: activeCell)
         }
-        columnSelector.selectItem(at: size.columns - 1)
-        rowSelector.selectItem(at: size.rows - 1)
+        updateGridSelectors()
         refreshCoverage()
         if changed { onPaneLayoutChange?() }
     }
@@ -807,8 +1236,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         stage.setCustomLayout(layout, activeCell: activeCell)
         gridContentAreas = stage.areas
         settingGrid = false
-        columnSelector.selectItem(at: 4)
-        rowSelector.selectItem(at: 4)
+        updateGridSelectors()
         refreshCoverage()
         if changed { onPaneLayoutChange?() }
     }
@@ -847,6 +1275,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         addSplit(L("左右に分割"), .horizontal, #selector(splitPaneHorizontally(_:)))
         addSplit(L("上下に分割"), .vertical, #selector(splitPaneVertically(_:)))
         add(L("ペインを閉じる"), gridAreas.count > 1 ? #selector(closePane(_:)) : nil)
+        add(L("この分割を均等にする"), stage.canEqualizePane(at: index) ? #selector(equalizePane(_:)) : nil)
         menu.addItem(.separator())
         add(L("表示中のペインを1つのタブにまとめる"), canCombinePanes?() == true ? #selector(combinePanes) : nil)
         return menu
@@ -871,6 +1300,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
 
     @objc private func splitPaneHorizontally(_ item: NSMenuItem) { onSplitPane?(item.tag, .horizontal) }
     @objc private func splitPaneVertically(_ item: NSMenuItem) { onSplitPane?(item.tag, .vertical) }
+    @objc private func equalizePane(_ item: NSMenuItem) { onEqualizePane?(item.tag) }
     @objc private func closePane(_ item: NSMenuItem) { onClosePane?(item.tag) }
     @objc private func togglePanePin(_ item: NSMenuItem) { onTogglePanePin?(item.tag) }
 
@@ -932,8 +1362,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             let close = Self.makeButton(symbol: "xmark", title: L("ウィンドウを追加"), width: 18)
             let preview = WorkspaceTabGroup(views: [button, close])
             preview.isFloating = true
-            preview.spacing = 4
-            preview.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 4)
+            preview.spacing = metrics.titleSpacing
+            preview.edgeInsets = NSEdgeInsets(
+                top: 0, left: metrics.leadingInset, bottom: 0, right: metrics.trailingInset)
             preview.wantsLayer = true
             preview.layer?.cornerRadius = 7
             preview.layer?.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
@@ -942,8 +1373,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             let width = button.widthAnchor.constraint(equalToConstant: 100)
             NSLayoutConstraint.activate([
                 width,
-                button.heightAnchor.constraint(equalToConstant: 28),
-                preview.heightAnchor.constraint(equalToConstant: 32),
+                button.heightAnchor.constraint(equalToConstant: metrics.titleHeight),
+                preview.heightAnchor.constraint(equalToConstant: metrics.tabHeight),
             ])
             windowDropPreview = preview
             windowDropPreviewWidth = width
@@ -1098,6 +1529,11 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         showInsertionMarker(at: screenPoint, color: .controlAccentColor)
     }
 
+    /// The visible control before the tabs; an empty tab bar's insertion line goes just past it.
+    private var emptyTabBarAnchor: NSRect? {
+        [workspaceButton, titlebarControls].first { !$0.isHidden }.map { toolbar.convert($0.bounds, from: $0) }
+    }
+
     private func showInsertionMarker(at screenPoint: NSPoint, color: NSColor) {
         guard let toolbarWindow = toolbar.window else { return }
         let index = tabInsertionIndex(at: screenPoint)
@@ -1111,7 +1547,7 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             let y = WindowGeometry.tabInsertionLineX(
                 index: index,
                 tabFrames: frames.map { NSRect(x: -$0.maxY, y: 0, width: $0.height, height: 0) },
-                emptyX: -toolbar.convert(workspaceButton.bounds, from: workspaceButton).minY + 6,
+                emptyX: -(emptyTabBarAnchor?.minY ?? toolbar.bounds.maxY) + 6,
                 visibleMinX: -stripRect.maxY, visibleMaxX: -stripRect.minY, lineWidth: 3)
             let marker = NSRect(x: stripRect.minX, y: -y - 3, width: stripRect.width, height: 3)
             showDropFeedback(frame: toolbarWindow.convertToScreen(toolbar.convert(marker, to: nil)), color: color)
@@ -1123,9 +1559,11 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let frames = row.map { toolbar.convert($0.frame, from: tabs) }
         let x = WindowGeometry.tabInsertionLineX(
             index: index - row.startIndex, tabFrames: frames,
-            emptyX: toolbar.convert(workspaceButton.bounds, from: workspaceButton).maxX + 6,
+            emptyX: (emptyTabBarAnchor?.maxX ?? toolbar.edgeInsets.left) + 6,
             visibleMinX: stripRect.minX, visibleMaxX: stripRect.maxX, lineWidth: 3)
-        let markerRect = NSRect(x: x, y: (frames.first?.midY ?? barRect.midY) - 14, width: 3, height: 28)
+        let markerHeight = metrics.titleHeight
+        let markerRect = NSRect(
+            x: x, y: (frames.first?.midY ?? barRect.midY) - markerHeight / 2, width: 3, height: markerHeight)
         let frame = toolbarWindow.convertToScreen(toolbar.convert(markerRect, to: nil))
         showDropFeedback(frame: frame, color: color)
         addButton.contentTintColor = nil
@@ -1523,6 +1961,19 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         } else {
             addPaneItems(to: menu, for: button)
         }
+        if tabSizing.indices.contains(button.tag),
+           tabItems[tabSizing[button.tag].id]?.canPinTab == true {
+            menu.addItem(.separator())
+            let id = tabSizing[button.tag].id
+            let tabPinned = tabItems[id]?.tabPinned == true
+            let pin = menu.addItem(
+                withTitle: L("タブを固定"),
+                action: #selector(setTabPinFromMenu(_:)),
+                keyEquivalent: "")
+            pin.target = self
+            pin.state = tabPinned ? .on : .off
+            pin.representedObject = TabPinRequest(id: id, pinned: !tabPinned)
+        }
         if let items = autoGroupMenuItems?(button.tag), !items.isEmpty {
             menu.addItem(.separator())
             items.forEach(menu.addItem)
@@ -1559,6 +2010,11 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         return menu
     }
 
+    @objc private func setTabPinFromMenu(_ item: NSMenuItem) {
+        guard let request = item.representedObject as? TabPinRequest else { return }
+        onSetTabPinned?(request.id, request.pinned)
+    }
+
     private func addPaneItems(to menu: NSMenu, for button: NSButton) {
         let move = NSMenuItem(title: L("配置を入れ替え"), action: nil, keyEquivalent: "")
         let destinations = NSMenu()
@@ -1581,10 +2037,13 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        // Only the top-level menu decides: a submenu can close while its parent stays open.
+        guard menu.supermenu == nil else { return }
         onToolbarMenuTracking?(true)
     }
 
     func menuDidClose(_ menu: NSMenu) {
+        guard menu.supermenu == nil else { return }
         onToolbarMenuTracking?(false)
     }
 
@@ -1809,6 +2268,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         let close = Self.makeButton(
             WorkspaceTabCloseButton(frame: .zero), symbol: "xmark", title: "×", width: 18)
         let group = WorkspaceTabGroup(views: [select, close])
+        group.detachesHiddenViews = true
+        group.onHover = { [weak self] isHovering in self?.onTabHover?(id, isHovering) }
+        group.onScrollWheel = { [weak self] event in self?.handleTabScrollWheel(event, over: id) == true }
         group.acceptsTabDrop = { [weak self] pasteboard, source in
             self?.acceptsTabDrag(pasteboard: pasteboard, source: source) == true
         }
@@ -1820,27 +2282,42 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
             guard let self else { return false }
             return self.performTabReorder(pasteboard: pasteboard, source: source, screenPoint: point)
         }
-        group.spacing = 4
-        group.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 4)
+        group.spacing = metrics.titleSpacing
+        group.edgeInsets = NSEdgeInsets(top: 0, left: metrics.leadingInset, bottom: 0, right: metrics.trailingInset)
         group.addSubview(pin, positioned: .above, relativeTo: nil)
         pin.widthAnchor.constraint(equalToConstant: 12).isActive = true
         pin.heightAnchor.constraint(equalToConstant: 12).isActive = true
+        let pinTrailing = pin.trailingAnchor.constraint(equalTo: group.trailingAnchor, constant: -metrics.pinOffset)
         NSLayoutConstraint.activate([
-            pin.trailingAnchor.constraint(equalTo: group.trailingAnchor, constant: -26),
+            pinTrailing,
             pin.topAnchor.constraint(equalTo: group.topAnchor, constant: 3),
         ])
         group.wantsLayer = true
         group.layer?.cornerRadius = 7
         group.layer?.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         let selectWidth = select.widthAnchor.constraint(equalToConstant: 200)
+        let titleHeight = select.heightAnchor.constraint(equalToConstant: metrics.titleHeight)
+        let groupHeight = group.heightAnchor.constraint(equalToConstant: metrics.tabHeight)
         NSLayoutConstraint.activate([
             select.widthAnchor.constraint(greaterThanOrEqualToConstant: WindowGeometry.minimumTabContentWidth),
             select.widthAnchor.constraint(lessThanOrEqualToConstant: 200),
             selectWidth,
-            select.heightAnchor.constraint(equalToConstant: 28),
-            group.heightAnchor.constraint(equalToConstant: 32),
+            titleHeight,
+            groupHeight,
         ])
-        return Tab(id: id, view: group, select: select, close: close, pin: pin, constraint: selectWidth)
+        return Tab(
+            id: id, view: group, select: select, close: close, pin: pin, constraint: selectWidth,
+            titleHeight: titleHeight, groupHeight: groupHeight, pinTrailing: pinTrailing)
+    }
+
+    private func applyMetrics(to tab: Tab) {
+        let metrics = metrics
+        tab.view.spacing = metrics.titleSpacing
+        tab.view.edgeInsets = NSEdgeInsets(
+            top: 0, left: metrics.leadingInset, bottom: 0, right: metrics.trailingInset)
+        tab.pinTrailing.constant = -metrics.pinOffset
+        tab.titleHeight.constant = metrics.titleHeight
+        tab.groupHeight.constant = metrics.tabHeight
     }
 
     private func reconfigureTabs() {
@@ -1852,8 +2329,9 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
     private func configure(_ tab: Tab, for item: WorkspaceTabItem) {
         tabItems[tab.id] = item
         let select = tab.select
-        let iconOnly = showsTabIconsOnly
+        let iconOnly = showsTabIconsOnly || item.tabPinned
         select.title = iconOnly ? "" : item.title
+        select.alignment = item.tabPinned ? .center : .left
         (select.cell as? WorkspaceTabButtonCell)?.combinedWindows = iconOnly ? [] : item.combinedWindows
         let image = item.icon ?? (iconOnly ? Self.combinedIcon(item.combinedWindows.compactMap(\.icon)) : nil)
             ?? (iconOnly ? NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil) : nil)
@@ -1861,8 +2339,8 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         icon?.size = NSSize(width: 16, height: 16)
         select.image = icon
         // A vertical bar keeps its width, so its icons stay where the titles start.
-        select.imagePosition = icon == nil ? .noImage : iconOnly && !tabBarPosition.isVertical ? .imageOnly
-            : .imageLeading
+        select.imagePosition = icon == nil ? .noImage
+            : item.tabPinned || iconOnly && !tabBarPosition.isVertical ? .imageOnly : .imageLeading
         select.setAccessibilityLabel(iconOnly ? item.title : nil)
         let tabToolTip = item.toolTip ?? item.title
         select.toolTip = tabToolTip
@@ -1873,12 +2351,18 @@ final class WorkspaceChromeView: WorkspaceBackgroundView, NSMenuDelegate {
         // Assigning NSButton.title again would switch its cell out of image-only mode.
         tab.close.toolTip = closeTitle
         tab.close.setAccessibilityLabel(closeTitle)
-        tab.pin.isHidden = !item.pinned
-        select.hasPinBadge = item.pinned
+        tab.close.isHidden = item.tabPinned
+        let showsPin = item.pinned
+        tab.pin.isHidden = !showsPin
+        tab.pin.toolTip = L("固定中")
+        tab.pin.setAccessibilityLabel(L("固定中"))
+        select.hasPinBadge = showsPin
         select.showsAudioIndicator = item.playingAudio
+        select.shortcutNumber = item.shortcutNumber
         tab.view.setSelectedAppearance(item.selected)
-        tab.view.layer?.borderWidth = item.tabSwitchTarget ? 2 : (item.displayed ? 1 : 0)
-        tab.view.layer?.borderColor = (item.pinned ? NSColor.systemOrange : NSColor.controlAccentColor)
+        tab.view.isTabPinned = item.tabPinned
+        tab.view.layer?.borderWidth = item.tabSwitchTarget ? 2 : (item.tabPinned ? 1.5 : item.displayed ? 1 : 0)
+        tab.view.layer?.borderColor = (item.tabPinned ? NSColor.systemOrange : NSColor.controlAccentColor)
             .withAlphaComponent(item.tabSwitchTarget ? 0.9 : 0.6).cgColor
     }
 

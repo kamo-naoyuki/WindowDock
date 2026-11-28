@@ -6,6 +6,7 @@ struct SavedWindow: Codable {
     var bundleID: String
     var title: String
     var frame: CGRect
+    var isTabPinned: Bool? = nil
 }
 
 /// A combined tab's panes.
@@ -31,6 +32,10 @@ struct SavedWorkspace: Codable {
     /// Apps whose new windows are collected into this workspace.
     var autoGroupBundleIDs: [String]? = nil
     var paneGroups: [SavedPaneGroup]? = nil
+    /// The saved window that was selected when the workspace was last saved.
+    var selectedWindowIndex: Int? = nil
+    /// The workspace window's frame in AppKit screen coordinates.
+    var frame: CGRect? = nil
 
     var gridSize: WorkspaceGridSize? {
         guard let columns, let rows else { return nil }

@@ -13,6 +13,8 @@ struct NewTabPage: View {
     var isAvailable: (WindowCandidate) -> Bool
     var launch: (URL) async throws -> [WindowCandidate]
     var choose: ([WindowCandidate]) -> Bool
+    /// Chooses an item of an installed app's Dock menu and returns the new windows it opened.
+    var chooseDockMenuItem: (DockMenuPath, [DockMenuItem], URL) async throws -> [WindowCandidate] = { _, _, _ in [] }
     var applications: () async -> [LauncherApplication] = InstalledApplications.load
     @ObservedObject var autoGroup = AutoGroupPageModel()
 
@@ -20,7 +22,14 @@ struct NewTabPage: View {
         let id = UUID()
         var apps: [URL] = []
     }
+    private struct DockMenuChoice: Equatable {
+        let id = UUID()
+        var path: DockMenuPath
+        var items: [DockMenuItem]
+        var url: URL
+    }
     @State private var request = Request()
+    @State private var dockMenuChoice: DockMenuChoice?
     @State private var choices: [WindowCandidate] = []
     /// Changes with each new list of windows, so the grid takes up its initial selection.
     @State private var listID = UUID()
@@ -39,11 +48,11 @@ struct NewTabPage: View {
                     Text(restoration.map { L("「%@」のタブを復元", $0.workspace.name) } ?? L("開いているウィンドウ")).font(.headline)
                     Spacer()
                     if let restoration {
-                        Button(L("復元しない"), action: restoration.skip).keyboardShortcut(.cancelAction)
+                        Button(L("復元しない"), action: restoration.skip).keyboardShortcut(.cancelAction).hoverGlow()
                     }
                     Button { request = Request() } label: {
                         Image(systemName: "arrow.clockwise")
-                    }.help(L("一覧を更新")).accessibilityLabel(L("一覧を更新"))
+                    }.hoverGlow().help(L("一覧を更新")).accessibilityLabel(L("一覧を更新"))
                 }
                 if restoration != nil {
                     Text(L("前回のタブに一致するウィンドウが選択されています。復元するウィンドウを確認してください。"))
@@ -52,7 +61,7 @@ struct NewTabPage: View {
                 if loading { ProgressView().controlSize(.small) }
                 if !message.isEmpty { Text(message).foregroundStyle(.secondary) }
                 if needsPermission {
-                    Button(L("権限設定")) { access.requestPermission() }
+                    Button(L("権限設定")) { access.requestPermission() }.hoverGlow()
                 }
                 if !choices.isEmpty, previews == nil {
                     Button(L("画面収録を許可してプレビューを表示…")) {
@@ -65,7 +74,7 @@ struct NewTabPage: View {
                             ) {
                             NSWorkspace.shared.open(url)
                         }
-                    }.controlSize(.small)
+                    }.controlSize(.small).hoverGlow()
                 }
                 if !choices.isEmpty {
                     WindowChoiceGrid(windows: choices, previews: previews, restoring: initialSelection,
@@ -80,6 +89,7 @@ struct NewTabPage: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .task(id: request) { await load(request) }
+        .task(id: dockMenuChoice) { await perform(dockMenuChoice) }
     }
 
     @ViewBuilder
@@ -93,9 +103,12 @@ struct NewTabPage: View {
             Text(L("複数選択すると、まとめて開くか、新しいウィンドウを自動でこのワークスペースに追加するように設定できます。"))
                 .foregroundStyle(.secondary)
         }
+        Text(L("右クリックすると Dock のようなメニューを表示します。")).foregroundStyle(.secondary)
         VStack(alignment: .leading) {
             if let apps, !apps.isEmpty {
-                LauncherGrid(apps: apps, autoGroup: autoGroup) { request = Request(apps: $0) }
+                LauncherGrid(apps: apps, autoGroup: autoGroup, launch: { request = Request(apps: $0) },
+                             access: access,
+                             chooseDockMenuItem: { dockMenuChoice = DockMenuChoice(path: $0, items: $1, url: $2) })
             } else if apps == nil {
                 ProgressView().controlSize(.small)
             } else {
@@ -198,6 +211,16 @@ struct NewTabPage: View {
         show(candidates)
     }
 
+    /// Runs a Dock menu item without a progress indicator, as the Dock does, and adds any windows it opened.
+    private func perform(_ choice: DockMenuChoice?) async {
+        guard let choice else { return }
+        do {
+            let windows = try await chooseDockMenuItem(choice.path, choice.items, choice.url)
+            if !Task.isCancelled, !windows.isEmpty { _ = choose(windows) }
+        } catch {
+            if !(error is CancellationError), !Task.isCancelled { message = error.localizedDescription }
+        }
+    }
 }
 
 struct WindowChoiceGrid: View {
@@ -229,7 +252,7 @@ struct WindowChoiceGrid: View {
                     } label: {
                         WindowCard(candidate: window, previews: previews)
                             .selectionMark(selection.isSelecting ? checked : nil)
-                            .hoverGlow()
+                            .padding(6).hoverGlow()
                     }.buttonStyle(.plain).help(window.label)
                         .accessibilityLabel(window.label)
                         .accessibilityAddTraits(checked ? .isSelected : [])
@@ -240,13 +263,13 @@ struct WindowChoiceGrid: View {
                         selection.select(rows.includingWindowsOfSelectedApps(
                             in: windows.map(\.application.processIdentifier)
                         ))
-                    }.disabled(rows.isEmpty)
+                    }.hoverGlow().disabled(rows.isEmpty)
                     if !restoring {
-                        Button(L("キャンセル")) { selection.cancel() }
+                        Button(L("キャンセル")) { selection.cancel() }.hoverGlow()
                     }
                     Button(restoring ? L("%d件を復元", rows.count) : L("%d件を追加", rows.count)) {
                         _ = choose(rows.map { windows[$0] })
-                    }.buttonStyle(.borderedProminent).disabled(rows.isEmpty)
+                    }.buttonStyle(.borderedProminent).hoverGlow().disabled(rows.isEmpty)
                 }
             }
         }
@@ -254,12 +277,15 @@ struct WindowChoiceGrid: View {
 }
 
 /// Installed apps. A click opens a new window of the app; several selected apps can be opened together or have
-/// their new windows added to the workspace automatically.
+/// their new windows added to the workspace automatically. A right-click shows a menu like the app's Dock menu.
 struct LauncherGrid: View {
     let apps: [LauncherApplication]
     @ObservedObject var autoGroup: AutoGroupPageModel
     let launch: ([URL]) -> Void
+    var access = WindowAccessClient()
+    var chooseDockMenuItem: (DockMenuPath, [DockMenuItem], URL) -> Void = { _, _, _ in }
     @State private var selection = GridSelection()
+    @State private var menu = LauncherMenu()
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 96, maximum: 120), spacing: 6)], alignment: .leading,
@@ -284,8 +310,9 @@ struct LauncherGrid: View {
                                     }
                                 }
                             Text(app.name).lineLimit(1)
-                        }.frame(width: 84).selectionMark(selection.isSelecting ? checked : nil).hoverGlow()
+                        }.frame(width: 84).selectionMark(selection.isSelecting ? checked : nil).padding(6).hoverGlow()
                     }.buttonStyle(.plain)
+                        .background(SecondaryClick { view, point in showMenu(for: app.url, in: view, at: point) })
                         .help(automatic ? app.name + "\n" + L("新しいウィンドウを自動でこのワークスペースに追加します") : app.name)
                         .accessibilityLabel(app.name)
                         .accessibilityAddTraits(checked ? .isSelected : [])
@@ -293,15 +320,15 @@ struct LauncherGrid: View {
             } header: {
                 SelectionHeader(rows: selection.rows, begin: L("アプリを複数選択")) { selection.begin() } actions: { rows in
                     let urls = rows.map { apps[$0].url }
-                    Button(L("キャンセル")) { selection.cancel() }
+                    Button(L("キャンセル")) { selection.cancel() }.hoverGlow()
                     Button(L("%d個のアプリで新しいウィンドウを開く", rows.count)) {
                         selection.cancel()
                         launch(urls)
-                    }.buttonStyle(.borderedProminent).disabled(rows.isEmpty)
+                    }.buttonStyle(.borderedProminent).hoverGlow().disabled(rows.isEmpty)
                     if autoGroup.isAvailable {
                         Button(L("%d個のアプリの新しいウィンドウを自動でこのワークスペースに追加", rows.count)) {
                             if autoGroup.register(urls) { selection.cancel() }
-                        }.disabled(rows.allSatisfy { isAutomatic(apps[$0]) })
+                        }.hoverGlow().disabled(rows.allSatisfy { isAutomatic(apps[$0]) })
                             .help(L("選んだアプリで今後開いたウィンドウを、自動的にこのワークスペースに追加します。アプリは起動しません。"))
                     }
                 }
@@ -311,6 +338,184 @@ struct LauncherGrid: View {
 
     private func isAutomatic(_ app: LauncherApplication) -> Bool {
         autoGroup.isAvailable && Bundle(url: app.url)?.bundleIdentifier.map(autoGroup.bundleIDs.contains) == true
+    }
+
+    /// Shows a menu like the app's Dock menu without opening the Dock's, which would flash at the Dock. Its Show Dock
+    /// Menu item reads the Dock's menu for app-specific items such as Chrome's profiles.
+    private func showMenu(for url: URL, in view: NSView, at point: NSPoint) {
+        guard !menu.isShowing else { return }
+        menu.isShowing = true
+        Task { @MainActor in
+            defer { menu.isShowing = false }
+            let (app, windows, inDock) = await Task.detached(priority: .userInitiated) { [access] in
+                let app = access.runningApplication(url)
+                return (app, app.flatMap(access.applicationWindows) ?? [], access.hasDockItem(url))
+            }.value
+            guard view.window != nil else { return }
+            let focus = access.focus
+            LauncherMenu.standard(
+                for: url, running: app, windows: windows, open: { launch([url]) },
+                focus: { window in Task.detached { try? focus(window.element, window.application) } },
+                showDockMenu: inDock ? { Task { @MainActor in showDockMenu(for: url, in: view, at: point) } } : nil
+            )
+            .popUp(positioning: nil, at: point, in: view)
+        }
+    }
+
+    /// Reads the app's Dock menu, which briefly opens it at the Dock, and shows the same items at the click.
+    private func showDockMenu(for url: URL, in view: NSView, at point: NSPoint) {
+        guard !menu.isShowing else { return }
+        menu.isShowing = true
+        Task { @MainActor in
+            defer { menu.isShowing = false }
+            let items = await Task.detached(priority: .userInitiated) { [access] in try? access.dockMenu(url) }.value
+            guard view.window != nil else { return }
+            guard let items, !items.isEmpty else { return NSSound.beep() }
+            LauncherMenu.mirroring(items) { chooseDockMenuItem($0, items, url) }
+                .popUp(positioning: nil, at: point, in: view)
+        }
+    }
+}
+
+/// The AppKit menu that stands in for an app's Dock menu.
+@MainActor
+final class LauncherMenu {
+    /// Whether a menu is being read or shown, so another right-click waits for it.
+    var isShowing = false
+
+    static func mirroring(_ items: [DockMenuItem], choose: @escaping (DockMenuPath) -> Void) -> NSMenu {
+        let menu = NSMenu()
+        add(items, at: [], of: items, to: menu, choose: choose)
+        return menu
+    }
+
+    /// The Dock's standard items for the app: its windows, then opening it, and Hide and Quit while it runs.
+    static func standard(for url: URL, running app: NSRunningApplication?, windows: [WindowCandidate],
+                         open: @escaping () -> Void, focus: @escaping (WindowCandidate) -> Void,
+                         showDockMenu: (() -> Void)?) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for window in windows {
+            menu.addItem(item(window.title.isEmpty ? L("名称未設定") : window.title) { focus(window) })
+        }
+        if !windows.isEmpty { menu.addItem(.separator()) }
+        menu.addItem(item(app == nil ? L("開く") : L("新規ウィンドウ"), action: open))
+        menu.addItem(item(L("Finderに表示")) { NSWorkspace.shared.activateFileViewerSelecting([url]) })
+        if let showDockMenu { menu.addItem(item(L("Dock のメニューを表示"), action: showDockMenu)) }
+        guard let app else { return menu }
+        menu.addItem(.separator())
+        if app.isHidden {
+            menu.addItem(item(L("非表示を解除")) { app.unhide() })
+        } else {
+            menu.addItem(item(L("非表示")) { app.hide() })
+        }
+        let quit = item(L("終了")) { app.terminate() }
+        quit.keyEquivalentModifierMask = []
+        menu.addItem(quit)
+        // Like the Dock's, Force Quit replaces Quit while Option is held.
+        let forceQuit = item(L("強制終了")) { app.forceTerminate() }
+        forceQuit.keyEquivalentModifierMask = .option
+        forceQuit.isAlternate = true
+        menu.addItem(forceQuit)
+        return menu
+    }
+
+    private static func add(_ items: [DockMenuItem], at parent: [Int], of root: [DockMenuItem], to menu: NSMenu,
+                            choose: @escaping (DockMenuPath) -> Void) {
+        menu.autoenablesItems = false
+        for (index, item) in items.enumerated() {
+            if item.isSeparator {
+                menu.addItem(.separator())
+                continue
+            }
+            let entry: NSMenuItem
+            if !item.submenu.isEmpty {
+                entry = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+                let submenu = NSMenu(title: item.title)
+                add(item.submenu, at: parent + [index], of: root, to: submenu, choose: choose)
+                entry.submenu = submenu
+            } else if item.performsAction, let path = DockMenuPath(indices: parent + [index], in: root) {
+                entry = Self.item(item.title) { choose(path) }
+                entry.isEnabled = item.isEnabled
+            } else if #available(macOS 14, *) {
+                entry = .sectionHeader(title: item.title)
+            } else {
+                entry = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+                entry.isEnabled = false
+            }
+            entry.state = item.isChecked ? .on : .off
+            // An alternate replaces the item above it while Option is held. Both need the same key equivalent.
+            entry.keyEquivalentModifierMask = item.isAlternate ? .option : []
+            entry.isAlternate = item.isAlternate
+            menu.addItem(entry)
+        }
+    }
+
+    private static func item(_ title: String, action: @escaping () -> Void) -> NSMenuItem {
+        let handler = MenuAction(action)
+        let entry = NSMenuItem(title: title, action: #selector(MenuAction.run), keyEquivalent: "")
+        entry.target = handler
+        // A menu item holds its target weakly.
+        entry.representedObject = handler
+        return entry
+    }
+
+    private final class MenuAction: NSObject {
+        private let action: () -> Void
+        init(_ action: @escaping () -> Void) { self.action = action }
+        @objc func run() { action() }
+    }
+}
+
+/// Calls `action` for a right-click or Control-click on the view it's the background of. It watches the window's
+/// events instead of taking clicks, so a Control-click doesn't also press the button above it.
+private struct SecondaryClick: NSViewRepresentable {
+    let action: (NSView, NSPoint) -> Void
+
+    func makeNSView(context: Context) -> SecondaryClickView { SecondaryClickView() }
+
+    func updateNSView(_ view: SecondaryClickView, context: Context) { view.action = action }
+
+    static func dismantleNSView(_ view: SecondaryClickView, coordinator: ()) { view.stopMonitoring() }
+}
+
+private final class SecondaryClickView: NSView {
+    var action: ((NSView, NSPoint) -> Void)?
+    private var monitor: Any?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            stopMonitoring()
+        } else if monitor == nil {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] in
+                // `handle` returns nil to consume the click, so it mustn't fall back to the event with `??`.
+                guard let self else { return $0 }
+                return handle($0)
+            }
+        }
+    }
+
+    func stopMonitoring() {
+        monitor.map(NSEvent.removeMonitor)
+        monitor = nil
+    }
+
+    private func handle(_ event: NSEvent) -> NSEvent? {
+        guard event.type == .rightMouseDown || event.modifierFlags.contains(.control), let action, let window,
+              event.window === window, !isHiddenOrHasHiddenAncestor,
+              let content = window.contentView else { return event }
+        let point = convert(event.locationInWindow, from: nil)
+        // SwiftUI's view host reports a visibleRect wider than the view, so check the bounds, and skip clicks on
+        // views that cover the page or a scrolled-away app, such as a scroller.
+        guard bounds.contains(point),
+              let hit = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil)
+                  ?? event.locationInWindow),
+              isDescendant(of: hit) else { return event }
+        action(self, point)
+        return nil
     }
 }
 
@@ -339,7 +544,7 @@ private struct SelectionHeader<Actions: View>: View {
                     VStack(alignment: .leading) { actions(rows) }
                 }
             } else {
-                Button(begin, action: start)
+                Button(begin, action: start).hoverGlow()
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4).background(Color(nsColor: .windowBackgroundColor))
@@ -355,9 +560,11 @@ private extension GridSelection {
     }
 }
 
-private extension View {
+extension View {
     func hoverGlow() -> some View { modifier(HoverGlow()) }
+}
 
+private extension View {
     /// A check circle while selecting; nil hides it.
     func selectionMark(_ checked: Bool?) -> some View {
         overlay(alignment: .topTrailing) {
@@ -372,14 +579,17 @@ private extension View {
 
 private struct HoverGlow: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var enabled
     @State private var hovering = false
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: 8)
-        content.padding(6)
-            .background(shape.fill(Color.accentColor.opacity(hovering ? 0.14 : 0)))
-            .overlay(shape.strokeBorder(Color.accentColor.opacity(hovering ? 0.85 : 0), lineWidth: 1.5)
-                .shadow(color: Color.accentColor.opacity(hovering ? 0.6 : 0), radius: 5))
+        let lit = hovering && enabled
+        content
+            .background(shape.fill(Color.accentColor.opacity(lit ? 0.14 : 0)))
+            .overlay(shape.strokeBorder(Color.accentColor.opacity(lit ? 0.85 : 0), lineWidth: 1.5)
+                .shadow(color: Color.accentColor.opacity(lit ? 0.6 : 0), radius: 5)
+                .allowsHitTesting(false))
             .contentShape(shape)
             .onHover { hovering = $0 }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)

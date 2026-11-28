@@ -98,6 +98,47 @@ final class WindowGeometryTests: XCTestCase {
         )
     }
 
+    func testMenuBarCoversReservedStripOrHiddenMenuBarEdge() {
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let withMenuBar = CGRect(x: 0, y: 80, width: 1440, height: 796)
+        XCTAssertTrue(
+            WindowGeometry
+                .menuBarContains(CGPoint(x: 700, y: 900), screenFrame: screen, visibleFrame: withMenuBar)
+        )
+        XCTAssertTrue(
+            WindowGeometry
+                .menuBarContains(CGPoint(x: 0, y: 877), screenFrame: screen, visibleFrame: withMenuBar)
+        )
+        XCTAssertFalse(
+            WindowGeometry
+                .menuBarContains(CGPoint(x: 700, y: 875), screenFrame: screen, visibleFrame: withMenuBar)
+        )
+        XCTAssertFalse(
+            WindowGeometry
+                .menuBarContains(CGPoint(x: 1440, y: 890), screenFrame: screen, visibleFrame: withMenuBar)
+        )
+
+        let hiddenMenuBar = CGRect(x: 0, y: 80, width: 1440, height: 820)
+        XCTAssertTrue(
+            WindowGeometry
+                .menuBarContains(CGPoint(x: 700, y: 899), screenFrame: screen, visibleFrame: hiddenMenuBar)
+        )
+        XCTAssertFalse(
+            WindowGeometry
+                .menuBarContains(CGPoint(x: 700, y: 890), screenFrame: screen, visibleFrame: hiddenMenuBar)
+        )
+
+        let secondary = CGRect(x: 1440, y: 200, width: 1920, height: 1080)
+        let secondaryVisible = CGRect(x: 1440, y: 200, width: 1920, height: 1050)
+        XCTAssertTrue(WindowGeometry.menuBarContains(
+            CGPoint(x: 2000, y: 1270), screenFrame: secondary, visibleFrame: secondaryVisible
+        ))
+        XCTAssertFalse(
+            WindowGeometry
+                .menuBarContains(CGPoint(x: 2000, y: 1270), screenFrame: screen, visibleFrame: withMenuBar)
+        )
+    }
+
     func testConvertsPrimaryDisplayCoordinates() {
         let rect = CGRect(x: 100, y: 200, width: 900, height: 600)
         XCTAssertEqual(
@@ -183,5 +224,29 @@ final class WindowGeometryTests: XCTestCase {
         XCTAssertNil(
             WindowGeometry.trackMinimums([0: CGSize(width: CGFloat.infinity, height: 10)], columns: 1, rows: 1)
         )
+    }
+
+    func testRestoredWorkspaceFrameStaysOnItsScreenAndFitsIt() {
+        let main = CGRect(x: 0, y: 0, width: 1512, height: 949)
+        let right = CGRect(x: 1512, y: -200, width: 1920, height: 1055)
+        let minimum = CGSize(width: 720, height: 480)
+        func restored(_ saved: CGRect, _ screens: [CGRect] = [main, right]) -> CGRect? {
+            WindowGeometry.restoredFrame(saved, visibleFrames: screens, minimumSize: minimum)
+        }
+        XCTAssertEqual(restored(main), main)
+        XCTAssertEqual(restored(CGRect(x: 1600, y: 0, width: 1200, height: 800)),
+                       CGRect(x: 1600, y: 0, width: 1200, height: 800))
+        // A frame left on a disconnected display keeps its size on the remaining one.
+        XCTAssertEqual(restored(CGRect(x: 1600, y: 0, width: 1200, height: 800), [main]),
+                       CGRect(x: 312, y: 0, width: 1200, height: 800))
+        // A smaller resolution shrinks the frame to the screen rather than leaving it partly off-screen.
+        XCTAssertEqual(restored(CGRect(x: -40, y: -20, width: 1920, height: 1055), [main]), main)
+        XCTAssertEqual(restored(CGRect(x: 1400, y: 500, width: 800, height: 600)),
+                       CGRect(x: 1512, y: 255, width: 800, height: 600))
+        XCTAssertEqual(restored(CGRect(x: 10, y: 10, width: 300, height: 200), [main]),
+                       CGRect(x: 10, y: 10, width: 720, height: 480))
+        XCTAssertNil(restored(main, []))
+        XCTAssertNil(restored(.zero))
+        XCTAssertNil(restored(CGRect(x: CGFloat.nan, y: 0, width: 800, height: 600)))
     }
 }

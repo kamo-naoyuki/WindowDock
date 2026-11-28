@@ -36,6 +36,21 @@ final class WorkspaceActivation {
         return activeController
     }
 
+    /// The front workspace on the screen whose menu bar is under `point`, if its tab bar is auto-hidden.
+    /// Workspaces behind it on that screen stay hidden so that only one tab bar appears.
+    func menuBarRevealTarget(at point: NSPoint, screens: [NSScreen] = NSScreen.screens) -> WorkspaceController? {
+        guard let screen = screens.first(where: {
+            WindowGeometry.menuBarContains(point, screenFrame: $0.frame, visibleFrame: $0.visibleFrame)
+        }) else { return nil }
+        let onScreen = controllers().filter {
+            !$0.quitting && $0.window.isVisible && $0.window.isOnActiveSpace && !$0.window.isMiniaturized
+                && $0.window.screen?.frame == screen.frame
+        }
+        let front = onScreen.first { $0.window.isKeyWindow }
+            ?? orderedWindows().lazy.compactMap { window in onScreen.first { $0.window === window } }.first
+        return front?.autoHideTabs == true ? front : nil
+    }
+
     /// Shows the workspace `offset` places from the front one in the Workspace menu's order, skipping minimized ones.
     @discardableResult
     func cycle(_ offset: Int) -> WorkspaceController? {

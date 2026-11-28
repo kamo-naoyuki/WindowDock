@@ -277,7 +277,7 @@ enum WorkspaceActivationSmoke {
     }
 
     /// The auto-hidden tab bar is a non-activating panel; a click on it must still activate WindowDock (and show
-    /// its menu bar) with that workspace key, like a click on the embedded tab bar.
+    /// its menu bar) with that workspace key, and keep it active. Dragging the bar hands focus back afterwards.
     static func runAutoHiddenToolbarActivationChecks() -> [String] {
         let helper: WindowSessionSmoke.ActivationHelperProcess
         switch WindowSessionSmoke.ActivationHelperProcess.launch() {
@@ -356,7 +356,8 @@ enum WorkspaceActivationSmoke {
         probe.focusCount = 0
         NSApp.postEvent(up, atStart: false)
         panel.sendEvent(down)
-        wait(2) { NSApp.isActive && first.window.isKeyWindow && probe.focusCount > 0 }
+        wait(2) { NSApp.isActive && first.window.isKeyWindow }
+        wait(0.5)
         var failures: [String] = []
         if !NSApp.isActive {
             failures.append(
@@ -368,15 +369,47 @@ enum WorkspaceActivationSmoke {
                 "a click on the auto-hidden tab bar did not make its workspace key (second key \(second.window.isKeyWindow), key \(String(describing: NSApp.keyWindow)), panel key \(panel.isKeyWindow))"
             )
         }
-        if probe.focusCount == 0 {
+        if probe.focusCount != 0 {
             failures.append(
-                "a click on the auto-hidden tab bar's empty area did not hand focus back to the selected window"
+                "a click on the auto-hidden tab bar's empty area handed focus to the selected window, "
+                    + "so WindowDock's menu bar did not stay"
             )
         }
         if secondBefore > stackIndex(otherAppWindow),
            stackIndex(second.window.windowNumber) < stackIndex(otherAppWindow)
         {
             failures.append("a click on the auto-hidden tab bar raised another workspace above another app")
+        }
+
+        probe.focusCount = 0
+        NSApp.postEvent(up, atStart: false)
+        panel.sendEvent(down)
+        wait(0.5)
+        if probe.focusCount != 0 || !NSApp.isActive {
+            failures.append("clicking the auto-hidden tab bar again while WindowDock was active handed focus away")
+        }
+
+        // Moving the workspace by its tab bar still hands focus back to the selected window afterwards.
+        func cgMouse(_ type: CGEventType, dx: CGFloat) -> NSEvent? {
+            CGEvent(
+                mouseEventSource: nil, mouseType: type,
+                mouseCursorPosition: CGPoint(x: start.x + dx, y: screen.frame.maxY - start.y), mouseButton: .left
+            ).flatMap(NSEvent.init(cgEvent:))
+        }
+        guard let dragged = cgMouse(.leftMouseDragged, dx: 40), let draggedUp = cgMouse(.leftMouseUp, dx: 40) else {
+            return failures + ["auto-hidden tab bar drag fixture could not create mouse events"]
+        }
+        let frameBefore = first.window.frame
+        probe.focusCount = 0
+        NSApp.postEvent(dragged, atStart: false)
+        NSApp.postEvent(draggedUp, atStart: false)
+        panel.sendEvent(down)
+        wait(2) { probe.focusCount > 0 }
+        if first.window.frame.minX != frameBefore.minX + 40 || probe.focusCount == 0 {
+            failures.append(
+                "dragging the auto-hidden tab bar did not move the workspace and then hand focus to the selected "
+                    + "window (moved \(first.window.frame.minX - frameBefore.minX), focus \(probe.focusCount))"
+            )
         }
         return failures
     }

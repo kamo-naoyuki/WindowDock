@@ -24,7 +24,10 @@ final class PaneLayoutTests: XCTestCase {
                 layout = try XCTUnwrap(layout.splittingPane(at: index, axis: axis))
             }
         }
-        let frames = try XCTUnwrap(layout.geometry(in: CGRect(x: 0, y: 0, width: 1224, height: 824))).panes
+        let geometry = try XCTUnwrap(layout.geometry(in: CGRect(x: 0, y: 0, width: 1224, height: 824)))
+        XCTAssertEqual(geometry.gridDimensions?.columns, 4)
+        XCTAssertEqual(geometry.gridDimensions?.rows, 4)
+        let frames = geometry.panes
         XCTAssertEqual(frames.count, 16)
         for frame in frames {
             XCTAssertEqual(frame.width, 300, accuracy: 0.001)
@@ -35,6 +38,16 @@ final class PaneLayoutTests: XCTestCase {
         let closed = try XCTUnwrap(layout.removingPane(at: 15)).layout
         XCTAssertNotNil(closed.splittingPane(at: 14, axis: .vertical))
         XCTAssertNil(closed.splittingPane(at: 14, axis: .horizontal))
+    }
+
+    func testGridDimensionsRespectUnequalTracksAndPaneMinimums() throws {
+        let layout = PaneLayout.grid(columnWeights: [2, 1, 3], rowWeights: [1, 2])
+        let bounds = CGRect(x: 20, y: 30, width: 900, height: 600)
+        let aligned = try XCTUnwrap(layout.geometry(in: bounds))
+        XCTAssertEqual(aligned.gridDimensions?.columns, 3)
+        XCTAssertEqual(aligned.gridDimensions?.rows, 2)
+        let offset = try XCTUnwrap(layout.geometry(in: bounds, minimums: [0: CGSize(width: 400, height: 0)]))
+        XCTAssertNil(offset.gridDimensions)
     }
 
     func testRightPaneSplitsWithoutDividingLeftAndResizesIndependently() throws {
@@ -76,6 +89,57 @@ final class PaneLayoutTests: XCTestCase {
         XCTAssertEqual(frames[0], geometry.panes[0])
         XCTAssertEqual(frames[2].height, 120, accuracy: 0.001)
         XCTAssertEqual(frames[1].height, 480, accuracy: 0.001)
+    }
+
+    func testEqualizingPaneChangesOnlyItsNearestSplit() throws {
+        let nested = PaneLayout.split(axis: .vertical, weights: [4, 1], children: [.pane, .pane])
+        let layout = PaneLayout.split(axis: .horizontal, weights: [3, 1], children: [nested, .pane])
+
+        let equalizedNested = try XCTUnwrap(layout.equalizingSplit(containingPaneAt: 0))
+        XCTAssertEqual(
+            equalizedNested,
+            .split(
+                axis: .horizontal, weights: [3, 1],
+                children: [.split(axis: .vertical, weights: [1, 1], children: [.pane, .pane]), .pane]
+            )
+        )
+
+        let equalizedOuter = try XCTUnwrap(layout.equalizingSplit(containingPaneAt: 2))
+        XCTAssertEqual(
+            equalizedOuter,
+            .split(axis: .horizontal, weights: [1, 1], children: [nested, .pane])
+        )
+        XCTAssertEqual(
+            layout.equalizingSplit(containingPaneAt: 3),
+            nil,
+            "an out-of-range pane must not change any split"
+        )
+        XCTAssertNil(PaneLayout.pane.equalizingSplit(containingPaneAt: 0))
+    }
+
+    func testAlreadyBalancedRatiosDoNotOfferSpuriousEqualization() {
+        let row = PaneLayout.grid(columnWeights: [0.5, 0.5], rowWeights: [1])
+        let layout = PaneLayout.split(axis: .vertical, weights: [2, 1], children: [row, .pane])
+        XCTAssertEqual(layout.equalizingSplit(containingPaneAt: 1), layout)
+        XCTAssertEqual(layout.equalizingSplit(atPath: [0]), layout)
+    }
+
+    func testEqualizingSplitAtDividerPathChangesOnlyThatSplit() throws {
+        let nested = PaneLayout.split(axis: .vertical, weights: [4, 1], children: [.pane, .pane])
+        let layout = PaneLayout.split(axis: .horizontal, weights: [3, 1], children: [nested, .pane])
+
+        XCTAssertEqual(
+            layout.equalizingSplit(atPath: [0]),
+            .split(axis: .horizontal, weights: [3, 1], children: [
+                .split(axis: .vertical, weights: [1, 1], children: [.pane, .pane]), .pane,
+            ])
+        )
+        XCTAssertEqual(
+            layout.equalizingSplit(atPath: []),
+            .split(axis: .horizontal, weights: [1, 1], children: [nested, .pane])
+        )
+        XCTAssertNil(layout.equalizingSplit(atPath: [2]))
+        XCTAssertNil(layout.equalizingSplit(atPath: [0, 0]))
     }
 
     func testSplitBlockersDistinguishSharedColumnsFromIndependentRows() {

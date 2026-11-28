@@ -43,12 +43,23 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
     /// A window that was resized with the mouse, left out of syncing until its app finishes resizing it.
     private var settlingManagedWindowID: UUID?
+    /// Set while the user moves, resizes or maximizes the workspace itself, which its windows follow.
+    private var workspaceFrameInteractionActive = false
+    /// Until then, managed windows' frames can still be busy apps catching up with the workspace's own change.
+    private var workspaceFrameSettleDeadline: TimeInterval = 0
+    private static let workspaceFrameSettleInterval: TimeInterval = 1.5
     private var lastManagedWindowFollowSync = TimeInterval.zero
     private var lastManagedWindowFollowFrame: CGRect?
     /// Set while the workspace frame and its panes change together, so windows are synced once at the end.
     private var deferringWorkspaceSync = false
     private var reportedManagedWindowDragSamplingFailure = false
     private var startPages: [UUID: NSHostingView<NewTabPage>] = [:]
+    private let tabThumbnails = WindowThumbnails()
+    private var tabPreviewTask: Task<Void, Never>?
+    private var tabHoverSwitchTask: Task<Void, Never>?
+    private var tabHoverSwitchPolicy = TabHoverSwitchPolicy()
+    private var switchesTabsOnHover = false
+    private var showsNumberedTabHints = false
     private var tabIDs: [UUID] { session.tabIDs }
     /// The tab bar's entries: tabs and combined tabs.
     private var tabEntries: [UUID] { session.tabEntries }
@@ -92,6 +103,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
     private var hasContainedWindows = false
     private var emptyDeletionScheduled = false
+    private var noticeSyncScheduled = false
     var managedWindowMoveAction: ManagedWindowMoveAction = .returnToPane {
         didSet {
             if oldValue != managedWindowMoveAction {
@@ -211,7 +223,13 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             self.workspace.refreshCoverage()
             self.syncManagedWindows()
         }
-        workspace.onFrameInteractionEnd = { [weak self] in self?.scheduleSelectedWindowRaise(activate: true) }
+        workspace.onFrameInteractionBegin = { [weak self] in self?.beginWorkspaceFrameInteraction() }
+        workspace.onFrameInteractionEnd = { [weak self] handsFocusBack in
+            guard let self else { return }
+            self.workspaceFrameInteractionActive = false
+            self.extendWorkspaceFrameSettling()
+            self.scheduleSelectedWindowRaise(activate: handsFocusBack)
+        }
         session.targetFrames = { [weak self] in self?.targetFrames() ?? [:] }
         session.fitMinimumSizes = { [weak self] sizes in
             guard let self else { return false }
@@ -250,6 +268,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             return menu
         }
         workspace.onGridChange = { [weak self] in self?.session.setGrid($0) }
+        workspace.onTabScroll = { [weak self] in self?.cycleTabs($0) }
+        workspace.onTabHover = { [weak self] id, isHovering in
+            self?.updateTabPreview(for: id, isHovering: isHovering)
+        }
         workspace.splitRestriction = { [weak self] index, axis in
             guard let self else { return .layout }
             return self.session.splitRestriction(at: index, axis: axis, currentLayout: self.workspace.stage.paneLayout)
@@ -257,6 +279,14 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         workspace.onSplitPane = { [weak self] index, axis in
             guard let self else { return }
             self.session.splitPane(at: index, axis: axis, currentLayout: self.workspace.stage.paneLayout)
+        }
+        workspace.onEqualizePane = { [weak self] index in
+            guard let self else { return }
+            if self.session.customLayout != nil {
+                self.session.equalizePaneSplit(at: index)
+            } else if self.workspace.stage.equalizeGrid() {
+                self.session.realign(raiseWindows: false)
+            }
         }
         workspace.onClosePane = { [weak self] index in
             guard let self else { return }
@@ -287,6 +317,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         workspace.onReleaseTabs = { [weak self] request in
             guard let self else { return }
             for id in request.ids { self.session.remove(id, closeWindow: request.closeWindows) }
+        }
+        workspace.onSetTabPinned = { [weak self] id, pinned in
+            guard let self else { return }
+            self.session.setTabPinned(pinned, for: id)
         }
         workspace.onMoveTab = { [weak self] tab, cell in
             guard let self, self.tabEntries.indices.contains(tab) else { return }
@@ -322,11 +356,11 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         workspace.onCombinePanes = { [weak self] in self?.combinePanes() }
         workspace.onUngroupShownTab = { [weak self] in
             guard let self, let group = self.session.activeGroupID else { return }
-            self.session.ungroup(group)
+            self.session.ungroup(group, activate: true)
         }
         workspace.onUngroupTab = { [weak self] tab in
             guard let self, self.tabEntries.indices.contains(tab) else { return }
-            self.session.ungroup(self.tabEntries[tab])
+            self.session.ungroup(self.tabEntries[tab], activate: true)
         }
         workspace.onToolbarMenuTracking = { [weak self] isOpen in
             guard let self else { return }
@@ -411,6 +445,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     private func renderTabs() {
+        cancelTabPreview()
         refreshWindowObservers()
         workspace.closesWindowsOnRelease = session.closesWindowsOnRelease
         if let layout = session.customLayout {
@@ -438,10 +473,84 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         window.invalidateShadow()
     }
 
-    private func tabItems() -> [WorkspaceTabItem] {
-        tabEntries.map { id in
-            session.isPaneGroup(id) ? paneGroupTabItem(id) : tabItem(id)
+    private func updateTabPreview(for id: UUID, isHovering: Bool) {
+        if !isHovering {
+            guard tabHoverSwitchPolicy.mouseExited(id) else { return }
+            cancelTabPreview()
+            return
         }
+        tabPreviewTask?.cancel()
+        tabHoverSwitchTask?.cancel()
+        workspace.hideTabPreview()
+        tabHoverSwitchPolicy.mouseEntered(id)
+        if switchesTabsOnHover {
+            tabHoverSwitchTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: TabHoverSwitchPolicy.delayNanoseconds)
+                } catch {
+                    return
+                }
+                guard let self,
+                      self.tabHoverSwitchPolicy.shouldSwitch(
+                          id: id, enabled: self.switchesTabsOnHover, selectedID: self.session.selectedID,
+                          availableTabIDs: self.session.tabEntries
+                      )
+                else { return }
+                self.selectTab(at: self.session.tabEntries.firstIndex(of: id) ?? -1)
+            }
+        }
+        let candidate = session.managedByID[id]?.candidate
+            ?? session.groupMembers(id).compactMap { session.managedByID[$0]?.candidate }.first
+        guard let candidate, let windowID = WindowAccess.windowID(of: candidate.element) else { return }
+        tabPreviewTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 350_000_000)
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled, self.tabHoverSwitchPolicy.hoveredTabID == id else { return }
+            let image = await self.tabThumbnails.image(for: windowID)
+            guard !Task.isCancelled, self.tabHoverSwitchPolicy.hoveredTabID == id, let image else { return }
+            self.workspace.showTabPreview(image)
+        }
+    }
+
+    private func cancelTabPreview() {
+        tabPreviewTask?.cancel()
+        tabPreviewTask = nil
+        tabHoverSwitchTask?.cancel()
+        tabHoverSwitchTask = nil
+        workspace.hideTabPreview()
+    }
+
+    func setSwitchesTabsOnHover(_ enabled: Bool) {
+        guard switchesTabsOnHover != enabled else { return }
+        switchesTabsOnHover = enabled
+        if !enabled {
+            tabHoverSwitchTask?.cancel()
+            tabHoverSwitchTask = nil
+        }
+    }
+
+    private func tabItems() -> [WorkspaceTabItem] {
+        let shortcutNumbers = Dictionary(
+            uniqueKeysWithValues: session.numberedTabTargets.prefix(9).enumerated().map { index, id in
+                (id, index + 1)
+            }
+        )
+        return tabEntries.map { id in
+            var item = session.isPaneGroup(id) ? paneGroupTabItem(id) : tabItem(id)
+            item.shortcutNumber = showsNumberedTabHints ? shortcutNumbers[id] : nil
+            item.canPinTab = session.managedWindowID(forTabEntry: id) != nil
+            item.tabPinned = session.isTabPinned(id)
+            return item
+        }
+    }
+
+    func setNumberedTabHintsVisible(_ visible: Bool) {
+        guard showsNumberedTabHints != visible, !quitting else { return }
+        showsNumberedTabHints = visible
+        workspace.updateTabs(tabItems())
     }
 
     private func tabTitle(_ id: UUID) -> String {
@@ -462,10 +571,12 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             id: group,
             title: title,
             toolTip: L("まとめたタブ") + " · " + labels.joined(separator: " | ")
+                + (session.isTabPinned(group) ? " · " + L("タブ固定中") : "")
                 + (playingAudio ? " · " + L("音声を再生中") : ""),
             icon: nil,
             selected: active,
             displayed: active,
+            tabPinned: session.isTabPinned(group),
             playingAudio: playingAudio,
             paneGroup: true,
             combinedWindows: members.indices
@@ -487,17 +598,20 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         let candidate = session.managedByID[id]?.candidate
         let title = tabTitle(id)
         let pinned = cell.map { session.isPanePinned($0) } ?? false
+        let tabPinned = session.isTabPinned(id)
         let playingAudio = candidate.map { audio.isPlaying($0) } ?? false
         return WorkspaceTabItem(
             id: id,
             title: side + title,
             toolTip: side + (candidate?.label ?? title) + (pinned ? " · " + L("固定中") : "")
+                + (tabPinned ? " · " + L("タブ固定中") : "")
                 + (playingAudio ? " · " + L("音声を再生中") : ""),
             icon: candidate?.application.icon,
             selected: selected,
             displayed: displayed,
             pinned: pinned,
-            tabSwitchTarget: session.activeGroupID == nil && cell == session.tabSwitchCell,
+            tabPinned: tabPinned,
+            tabSwitchTarget: session.activeGroupID == nil && cell != nil && cell == session.tabSwitchCell,
             playingAudio: playingAudio
         )
     }
@@ -540,6 +654,12 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
                     guard let self, !self.quitting, self.session.cellIndex(for: id) != nil else { return false }
                     if prompt != nil { return self.finishRestore(id, choosing: candidates) }
                     return self.session.fillStartPage(id, with: candidates)
+                },
+                chooseDockMenuItem: { [weak self] path, items, url in
+                    guard let self, !self.quitting else { throw CancellationError() }
+                    let windows = try await self.session.chooseDockMenuItem(path, in: items, of: url, from: id)
+                    if let appID = windows.first?.application.bundleIdentifier { RecentApplications().record(appID) }
+                    return windows
                 },
                 autoGroup: autoGroupPage
             ))
@@ -599,6 +719,25 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     private var displacedWindowTimer: Timer?
 
+    private var isSettlingWorkspaceFrame: Bool {
+        workspaceFrameInteractionActive || window.inLiveResize
+            || ProcessInfo.processInfo.systemUptime < workspaceFrameSettleDeadline
+    }
+
+    private func extendWorkspaceFrameSettling() {
+        workspaceFrameSettleDeadline = ProcessInfo.processInfo.systemUptime + Self.workspaceFrameSettleInterval
+    }
+
+    /// The user moves, resizes or maximizes the workspace, and its windows follow it rather than the other way round.
+    private func beginWorkspaceFrameInteraction() {
+        workspaceFrameInteractionActive = true
+        // A window left out of syncing, e.g. one whose late frame was taken for a resize, follows the workspace again.
+        guard let id = managedWindowDrag?.id ?? settlingManagedWindowID else { return }
+        managedWindowDrag = nil
+        settlingManagedWindowID = nil
+        session.expectPaneFrame(for: id)
+    }
+
     /// WindowDock's own changes also send notifications; refitting an aligned window is a no-op.
     func windowsChangedOutsideWorkspace(
         _ element: AXUIElement? = nil, mouseButtonDown: Bool = NSEvent.pressedMouseButtons & 1 != 0
@@ -615,7 +754,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
                 return
             }
             // The timer below still runs, so the drag is finished even if the release is missed.
-            if mouseButtonDown { beginManagedWindowResize(of: element) }
+            if mouseButtonDown, !isSettlingWorkspaceFrame { beginManagedWindowResize(of: element) }
         }
         displacedWindowTimer?.invalidate()
         // Wait for the change, such as a zoom animation, to finish.
@@ -681,16 +820,19 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     /// mouse was released or one the press did not reach. Returns false when nothing followed.
     private func followDisplacedWindow() -> Bool {
         guard managedWindowMoveAction == .follow else { return false }
+        // Frames that differ right after the workspace's own change are its windows catching up; they are refitted.
+        let settling = isSettlingWorkspaceFrame
         for id in session.cells.compactMap({ $0 }) {
             guard let managed = session.managedByID[id],
                   !session.access.isFullScreen(managed.candidate.element),
                   let minimized = try? session.access.isMinimized(managed.candidate.element)
             else { continue }
             if minimized, followMinimizing(of: managed.candidate.element) { return true }
-            guard !minimized,
+            guard !minimized, !settling,
                   let aligned = session.alignedFrame(for: id),
                   let frame = try? session.access.frame(managed.candidate.element),
                   !WindowGeometry.fits(frame, requested: aligned, tolerance: 1),
+                  !session.isLateFrameRequest(frame, for: id),
                   let geometry = paneGeometry(for: id)
             else { continue }
             let interaction = classifyManagedWindowInteraction(
@@ -719,6 +861,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             guard window.candidate.application.processIdentifier == windowServerWindow.processID,
                   WindowGeometry.fits(frame, requested: windowServerWindow.frame, tolerance: 3)
             else { return false }
+            // The user now handles the window itself, so its changes are followed even right after the workspace's.
+            workspaceFrameSettleDeadline = 0
             startManagedWindowDrag(ManagedWindowDrag(
                 id: window.id, element: window.candidate.element, windowID: windowServerWindow.id,
                 processID: windowServerWindow.processID, startFrame: frame,
@@ -755,7 +899,8 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
               let windowID = session.access.windowID(element),
               let aligned = session.alignedFrame(for: managed.id),
               let geometry = paneGeometry(for: managed.id),
-              let frame = try? session.access.frame(element)
+              let frame = try? session.access.frame(element),
+              !session.isLateFrameRequest(frame, for: managed.id)
         else { return }
         switch classifyManagedWindowInteraction(
             start: aligned, current: frame, pane: geometry.pane, workspaceContent: geometry.workspaceContent
@@ -1087,9 +1232,17 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     func showNotice(_ notice: WorkspaceNotice) {
-        if workspace.showNotice(notice) {
-            DispatchQueue.main.async { [weak self] in self?.syncIfVisible() }
+        // Panes move when the notice changes height; sync once after the last change rather than once per change.
+        // That sync only refits the panes, so it must not replace the notice with the shortcut hint.
+        guard workspace.showNotice(notice), !noticeSyncScheduled else { return }
+        noticeSyncScheduled = true
+        RunLoop.main.perform(inModes: [.common]) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.noticeSyncScheduled = false
+                self?.syncIfVisible(showShortcutHint: false)
+            }
         }
+        CFRunLoopWakeUp(CFRunLoopGetMain())
     }
 
     // MARK: Actions
@@ -1115,11 +1268,13 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     func toggleSplit() {
-        session.setGrid(WorkspaceGridSize(columns: session.gridSize.columns == 2 ? 1 : 2, rows: session.gridSize.rows))
+        let size = workspace.stage.displayedGridSize ?? session.gridSize
+        session.setGrid(WorkspaceGridSize(columns: size.columns == 2 ? 1 : 2, rows: size.rows))
     }
 
     func toggleStackedSplit() {
-        session.setGrid(WorkspaceGridSize(columns: session.gridSize.columns, rows: session.gridSize.rows == 2 ? 1 : 2))
+        let size = workspace.stage.displayedGridSize ?? session.gridSize
+        session.setGrid(WorkspaceGridSize(columns: size.columns, rows: size.rows == 2 ? 1 : 2))
     }
 
     func activePaneMenu() -> NSMenu { workspace.paneMenu(for: session.activeCell) }
@@ -1152,14 +1307,50 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             windows: windows.map {
                 SavedWindow(
                     bundleID: $0.candidate.application.bundleIdentifier ?? "", title: $0.candidate.title,
-                    frame: $0.originalFrame
+                    frame: $0.originalFrame, isTabPinned: session.isTabPinned($0.id)
                 )
             },
             columns: base.gridSize.columns, rows: base.gridSize.rows, autoHideTabs: autoHideTabs,
             paneLayout: base.customLayout, pinnedPanes: base.pinnedCells.sorted(), tabBarPosition: tabBarPosition,
             autoGroupBundleIDs: autoGroupBundleIDs.isEmpty ? nil : autoGroupBundleIDs,
-            paneGroups: groups.isEmpty ? nil : groups
+            paneGroups: groups.isEmpty ? nil : groups,
+            selectedWindowIndex: session.selectedID.flatMap { selectedID in
+                windows.firstIndex { $0.id == selectedID }
+            },
+            frame: window.frame
         )
+    }
+
+    /// Reopens the workspace where it was, before its windows are restored into panes sized for that frame.
+    func restoreFrame(_ saved: SavedWorkspace) {
+        guard let frame = saved.frame,
+              let restored = WindowGeometry.restoredFrame(
+                  frame, visibleFrames: NSScreen.screens.map(\.visibleFrame), minimumSize: window.minSize
+              )
+        else { return }
+        window.setFrame(restored, display: true)
+    }
+
+    func restoreSelectedWindow(_ saved: SavedWorkspace, windows: [WindowCandidate], matches: [Int: Int]) {
+        guard let savedIndex = saved.selectedWindowIndex,
+              let candidateIndex = matches[savedIndex],
+              windows.indices.contains(candidateIndex),
+              let id = session.windows.first(where: { $0.candidate.isSameWindow(as: windows[candidateIndex]) })?.id
+        else { return }
+        session.select(id)
+    }
+
+    func restoreTabPins(_ saved: SavedWorkspace, windows: [WindowCandidate], matches: [Int: Int]) {
+        for (savedIndex, candidateIndex) in matches.sorted(by: { $0.key < $1.key }) {
+            guard saved.windows.indices.contains(savedIndex),
+                  saved.windows[savedIndex].isTabPinned == true,
+                  windows.indices.contains(candidateIndex),
+                  let id = session.windows.first(where: {
+                      $0.candidate.isSameWindow(as: windows[candidateIndex])
+                  })?.id
+            else { continue }
+            session.setTabPinned(true, for: id)
+        }
     }
 
     /// Recreates saved combined tabs once the restored windows are tabs.
@@ -1197,6 +1388,14 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         guard workspace.wrapsCrowdedTabs != enabled else { return }
         workspace.wrapsCrowdedTabs = enabled
         workspace.layoutSubtreeIfNeeded()
+        syncIfVisible()
+    }
+
+    func setCompactTabBar(_ enabled: Bool) {
+        guard workspace.compactTabBar != enabled else { return }
+        workspace.compactTabBar = enabled
+        workspace.layoutSubtreeIfNeeded()
+        // A shorter tab bar gives the panes more room.
         syncIfVisible()
     }
 
@@ -1246,7 +1445,10 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     /// Long enough to ignore a pointer that only passes over the edge handle on its way elsewhere.
     static let autoHiddenTabBarRevealDelay: TimeInterval = 0.08
 
-    func updateAutoHiddenTabBar(at point: NSPoint, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+    func updateAutoHiddenTabBar(
+        at point: NSPoint, hoveringMenuBar: Bool = false, now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    )
+    {
         guard autoHideTabs, !suspended, !quitting, picker == nil,
               window.isVisible, !window.isMiniaturized, window.isOnActiveSpace, !NSApp.isHidden
         else {
@@ -1255,7 +1457,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             return
         }
         if isToolbarMenuOpen { return }
-        if workspace.toolbarHoverFrame.contains(point) {
+        if hoveringMenuBar || workspace.toolbarHoverFrame.contains(point) {
             if tabBarHoverStart == nil { tabBarHoverStart = now }
             tabBarLastActive = now
             if now - (tabBarHoverStart ?? now) >= Self.autoHiddenTabBarRevealDelay {
@@ -1290,11 +1492,54 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         session.cycle(offset)
     }
 
+    func activateAdjacentPane(_ direction: Int) -> Bool {
+        guard let id = session.activateAdjacentPane(direction) else { return false }
+        revealAutoHiddenTabBarTemporarily()
+        session.select(id, activate: true)
+        return true
+    }
+
+    func sortTabsByApplicationName() {
+        session.sortTabEntries { id in
+            let ids = session.isPaneGroup(id) ? session.groupMembers(id) : [id]
+            let names = ids.compactMap { session.managedByID[$0]?.candidate.application.localizedName }
+                .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            return names.isEmpty ? tabTitle(id) : names.joined(separator: " | ")
+        }
+    }
+
+    func sortTabsByWindowTitle() {
+        session.sortTabEntries { id in
+            if session.isPaneGroup(id) {
+                return CombinedTabTitle.joined(session.groupMembers(id).map(tabTitle))
+            }
+            return tabTitle(id)
+        }
+    }
+
+    @discardableResult
+    func selectTab(at index: Int) -> Bool {
+        let targets = session.numberedTabTargets
+        guard targets.indices.contains(index) else { return false }
+        revealAutoHiddenTabBarTemporarily()
+        session.select(targets[index], activate: true)
+        return true
+    }
+
+    func selectPreviousUsedTab() {
+        guard session.canSelectPreviousUsedTab else { return }
+        revealAutoHiddenTabBarTemporarily()
+        session.selectPreviousUsedTab()
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
+        // Only the top-level menu decides: a submenu can close while its parent stays open.
+        guard menu.supermenu == nil else { return }
         isToolbarMenuOpen = true
     }
 
     func menuDidClose(_ menu: NSMenu) {
+        guard menu.supermenu == nil else { return }
         isToolbarMenuOpen = false
         tabBarLastActive = ProcessInfo.processInfo.systemUptime
     }
@@ -1342,6 +1587,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
 
     /// Closes only the workspace UI; its managed windows must already have been restored or transferred.
     func finishClosing() {
+        cancelTabPreview()
         quitting = true
         if let prompt = restorePrompt { finishRestore(prompt.id, choosing: []) }
         workspace.hideAutoHiddenToolbar()
@@ -1514,14 +1760,12 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     /// The auto-hidden tab bar is a non-activating panel, so WindowDock does not activate on its own when it is
-    /// clicked. Activate this workspace the way a click on its embedded tab bar does.
+    /// clicked. Activate this workspace and keep WindowDock active, so that its menu bar stays; a tab hands focus to
+    /// its window, and moving the workspace by the bar hands it back once released.
     private func activateFromAutoHiddenToolbar(_ event: NSEvent) {
         guard !NSApp.isActive || !window.isKeyWindow,
               !suspended, !quitting, !window.isMiniaturized, picker == nil
         else { return }
-        let handlesClick =
-            event.window?.contentView?.superview
-                .map { Self.handlesClick(in: $0, at: event.locationInWindow) } ?? false
         if !NSApp.isActive {
             toolbarActivationRequest = ProcessInfo.processInfo.systemUptime
             // A click raises only the clicked window; activating normally would raise every workspace.
@@ -1531,7 +1775,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
             }
         }
         window.makeKey()
-        scheduleSelectedWindowRaise(activate: !handlesClick)
+        scheduleSelectedWindowRaise()
     }
 
     private var toolbarActivationRequest: TimeInterval?
@@ -1660,6 +1904,17 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         scheduleSettledSync()
     }
 
+    /// Zooming animates the workspace's frame; its windows catch up with it afterwards.
+    func windowShouldZoom(_ window: NSWindow, toFrame newFrame: NSRect) -> Bool {
+        extendWorkspaceFrameSettling()
+        return true
+    }
+
+    /// The window server can resize the workspace from just outside its edges.
+    func windowDidEndLiveResize(_ notification: Notification) {
+        extendWorkspaceFrameSettling()
+    }
+
     private var settledSyncGeneration = 0
 
     /// Zoom animates the frame, and target apps resize asynchronously; realign once everything has settled
@@ -1677,18 +1932,18 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
         }
     }
 
-    func syncIfVisible() {
+    func syncIfVisible(showShortcutHint: Bool = true) {
         guard !suspended, picker == nil, !quitting else { return }
         workspace.refreshCoverage()
-        syncManagedWindows()
+        syncManagedWindows(showShortcutHint: showShortcutHint)
     }
 
     /// Leaves out the window the user is moving or resizing; setting its frame would fight the user or its app.
-    private func syncManagedWindows() {
+    private func syncManagedWindows(showShortcutHint: Bool = true) {
         if let id = managedWindowDrag?.id ?? settlingManagedWindowID {
-            session.sync(excluding: id)
+            session.sync(excluding: id, showShortcutHint: showShortcutHint)
         } else {
-            session.sync()
+            session.sync(showShortcutHint: showShortcutHint)
         }
     }
 
@@ -1790,6 +2045,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     var onSuspend: (() -> Void)?
 
     func windowWillMiniaturize(_ notification: Notification) {
+        cancelTabPreview()
         onSuspend?()
         suspended = true
         workspace.hideAutoHiddenToolbar()
@@ -1803,6 +2059,7 @@ final class WorkspaceController: NSObject, NSWindowDelegate, NSMenuDelegate {
     }
 
     func applicationDidHide() {
+        cancelTabPreview()
         onSuspend?()
         suspended = true
         workspace.hideAutoHiddenToolbar()

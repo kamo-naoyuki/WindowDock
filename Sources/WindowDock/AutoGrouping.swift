@@ -706,7 +706,7 @@ struct AutoGroupSection: View {
                     }
                     Text(AutoGroupApplication.name(id))
                     Spacer()
-                    Button(L("登録を解除")) { model.remove(id) }.controlSize(.small)
+                    Button(L("登録を解除")) { model.remove(id) }.controlSize(.small).hoverGlow()
                 }
             }
         }

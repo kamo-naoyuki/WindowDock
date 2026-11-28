@@ -17,6 +17,9 @@ ditto "$bin_dir/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
 install_name_tool -add_rpath @executable_path/../Frameworks "$app/Contents/MacOS/WindowDock"
 if [ -n "${VERSION:-}" ]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" -c "Set :CFBundleVersion $VERSION" "$app/Contents/Info.plist"
+else
+  # Local builds keep the placeholder version, so automatic update checks would replace them with the latest release.
+  /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$app/Contents/Info.plist"
 fi
 fw="$app/Contents/Frameworks/Sparkle.framework/Versions/B"
 for item in "$fw"/XPCServices/*.xpc "$fw/Autoupdate" "$fw/Updater.app" "$app/Contents/Frameworks/Sparkle.framework"; do

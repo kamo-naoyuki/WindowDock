@@ -112,10 +112,17 @@ enum StartupRestoreSmoke {
         func saved(_ titles: [String]) -> [SavedWindow] {
             titles.map { SavedWindow(bundleID: bundleID, title: $0, frame: original) }
         }
-        let first = SavedWorkspace(name: "First", windows: saved(["C", "A"]), columns: 2, rows: 1,
-                                   pinnedPanes: [0], tabBarPosition: .right)
+        var firstWindows = saved(["C", "A"])
+        firstWindows[0].isTabPinned = true
+        var first = SavedWorkspace(name: "First", windows: firstWindows, columns: 2, rows: 1,
+                                   pinnedPanes: [0], tabBarPosition: .right, selectedWindowIndex: 1)
+        let visible = NSScreen.screens[0].visibleFrame
+        let savedFrame = CGRect(x: visible.minX + 37, y: visible.minY + 23,
+                                width: min(900, visible.width - 80), height: min(560, visible.height - 60))
+        first.frame = savedFrame
         let last = SavedWorkspace(name: "Last", windows: saved(["D"]),
-                                  paneLayout: .grid(columnWeights: [1, 2], rowWeights: [1]), pinnedPanes: [1])
+                                  paneLayout: .grid(columnWeights: [1, 2], rowWeights: [1]), pinnedPanes: [1],
+                                  selectedWindowIndex: 0)
         try check(SavedLayout.suggest(first.windows, among: candidates, frameOf: access.frame) == [2, 0],
                   "restore suggestions lost saved tab order when scan order differed")
         SavedLayout.save([first, last])
@@ -141,6 +148,9 @@ enum StartupRestoreSmoke {
         let one = controllers[0]
         try check(controllers.count == 1 && one.session.tabIDs.count == 1 && one.window.attachedSheet == nil,
                   "first restore did not open in a single inline tab")
+        // Panes are restored into the saved size; the default size can be too small for the split.
+        try check(one.window.frame == savedFrame,
+                  "restore did not reopen the workspace at its saved frame: \(one.window.frame) vs \(savedFrame)")
         // Adjust a preselection without taking ownership of any window; leave the saved order intact.
         try await confirm(in: one, extra: candidates[1], count: 3)
         try await wait({ controllers.count == 2 }, "confirm did not advance to the second workspace")
@@ -157,7 +167,14 @@ enum StartupRestoreSmoke {
         try check(one.session.tabIDs.count == 3 && one.session.gridSize.columns == 2
             && one.session.pinnedCells == [0] && one.session.cells.allSatisfy { $0 != nil }
             && one.tabBarPosition == .right && two.session.customLayout == last.paneLayout
-            && two.session.pinnedCells == [1], "placeholder changed restored pane layout or pins")
+            && two.session.pinnedCells == [1] && one.session.selected?.candidate.title == "A"
+            && two.session.selected?.candidate.title == "D"
+            && one.session.tabEntries.first.map { one.session.isTabPinned($0) } == true
+            && one.session.tabEntries.first.flatMap { one.session.managedByID[$0]?.candidate.title } == "C",
+            "restore changed pane layout or failed to select the previously active windows")
+        try check(one.window.frame == savedFrame && one.savedWorkspace().frame == savedFrame
+            && two.savedWorkspace().frame == two.window.frame,
+            "the workspace frame was not kept through restoration or not saved")
         for controller in controllers { controller.finishClosing() }
         controllers.removeAll()
 

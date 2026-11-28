@@ -6,6 +6,56 @@ struct WorkspaceShortcutContext {
 
     mutating func reset() { originPID = nil }
 
+    static func showsNumberedTabHints(for event: NSEvent) -> Bool {
+        guard event.type == .flagsChanged else { return false }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        return flags == [.control, .shift]
+    }
+
+    static func previouslyUsedTab(
+        for event: NSEvent, ownPID: pid_t, frontPID: pid_t?, visiblePIDs: Set<pid_t>) -> Bool {
+        guard event.type == .keyDown,
+              frontPID == ownPID || frontPID.map(visiblePIDs.contains) == true
+        else { return false }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        return flags == [.control, .shift] && event.keyCode == 29
+    }
+
+    static func numberedTab(for event: NSEvent, ownPID: pid_t, frontPID: pid_t?, visiblePIDs: Set<pid_t>) -> Int? {
+        guard event.type == .keyDown else { return nil }
+        guard frontPID == ownPID || frontPID.map(visiblePIDs.contains) == true else { return nil }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard flags == [.control, .shift] else { return nil }
+        let number: Int
+        switch event.keyCode {
+        case 18: number = 1
+        case 19: number = 2
+        case 20: number = 3
+        case 21: number = 4
+        case 23: number = 5
+        case 22: number = 6
+        case 26: number = 7
+        case 28: number = 8
+        case 25: number = 9
+        default: return nil
+        }
+        return number
+    }
+
+    static func paneDirection(
+        for event: NSEvent, ownPID: pid_t, frontPID: pid_t?, visiblePIDs: Set<pid_t>) -> Int? {
+        guard event.type == .keyDown,
+              frontPID == ownPID || frontPID.map(visiblePIDs.contains) == true
+        else { return nil }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        guard flags == [.command, .control, .option, .shift] else { return nil }
+        switch event.keyCode {
+        case 123: return -1
+        case 124: return 1
+        default: return nil
+        }
+    }
+
     mutating func applicationDidActivate(_ pid: pid_t) {
         if pid != originPID { reset() }
     }
@@ -72,6 +122,39 @@ struct WorkspaceWindowDragRegistration {
         let id = windowID(element)
         knownIDs.append((element, id))
         return id
+    }
+}
+
+/// Starts following a shown window when a left-button press reaches it, so dragging or resizing the window moves or
+/// resizes its workspace.
+@MainActor
+struct ManagedWindowPress {
+    var windowReceivingClick: (NSPoint, Set<CGWindowID>) -> CGWindowID? = WindowAccess.windowReceivingClick
+    var windows: () throws -> [WindowServerWindow] = WindowAccess.windowServerWindows
+
+    /// `reachedWindowDock` is set for presses that one of WindowDock's own windows received, such as the auto-hidden
+    /// tab bar in front of a pane's window; the window behind it is not pressed.
+    func begin(at point: NSPoint, reachedWindowDock: Bool, controllers: [WorkspaceController]) {
+        guard !reachedWindowDock else { return }
+        let excluded = Set(controllers.flatMap { controller in
+            [controller.window.windowNumber, controller.toolbarPanelNumber ?? 0, controller.windowDropPanelNumber ?? 0]
+                .filter { $0 > 0 }.map { CGWindowID($0) }
+        })
+        guard let windowID = windowReceivingClick(point, excluded) else { return }
+        guard let controller = controllers.first(where: { controller in
+            controller.session.windows.contains {
+                controller.session.access.windowID($0.candidate.element) == windowID
+            }
+        })
+        else { return }
+        do {
+            guard let window = try windows().first(where: { $0.id == windowID }) else { return }
+            _ = controller.beginManagedWindowDrag(windowServerWindow: window)
+        } catch {
+            WindowAccess.logger
+                .error("Could not begin managed-window sampling: \(error.localizedDescription, privacy: .public)")
+            controller.showNotice(.attention(error.localizedDescription))
+        }
     }
 }
 

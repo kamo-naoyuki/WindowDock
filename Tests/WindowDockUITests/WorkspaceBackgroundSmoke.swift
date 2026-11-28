@@ -78,6 +78,17 @@ enum WorkspaceBackgroundSmoke {
             application.run()
             return
         }
+        if CommandLine.arguments.contains("--dock-menu-only") {
+            Task { @MainActor in
+                let failures = await WindowSessionSmoke.runDockMenuCheck()
+                if let previous { _ = previous.activate(options: []) }
+                for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
+                if failures.isEmpty { print("PASS: Finder's Dock menu was read, closed, and opened a new window") }
+                exit(failures.isEmpty ? 0 : 1)
+            }
+            application.run()
+            return
+        }
         if CommandLine.arguments.contains("--stage-manager-only") {
             DispatchQueue.main.async {
                 let failures = WorkspaceActivationSmoke.runStageManagerChecks()
@@ -104,16 +115,32 @@ enum WorkspaceBackgroundSmoke {
             let audioOnly = CommandLine.arguments.contains("--audio-indicator-only")
             let autoGroupOnly = CommandLine.arguments.contains("--auto-group-only")
             let paneGroupOnly = CommandLine.arguments.contains("--pane-group-only")
+            let previousUsedTabOnly = CommandLine.arguments.contains("--previous-used-tab-only")
+            let tabSearchOnly = CommandLine.arguments.contains("--tab-search-only")
+            let tabWheelOnly = CommandLine.arguments.contains("--tab-wheel-only")
+            let tabPreviewOnly = CommandLine.arguments.contains("--tab-preview-only")
             let failures: [String]
-            if CommandLine.arguments.contains("--new-tab-only") {
+            if tabPreviewOnly {
+                failures = WindowSessionSmoke.runTabPreviewPanelChecks()
+                    + WindowSessionSmoke.runTabHoverSwitchPolicyChecks()
+            } else if tabWheelOnly {
+                failures = WindowSessionSmoke.runTabWheelChecks()
+            } else if tabSearchOnly {
+                failures = WindowSessionSmoke.runTabSearchChecks()
+            } else if previousUsedTabOnly {
+                failures = WindowSessionSmoke.runPreviousUsedTabChecks()
+            } else if CommandLine.arguments.contains("--new-tab-only") {
                 failures = WindowSessionSmoke.runNewTabChecks() + checkThumbnailSelection()
             } else if paneGroupOnly {
                 failures = WindowSessionSmoke.runPaneGroupChecks() + WindowSessionSmoke.runPaneGroupUIChecks()
             } else if windowFollowOnly {
                 failures = WindowSessionSmoke.runManagedWindowFollowChecks()
                     + WindowSessionSmoke.runManagedWindowSettledFollowChecks()
+                    + WindowSessionSmoke.runManagedWindowLateFrameChecks()
+                    + WindowSessionSmoke.runOwnWorkspaceResizeFollowChecks()
                     + WindowSessionSmoke.runManagedWindowLiveResizeChecks()
                     + WindowSessionSmoke.runManagedWindowDragConcealmentChecks()
+                    + WindowSessionSmoke.runToolbarPressFollowChecks()
                     + WindowSessionSmoke.runManagedWindowMinimizeFollowChecks()
             } else if autoGroupOnly {
                 failures = WindowSessionSmoke.runAutoGroupChecks()
@@ -126,10 +153,11 @@ enum WorkspaceBackgroundSmoke {
                 failures = WindowSessionSmoke.runEnhancedUIFrameChecks()
             } else if constraintOnly {
                 failures = WindowSessionSmoke.runConstraintNoticeChecks()
+                    + WindowSessionSmoke.runConstraintCollapseChecks()
             } else if refitOnly {
                 failures = WindowSessionSmoke.runDisplacedWindowChecks() + WindowSessionSmoke
                     .runWindowEventRefitChecks() + WindowSessionSmoke.runWindowEventReturnPolicyChecks()
-                    + WindowSessionSmoke.runActivationRefitChecks()
+                    + WindowSessionSmoke.runClosedWindowSyncChecks() + WindowSessionSmoke.runActivationRefitChecks()
             } else if focusOnly {
                 failures = WindowSessionSmoke.runExternalFocusChecks()
             } else if nestedOnly {
@@ -138,6 +166,7 @@ enum WorkspaceBackgroundSmoke {
                         + WindowSessionSmoke.runTabSelectionFeedbackChecks()
                         + WindowSessionSmoke.runNestedPaneUIChecks() + WindowSessionSmoke.runNestedPaneLimitChecks()
                         + WindowSessionSmoke.runNestedPaneMinimumChecks() + checkGridLayout() + checkTabMoveRouting()
+                        + checkPaneApertureEvents()
             } else if dropOnly {
                 failures = WindowSessionSmoke.runExternalWindowDropChecks() + checkNativeWindowDrops()
             } else if shortcutOnly {
@@ -158,6 +187,7 @@ enum WorkspaceBackgroundSmoke {
                         .runChecks() + checkWindowPicker() + checkThumbnailSelection() + runChecks() +
                         checkCompactLayout()
                         + checkGridLayout() + checkTabMoveRouting() + checkNativeWindowDrops()
+                        + checkPaneApertureEvents()
                         + checkAudioIndicatorLayout() + WindowSessionSmoke.runAudioIndicatorChecks()
                         + checkAudioPlaybackDetection()
             }
@@ -677,6 +707,90 @@ enum WorkspaceBackgroundSmoke {
         flush()
         checkAlpha(contentCenter(), transparent: false, label: "last tab removed")
         checkHit(contentCenter(), expected: host, label: "last tab removed")
+        return failures
+    }
+
+    /// A titled, resizable window is hit even where it is transparent, so a pane window shown through an aperture
+    /// below the workspace would lose scrolling, hovering and context menus to the workspace.
+    @MainActor
+    private static func checkPaneApertureEvents() -> [String] {
+        var failures: [String] = []
+        let host = WorkspaceWindow(
+            contentRect: NSRect(x: 160, y: 140, width: 1000, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        host.isOpaque = false
+        host.backgroundColor = .clear
+        host.titlebarAppearsTransparent = true
+        host.titleVisibility = .hidden
+        host.isMovable = false
+        host.level = .floating
+        let chrome = WorkspaceChromeView(frame: .zero)
+        host.contentView = chrome
+        let targets = (0 ..< 2).map { _ -> NSWindow in
+            let target = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
+            target.isReleasedWhenClosed = false
+            target.level = .floating
+            target.backgroundColor = .systemGreen
+            return target
+        }
+        defer {
+            host.close()
+            targets.forEach { $0.close() }
+        }
+        func flush() {
+            chrome.displayIfNeeded()
+            host.displayIfNeeded()
+            CATransaction.flush()
+            let deadline = Date().addingTimeInterval(0.05)
+            repeat {
+                if let event = NSApp.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true) {
+                    NSApp.sendEvent(event)
+                }
+            } while Date() < deadline
+        }
+        func hit(_ point: NSPoint, expected: NSWindow, label: String) {
+            // Stand in for the pointer arriving at the point without moving the real cursor.
+            host.updateMousePassThrough(at: point)
+            // The window server applies the change a moment after it is committed; wait without dispatching real
+            // pointer events, which would move the pass-through to the real cursor.
+            var actual = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+            let deadline = Date().addingTimeInterval(0.5)
+            while actual != expected.windowNumber, Date() < deadline {
+                usleep(10000)
+                actual = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+            }
+            if actual != expected.windowNumber {
+                failures.append("\(label): hit \(actual), expected \(expected.windowNumber)")
+            }
+        }
+        chrome.setGrid(WorkspaceGridSize(columns: 2, rows: 1), activeCell: 0)
+        chrome.layoutSubtreeIfNeeded()
+        chrome.showManagedWindows(true)
+        let areas = chrome.gridAreas.map { host.convertToScreen($0.convert($0.bounds, to: nil)) }
+        var frames: [Int: CGRect] = [:]
+        for (index, area) in areas.enumerated() {
+            targets[index].setFrame(area, display: true)
+            frames[index] = targets[index].frame
+        }
+        chrome.presentFrames(frames)
+        // Both pane windows sit below the workspace, as a pane that is not selected does.
+        targets.forEach { $0.orderFrontRegardless() }
+        host.orderFrontRegardless()
+        flush()
+        for (index, area) in areas.enumerated() {
+            let center = NSPoint(x: area.midX, y: area.midY)
+            hit(center, expected: targets[index], label: "pane \(index) aperture")
+        }
+        let tabBar = NSPoint(x: host.frame.midX, y: host.frame.maxY - 12)
+        hit(tabBar, expected: host, label: "tab bar after leaving an aperture")
+        let divider = NSPoint(x: (areas[0].maxX + areas[1].minX) / 2, y: areas[0].midY)
+        hit(divider, expected: host, label: "pane divider")
+        let edge = NSPoint(x: max(areas[0].minX + 1, host.frame.minX + 4), y: areas[0].midY)
+        if edge.x < host.frame.minX + WorkspaceResize.edgeThickness, areas[0].contains(edge) {
+            hit(edge, expected: host, label: "resize edge over an aperture")
+        }
         return failures
     }
 

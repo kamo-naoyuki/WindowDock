@@ -37,10 +37,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var tabMenu: NSMenu!
     private var viewMenu: NSMenu!
     private var settingsMenu: NSMenu!
+    private var tabSearchPanel: TabSearchPanel?
     private var shortcutContext = WorkspaceShortcutContext()
     private let tabOutsideDropSettings = TabOutsideDropSettings()
     private var dragTimer: Timer?
     private var leftMousePress = LeftMousePress()
+    private let managedWindowPress = ManagedWindowPress()
     private lazy var tabTransfer: WorkspaceTabTransfer = {
         let transfer = WorkspaceTabTransfer { [weak self] in self?.controllers ?? [] }
         transfer.onBegin = { [weak self] in self?.cancelWindowDrag() }
@@ -84,20 +86,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Setting.controlTabSwitching.rawValue: true,
             Setting.addWindowsByDragging.rawValue: true,
             Setting.autoHideNewWorkspaces.rawValue: false,
+            Setting.revealTabBarFromMenuBar.rawValue: true,
             Setting.wrapCrowdedTabs.rawValue: false,
             Setting.showTabIconsOnly.rawValue: false,
+            Setting.compactTabBar.rawValue: false,
+            Setting.switchTabsOnHover.rawValue: false,
             Setting.returnFullScreenWindows.rawValue: false,
             Setting.deleteEmptyWorkspaces.rawValue: false,
         ])
         buildMenu()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [
-            .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp,
+            .keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp,
         ]) { [weak self] event in
+                if event.type == .flagsChanged {
+                    self?.updateNumberedTabHints(for: event)
+                    return event
+                }
                 if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
                     self?.shortcutContext.reset()
+                    self?.hideNumberedTabHints()
                     self?.cancelWindowDrag()
                     if event.type == .leftMouseDown {
-                        self?.beginLeftMousePress()
+                        self?.beginLeftMousePress(reachedWindowDock: true)
                     } else {
                         self?.leftMousePress.cancel()
                         self?.controllers.forEach { $0.cancelManagedWindowDrag() }
@@ -222,16 +232,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case controlTabSwitching = "controlTabSwitching"
         case addWindowsByDragging = "addWindowsByDragging"
         case autoHideNewWorkspaces = "autoHideNewWorkspaces"
+        case revealTabBarFromMenuBar
         case wrapCrowdedTabs
         case showTabIconsOnly
+        case compactTabBar
+        case switchTabsOnHover
         case returnFullScreenWindows = "returnFullScreenWindowsToPanes"
         case deleteEmptyWorkspaces = "deleteEmptyWorkspaces"
 
         var defaultValue: Bool {
             switch self {
             case .closeOnRelease, .autoHideNewWorkspaces, .returnFullScreenWindows, .deleteEmptyWorkspaces,
-                 .wrapCrowdedTabs, .showTabIconsOnly: false
-            case .controlTabSwitching, .addWindowsByDragging: true
+                 .wrapCrowdedTabs, .showTabIconsOnly, .compactTabBar, .switchTabsOnHover: false
+            case .controlTabSwitching, .addWindowsByDragging, .revealTabBarFromMenuBar: true
             }
         }
     }
@@ -278,7 +291,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for controller in controllers { controller.setWrapsCrowdedTabs(enabled) }
         case .showTabIconsOnly:
             for controller in controllers { controller.setShowsTabIconsOnly(enabled) }
-        case .autoHideNewWorkspaces:
+        case .compactTabBar:
+            for controller in controllers { controller.setCompactTabBar(enabled) }
+        case .switchTabsOnHover:
+            for controller in controllers { controller.setSwitchesTabsOnHover(enabled) }
+        case .autoHideNewWorkspaces, .revealTabBarFromMenuBar:
             break
         }
     }
@@ -398,15 +415,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         previousTab.keyEquivalentModifierMask = [.control, .shift]
         previousTab.isEnabled = controlTabEnabled
         nextTab.isEnabled = controlTabEnabled
+        let previousUsedTab = menu.addItem(
+            withTitle: L("直前に使ったタブ"), action: #selector(selectPreviousUsedTab), keyEquivalent: "0")
+        previousUsedTab.target = self
+        previousUsedTab.keyEquivalentModifierMask = [.control, .shift]
+        previousUsedTab.isEnabled = activeController?.session.canSelectPreviousUsedTab == true
+        let search = menu.addItem(
+            withTitle: L("ウィンドウを検索…"), action: #selector(searchWindows), keyEquivalent: "f")
+        search.target = self
+        search.keyEquivalentModifierMask = [.command]
+        search.isEnabled = controllers.contains { !$0.session.tabIDs.isEmpty }
+        let sortMenu = NSMenu()
+        sortMenu.addItem(withTitle: L("アプリ名順"), action: #selector(sortTabsByApplicationName), keyEquivalent: "")
+        sortMenu.addItem(withTitle: L("ウィンドウ名順"), action: #selector(sortTabsByWindowTitle), keyEquivalent: "")
+        sortMenu.items.forEach { $0.target = self }
+        let sort = menu.addItem(withTitle: L("タブを並べ替え"), action: nil, keyEquivalent: "")
+        sort.submenu = sortMenu
+        sort.isEnabled = (activeController?.session.tabEntries.count ?? 0) > 1
         let populatedWorkspaces = controllers.filter { !$0.session.tabIDs.isEmpty }
         guard !populatedWorkspaces.isEmpty else { return }
+        let active = activeController
         menu.addItem(.separator())
         for controller in populatedWorkspaces {
             let workspaceItem = menu.addItem(
                 withTitle: "\(controller.name) — " + L("%d個のウィンドウ", controller.session.windows.count),
                 action: nil, keyEquivalent: "")
             workspaceItem.isEnabled = false
-            for id in controller.session.tabIDs {
+            for (index, id) in controller.session.tabIDs.enumerated() {
                 let item = menu.addItem(
                     withTitle: controller.session.managedByID[id]?.candidate.label ?? L("新しいタブ"),
                     action: #selector(showWorkspaceWindow(_:)),
@@ -415,6 +450,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 item.indentationLevel = 1
                 item.representedObject = WorkspaceWindowRef(controller: controller, id: id)
                 item.state = controller.session.selectedID == id ? .mixed : .off
+                if controller === active, index < 9 {
+                    item.keyEquivalent = String(index + 1)
+                    item.keyEquivalentModifierMask = [.control, .shift]
+                }
             }
         }
     }
@@ -446,8 +485,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.returnFullScreenWindows, "フルスクリーンのウィンドウもペインに戻す"),
             (.deleteEmptyWorkspaces, "空になったワークスペースを自動的に削除する"),
             (.autoHideNewWorkspaces, "新しいワークスペースではタブバーを自動的に隠す"),
+            (.revealTabBarFromMenuBar, "メニューバーにカーソルを合わせると隠したタブバーを表示する"),
             (.wrapCrowdedTabs, "タブが収まらないときは2段にする"),
             (.showTabIconsOnly, "タブにアイコンだけを表示する（ウィンドウ名を隠す）"),
+            (.compactTabBar, "タブバーをコンパクトにする"),
+            (.switchTabsOnHover, "タブにカーソルを合わせると切り替える"),
         ]
         for (setting, title) in settings {
             let item = menu.addItem(withTitle: L(title), action: #selector(toggleSetting(_:)), keyEquivalent: "")
@@ -505,6 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else { return }
         if workspace.windows.isEmpty {
             let controller = addWorkspace(name: name)
+            controller.restoreFrame(workspace)
             controller.autoGroupBundleIDs = workspace.autoGroupBundleIDs ?? []
             controller.restoreLayout(workspace)
             controller.showPicker()
@@ -557,6 +600,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.setAutoHideTabs(isSettingEnabled(.autoHideNewWorkspaces))
         controller.setWrapsCrowdedTabs(isSettingEnabled(.wrapCrowdedTabs))
         controller.setShowsTabIconsOnly(isSettingEnabled(.showTabIconsOnly))
+        controller.setCompactTabBar(isSettingEnabled(.compactTabBar))
+        controller.setSwitchesTabsOnHover(isSettingEnabled(.switchTabsOnHover))
         controller.onClose = { [weak self] in self?.close($0) }
         controller.onSessionChange = { [weak self] controller in self?.persist(controller) }
         controller.onRename = { [weak self] in self?.rename($0) }
@@ -736,6 +781,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func removeSelected() { activeController?.removeSelected() }
     @objc private func selectNextTab() { activeController?.cycleTabs(1) }
     @objc private func selectPreviousTab() { activeController?.cycleTabs(-1) }
+    @objc private func selectPreviousUsedTab() { activeController?.selectPreviousUsedTab() }
+    @objc private func sortTabsByApplicationName() { activeController?.sortTabsByApplicationName() }
+    @objc private func sortTabsByWindowTitle() { activeController?.sortTabsByWindowTitle() }
+    @objc private func searchWindows() {
+        guard let parent = activeController?.window else { return }
+        let items = controllers.flatMap { controller in
+            TabSearchItem.entries(for: controller.session, workspaceName: controller.name) {
+                [weak self, weak controller] id in
+                guard let self, let controller, !controller.quitting else { return }
+                controller.session.select(id)
+                self.activation.show(controller)
+            }
+        }
+        guard !items.isEmpty else { return }
+        let searchPanel = TabSearchPanel(items: items)
+        tabSearchPanel = searchPanel
+        searchPanel.present(on: parent) { [weak self] selected in
+            self?.tabSearchPanel = nil
+            selected?.select()
+        }
+    }
     @objc private func minimizeWorkspace() { activeController?.minimizeWorkspace() }
     @objc private func maximizeWorkspace() { activeController?.maximizeWorkspace() }
     @objc private func toggleSplit() { activeController?.toggleSplit() }
@@ -758,9 +824,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return activation.cycle(direction) != nil
         }
         let target =
-            controllers.first { $0.canHandleShortcut && $0.window.isKeyWindow } ?? controllers.first {
-                $0.canHandleShortcut && frontPID.map($0.visiblePIDs.contains) == true
-            } ?? controllers.first { $0.canHandleShortcut }
+            shortcutTarget(frontPID: frontPID)
+        if let target,
+           let direction = WorkspaceShortcutContext.paneDirection(
+               for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
+               frontPID: frontPID, visiblePIDs: target.visiblePIDs),
+           target.activateAdjacentPane(direction) {
+            shortcutContext.reset()
+            return true
+        }
+        if let target, target.session.canSelectPreviousUsedTab,
+           WorkspaceShortcutContext.previouslyUsedTab(
+               for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
+               frontPID: frontPID, visiblePIDs: target.visiblePIDs) {
+            target.selectPreviousUsedTab()
+            shortcutContext.reset()
+            return true
+        }
+        if let target,
+           let number = WorkspaceShortcutContext.numberedTab(
+               for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
+               frontPID: frontPID, visiblePIDs: target.visiblePIDs),
+           target.selectTab(at: number - 1) {
+            shortcutContext.reset()
+            hideNumberedTabHints()
+            return true
+        }
         guard let target,
               let direction = shortcutContext.direction(
                   for: event, ownPID: ProcessInfo.processInfo.processIdentifier,
@@ -771,10 +860,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return true
     }
 
+    private func shortcutTarget(frontPID: pid_t?) -> WorkspaceController? {
+        controllers.first { $0.canHandleShortcut && $0.window.isKeyWindow } ?? controllers.first {
+            $0.canHandleShortcut && frontPID.map($0.visiblePIDs.contains) == true
+        } ?? controllers.first { $0.canHandleShortcut }
+    }
+
+    private func updateNumberedTabHints(for event: NSEvent) {
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let target = WorkspaceShortcutContext.showsNumberedTabHints(for: event)
+            ? shortcutTarget(frontPID: frontPID) : nil
+        for controller in controllers {
+            controller.setNumberedTabHintsVisible(controller === target)
+        }
+    }
+
+    private func hideNumberedTabHints() {
+        controllers.forEach { $0.setNumberedTabHintsVisible(false) }
+    }
+
     @objc private func frontApplicationChanged(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
             return
         }
+        hideNumberedTabHints()
         if app != .current, app.activationPolicy == .regular, let id = app.bundleIdentifier {
             RecentApplications().record(id)
         }
@@ -789,14 +898,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitorTrust = trusted
         let mask: NSEvent.EventTypeMask =
             trusted
-                ? [.keyDown, .leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown]
+                ? [.keyDown, .flagsChanged, .leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown]
                 : [.leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown]
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else { return }
             let point = NSEvent.mouseLocation
             switch event.type {
             case .leftMouseDown:
-                self.beginLeftMousePress()
+                self.beginLeftMousePress(reachedWindowDock: false)
                 self.shortcutContext.reset()
                 DispatchQueue.main.async { self.controllers.forEach { $0.focusPane(at: point) } }
             case .rightMouseDown, .otherMouseDown:
@@ -808,6 +917,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.finishLeftMousePress()
             case .keyDown:
                 _ = self.handleShortcut(event)
+            case .flagsChanged:
+                self.updateNumberedTabHints(for: event)
             default:
                 break
             }
@@ -818,12 +929,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func beginLeftMousePress() {
+    private func beginLeftMousePress(reachedWindowDock: Bool) {
         let point = NSEvent.mouseLocation
         if leftMousePress.begin(at: point) {
             controllers.forEach { $0.finishManagedWindowDrag() }
         }
-        beginManagedWindowDrag(at: point)
+        guard managedWindowMoveAction == .follow else { return }
+        managedWindowPress.begin(at: point, reachedWindowDock: reachedWindowDock, controllers: controllers)
     }
 
     private func finishLeftMousePress() {
@@ -845,30 +957,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for controller in controllers { controller.managedWindowMoveAction = action }
     }
 
-    private func beginManagedWindowDrag(at point: NSPoint) {
-        guard managedWindowMoveAction == .follow else { return }
-        let excluded = Set(controllers.flatMap { controller in
-            [controller.window.windowNumber, controller.toolbarPanelNumber ?? 0, controller.windowDropPanelNumber ?? 0]
-                .filter { $0 > 0 }.map { CGWindowID($0) }
-        })
-        guard let windowID = WindowAccess.windowReceivingClick(at: point, excluding: excluded) else { return }
-        guard let controller = controllers.first(where: { controller in
-            controller.session.windows.contains {
-                controller.session.access.windowID($0.candidate.element) == windowID
-            }
-        })
-        else { return }
-        do {
-            guard let window = try WindowAccess.windowServerWindows().first(where: { $0.id == windowID })
-            else { return }
-            _ = controller.beginManagedWindowDrag(windowServerWindow: window)
-        } catch {
-            WindowAccess.logger
-                .error("Could not begin managed-window sampling: \(error.localizedDescription, privacy: .public)")
-            controller.showNotice(.attention(error.localizedDescription))
-        }
-    }
-
     // MARK: Window drag and drop
 
     private func startWindowDragMonitoring() {
@@ -881,7 +969,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func pollWindowDrag() {
         let point = NSEvent.mouseLocation
-        controllers.forEach { $0.updateAutoHiddenTabBar(at: point) }
+        let menuBarTarget = isSettingEnabled(.revealTabBarFromMenuBar)
+            ? activation.menuBarRevealTarget(at: point) : nil
+        controllers.forEach { $0.updateAutoHiddenTabBar(at: point, hoveringMenuBar: $0 === menuBarTarget) }
         let tracking = controllers.filter(\.isTrackingManagedWindowDrag)
         var sampledWindows: [WindowServerWindow]?
         if !tracking.isEmpty, NSEvent.pressedMouseButtons & 1 != 0 {

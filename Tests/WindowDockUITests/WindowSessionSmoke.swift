@@ -40,8 +40,8 @@ enum WindowSessionSmoke {
         var target = CGRect(x: 200, y: 160, width: 900, height: 600)
         var operations: [Operation] = []
         var onMove: (() -> Void)?
-        /// Called before a window's frame is set, with its index and the new frame.
-        var onSetFrame: ((Int, CGRect) -> Void)?
+        /// Called before a window's frame is set, with its index and the new frame; throwing fails the request.
+        var onSetFrame: ((Int, CGRect) throws -> Void)?
         var failedMoves: Set<Int> = []
         var failedMinimizations: Set<Int> = []
         var failedRegistrations: Set<Int> = []
@@ -52,6 +52,9 @@ enum WindowSessionSmoke {
         /// Windows asked to leave full screen, by index.
         var fullScreenExits: [Int] = []
         var probeErrors: [Int: AXError] = [:]
+        /// Windows whose app has closed them: every read fails as for a stale AX element.
+        var closedWindows: Set<Int> = []
+        var closedFrameReads = 0
         var titles: [Int: String] = [:]
         /// The windows that their app lists, by index.
         var listedWindows: [Int] = []
@@ -80,11 +83,17 @@ enum WindowSessionSmoke {
             let index = try model.index(of: element)
             if model.failedRegistrations.contains(index) { throw InjectedFailure() }
         }
-        access.frame = { element in model.windows[try model.index(of: element)].frame }
-        access.isMinimized = { element in model.windows[try model.index(of: element)].minimized }
+        func open(_ element: AXUIElement, reading attribute: String) throws -> Int {
+            let index = try model.index(of: element)
+            guard model.closedWindows.contains(index) else { return index }
+            if attribute == kAXPositionAttribute { model.closedFrameReads += 1 }
+            throw WindowAccessError(operation: attribute, code: .invalidUIElement)
+        }
+        access.frame = { element in model.windows[try open(element, reading: kAXPositionAttribute)].frame }
+        access.isMinimized = { element in model.windows[try open(element, reading: kAXMinimizedAttribute)].minimized }
         access.setFrame = { element, frame in
             let index = try model.index(of: element)
-            model.onSetFrame?(index, frame)
+            try model.onSetFrame?(index, frame)
             model.operations.append(.resize(index))
             guard !model.windows[index].fullScreen else { return }
             model.windows[index].frame = frame
@@ -138,7 +147,7 @@ enum WindowSessionSmoke {
             model.focusedWindows.append(index)
         }
         access.probe = { element in
-            guard let index = try? model.index(of: element) else {
+            guard let index = try? model.index(of: element), !model.closedWindows.contains(index) else {
                 return WindowProbeResult(error: .invalidUIElement, title: nil)
             }
             let error = model.probeErrors[index] ?? .success
@@ -201,11 +210,19 @@ enum WindowSessionSmoke {
         {
             failures.append("splitting the right pane changed the left pane, selection, or registered tabs")
         }
+        session.select(ids[1], activate: true)
         session.closePane(at: 1)
+        // A focus notification reads the app's current focused window after the close.
+        if let focused = model.focusedWindows.last {
+            session.observeFocusedWindow(model.windows[focused].element)
+        }
         if session.cells != [ids[0], ids[2]] || session.selectedID != ids[2] || session.windows.map(\.id) != ids
             || model.windows[1].frame == model.windows[1].originalFrame
         {
             failures.append("closing a nested pane released its tab or failed to retain the sibling and other panes")
+        }
+        if model.focusedWindows.last != 2 || Set(model.paneFrames.keys) != [ids[0], ids[2]] {
+            failures.append("the focused and presented windows did not match the surviving panes after close")
         }
         session.splitPane(at: 0, axis: .vertical)
         if session.cells != [ids[0], ids[1], ids[2]] || session.activeCell != 2 {
@@ -242,6 +259,19 @@ enum WindowSessionSmoke {
         session.splitPane(at: 99, axis: .horizontal)
         if session.cells != before || model.notices.last?.needsAttention != true {
             failures.append("an invalid pane split mutated the session or failed without a notice")
+        }
+
+        let (pages, pageModel) = fixture(registering: [0])
+        pages.setSplit(true)
+        pages.activateCell(1)
+        pages.newTab()
+        let page = pages.selectedID
+        pages.select(pages.windows[0].id, activate: true)
+        var pageFocused = false
+        pages.onFocusStartPage = { pageFocused = true }
+        pages.closePane(at: 0)
+        if !pageFocused || pages.selectedID != page || !pageModel.paneFrames.isEmpty {
+            failures.append("closing the window pane did not bring the surviving start page to the front")
         }
         return failures
     }
@@ -319,7 +349,7 @@ enum WindowSessionSmoke {
     }
 
     /// A combined tab keeps its own panes: selecting it shows them, any other tab brings back the normal panes, which
-    /// change independently, and ungrouping keeps what is shown.
+    /// change independently, and ungrouping the shown combined tab brings back the normal panes too.
     static func runPaneGroupChecks() -> [String] {
         var failures: [String] = []
         let (session, model) = fixture(registering: [0, 1, 2, 3])
@@ -331,6 +361,9 @@ enum WindowSessionSmoke {
         session.moveWindow(ids[1], toCell: 1)
         guard session.cells == [ids[0], ids[1]], let group = session.combineVisiblePanes() else {
             return ["the combined tab fixture could not combine two shown panes"]
+        }
+        if session.numberedTabTargets.contains(group) || session.numberedTabTargets.count != 2 {
+            failures.append("numbered shortcuts included the currently displayed combined tab")
         }
         let groupFrames = [model.windows[0].frame, model.windows[1].frame]
         if session.tabEntries != [group, ids[2], ids[3]] || session.groupMembers(group) != [ids[0], ids[1]]
@@ -384,18 +417,34 @@ enum WindowSessionSmoke {
         }
 
         session.select(group)
-        model.operations.removeAll()
         session.ungroup(group)
         if session.activeGroupID != nil || session.isPaneGroup(group) || session.tabEntries != ids
-            || session.cells != [ids[0], ids[1]] || session.gridSize != halves || !model.operations.isEmpty
+            || session.gridSize != single || session.cells != [ids[2]]
         {
-            failures.append("ungrouping the shown combined tab changed what was shown or kept the combined tab")
+            failures.append(
+                "ungrouping the shown combined tab did not bring back the normal panes: \(session.gridSize), "
+                    + "\(session.cells.map { $0.flatMap(ids.firstIndex) })")
         }
-        session.select(ids[2])
-        if session.gridSize != halves || !session.cells.contains(ids[2]) {
-            failures.append("ungrouping did not keep its panes as the normal panes")
+        session.select(ids[0])
+        if session.activeGroupID != nil || session.gridSize != single || session.cells != [ids[0]] {
+            failures.append("an ungrouped tab did not open in the normal panes")
         }
 
+        let (whole, _) = fixture(registering: [0, 1])
+        let wholeIDs = whole.windows.map(\.id)
+        whole.setGrid(halves)
+        whole.moveWindow(wholeIDs[0], toCell: 0)
+        whole.moveWindow(wholeIDs[1], toCell: 1)
+        if let wholeGroup = whole.combineVisiblePanes() {
+            whole.ungroup(wholeGroup)
+            if whole.activeGroupID != nil || whole.gridSize != single || whole.cells != [wholeIDs[0]] {
+                failures.append("ungrouping every tab left the normal panes empty")
+            }
+        } else {
+            failures.append("the combined tab fixture could not combine every tab")
+        }
+
+        session.setGrid(halves)
         session.moveWindow(ids[0], toCell: 0)
         session.moveWindow(ids[1], toCell: 1)
         guard let regrouped = session.combineVisiblePanes() else {
@@ -574,11 +623,14 @@ enum WindowSessionSmoke {
         else { return failures + ["the combined tab's context menu had no ungroup item, or had pane items"] }
         guard let ungroupAction = ungroup.action, NSApp.sendAction(ungroupAction, to: ungroup.target, from: ungroup)
         else { return failures + ["the combined tab's ungroup item could not be chosen"] }
-        if controller.session.isPaneGroup(group) || controller.session.cells != [ids[0], ids[1]]
-            || tabButtons().count != 4 || combineItem()?.isEnabled != true
+        if controller.session.isPaneGroup(group) || controller.session.cells != [ids[2]]
+            || controller.session.gridSize != single || tabButtons().count != 4
         {
-            failures.append("ungrouping from the context menu did not return to separate tabs showing the same panes")
+            failures.append("ungrouping from the context menu did not return to separate tabs in the normal panes")
         }
+        controller.session.setGrid(halves)
+        controller.session.moveWindow(ids[0], toCell: 0)
+        controller.session.moveWindow(ids[1], toCell: 1)
 
         // A narrow combined tab shortens each window's name rather than cutting off the later ones.
         let longName = "window-driven-workspace.md — window_switcher — a document with a long name"
@@ -606,12 +658,14 @@ enum WindowSessionSmoke {
                 "a narrow combined tab did not show every window's icon and part of its name: \(drawn), "
                     + "\(drawnIcons) icons, width \(longTab.bounds.width)")
         }
+        let base = controller.session.basePaneState
         NSApp.sendAction(combineAction, to: chrome.combineButton.target, from: chrome.combineButton)
-        if controller.session.isPaneGroup(longGroup) || controller.session.cells != [ids[0], ids[1]]
-            || chrome.combineButtonUngroups || !chrome.combineButton.isEnabled
+        if controller.session.isPaneGroup(longGroup) || controller.session.gridSize != base.gridSize
+            || controller.session.customLayout != base.customLayout || controller.session.cells != base.cells
+            || chrome.combineButtonUngroups || chrome.combineButton.isEnabled
             || chrome.combineButton.accessibilityLabel() != L("表示中のペインを1つのタブにまとめる")
         {
-            failures.append("the combine button did not ungroup the shown combined tab")
+            failures.append("the combine button did not ungroup the shown combined tab into the normal panes")
         }
         return failures
     }
@@ -934,6 +988,28 @@ enum WindowSessionSmoke {
                 failures.append(
                     "saving and restoring a nested layout lost its shape, ratios, pin, or auto-hide setting")
             }
+            func showsGrid(columns: Int, rows: Int) -> Bool {
+                restoredChrome.columnSelector.indexOfSelectedItem == columns - 1
+                    && restoredChrome.rowSelector.indexOfSelectedItem == rows - 1
+            }
+            restored.session.closePane(at: 2)
+            if !showsGrid(columns: 2, rows: 1) {
+                failures.append("closing the extra pane did not show the remaining 2×1 grid")
+            }
+            restored.session.splitPane(at: 1, axis: .vertical)
+            restored.session.splitPane(at: 0, axis: .vertical)
+            if !showsGrid(columns: 2, rows: 2) {
+                failures.append("splitting both columns did not show the resulting 2×2 grid")
+            }
+            let stage = restoredChrome.stage
+            if !stage.resizePaneBoundary(at: 0, edge: .bottom, by: 30)
+                || restoredChrome.rowSelector.title != L("カスタム") || restoredChrome.columnSelector.title != L("カスタム")
+            {
+                failures.append("offset row dividers did not change the displayed grid to Custom")
+            }
+            if !stage.resizePaneBoundary(at: 2, edge: .bottom, by: 30) || !showsGrid(columns: 2, rows: 2) {
+                failures.append("aligning the row dividers did not show 2×2 again")
+            }
             let legacy = try JSONDecoder().decode(
                 SavedWorkspace.self, from: Data(#"{"name":"Legacy","windows":[],"columns":2,"rows":2}"#.utf8))
             restored.restoreLayout(legacy)
@@ -994,6 +1070,17 @@ enum WindowSessionSmoke {
             menu?.update()
             return menu
         }
+        func menuAtStagePoint(_ point: NSPoint) -> NSMenu? {
+            let location = chrome.stage.convert(point, to: nil)
+            guard let event = NSEvent.mouseEvent(
+                with: .rightMouseDown, location: location, modifierFlags: [], timestamp: 0,
+                windowNumber: controller.window.windowNumber, context: nil,
+                eventNumber: 2, clickCount: 1, pressure: 1) else { return nil }
+            return chrome.stage.menu(for: event)
+        }
+        func dividerMenu(at divider: PaneLayout.Divider) -> NSMenu? {
+            menuAtStagePoint(NSPoint(x: divider.frame.midX, y: divider.frame.midY))
+        }
         for title in ["左右に分割", "左右に分割", "上下に分割", "上下に分割"] {
             let count = controller.session.cells.count
             for index in (0 ..< count).reversed() {
@@ -1039,6 +1126,126 @@ enum WindowSessionSmoke {
         controller.session.splitPane(at: 0, axis: .horizontal)
         if controller.session.customLayout != before || model.notices.last?.needsAttention != true {
             failures.append("bypassing the disabled menu exceeded the nesting limit without a notice")
+        }
+
+        let nested = PaneLayout.split(axis: .vertical, weights: [4, 1], children: [.pane, .pane])
+        let uneven = PaneLayout.split(axis: .horizontal, weights: [3, 1], children: [nested, .pane])
+        controller.session.setCustomLayout(uneven)
+        model.operations.removeAll()
+        let equalizeTitle = L("この分割を均等にする")
+        guard let innerEqualize = menu(for: 0)?.item(withTitle: equalizeTitle),
+              innerEqualize.isEnabled,
+              let action = innerEqualize.action,
+              NSApp.sendAction(action, to: innerEqualize.target, from: innerEqualize)
+        else {
+            return failures + ["an uneven nested split did not offer equalization"]
+        }
+        let expectedInner = PaneLayout.split(
+            axis: .horizontal, weights: [3, 1],
+            children: [.split(axis: .vertical, weights: [1, 1], children: [.pane, .pane]), .pane])
+        if controller.session.customLayout != expectedInner {
+            failures.append("equalizing a pane changed its outer split instead of its nearest nested split")
+        }
+        if !model.operations.contains(where: {
+            if case .resize = $0 { return true }
+            return false
+        }) {
+            failures.append("equalizing a pane did not resize its managed windows")
+        }
+        if menu(for: 0)?.item(withTitle: equalizeTitle)?.isEnabled != false {
+            failures.append("an already-equal nearest split still offered an equalize action")
+        }
+        guard let outerEqualize = menu(for: 2)?.item(withTitle: equalizeTitle),
+              outerEqualize.isEnabled,
+              let action = outerEqualize.action,
+              NSApp.sendAction(action, to: outerEqualize.target, from: outerEqualize)
+        else {
+            return failures + ["an uneven outer split did not offer equalization"]
+        }
+        let expectedOuter = PaneLayout.split(
+            axis: .horizontal, weights: [1, 1],
+            children: [.split(axis: .vertical, weights: [1, 1], children: [.pane, .pane]), .pane])
+        if controller.session.customLayout != expectedOuter {
+            failures.append("equalizing the outer split changed the already-balanced nested split")
+        }
+
+        controller.session.setCustomLayout(uneven)
+        chrome.layoutSubtreeIfNeeded()
+        guard let geometry = uneven.geometry(in: chrome.stage.bounds),
+              let innerDivider = geometry.dividers.first(where: { $0.path == [0] }),
+              let innerDividerMenu = dividerMenu(at: innerDivider),
+              let innerDividerItem = innerDividerMenu.item(withTitle: L("上下の分割を均等にする")),
+              innerDividerItem.isEnabled,
+              let action = innerDividerItem.action,
+              NSApp.sendAction(action, to: innerDividerItem.target, from: innerDividerItem)
+        else {
+            return failures + ["right-clicking a nested divider did not offer its equalize action"]
+        }
+        if controller.session.customLayout != expectedInner {
+            failures.append("right-clicking a nested divider did not equalize its own split")
+        }
+        controller.session.setCustomLayout(uneven)
+        chrome.layoutSubtreeIfNeeded()
+        guard let rootDivider = uneven.geometry(in: chrome.stage.bounds)?.dividers.first(where: { $0.path.isEmpty }),
+              let rootDividerMenu = dividerMenu(at: rootDivider),
+              let rootDividerItem = rootDividerMenu.item(withTitle: L("左右の分割を均等にする")),
+              rootDividerItem.isEnabled,
+              let action = rootDividerItem.action,
+              NSApp.sendAction(action, to: rootDividerItem.target, from: rootDividerItem)
+        else {
+            return failures + ["right-clicking the root divider did not offer its equalize action"]
+        }
+        let expectedUnevenRoot = PaneLayout.split(
+            axis: .horizontal, weights: [1, 1], children: [nested, .pane])
+        if controller.session.customLayout != expectedUnevenRoot {
+            failures.append("right-clicking the root divider did not equalize its own split")
+        }
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        chrome.layoutSubtreeIfNeeded()
+        guard chrome.stage.resizePaneBoundary(at: 0, edge: .right, by: 80) else {
+            return failures + ["regular grid fixture could not create an uneven column divider"]
+        }
+        chrome.layoutSubtreeIfNeeded()
+        let gridDividerPoint = NSPoint(
+            x: (chrome.gridAreas[0].frame.maxX + chrome.gridAreas[1].frame.minX) / 2,
+            y: chrome.stage.bounds.midY)
+        guard let gridDividerMenu = menuAtStagePoint(gridDividerPoint),
+              let gridDividerItem = gridDividerMenu.item(withTitle: L("列を均等にする")),
+              gridDividerItem.isEnabled,
+              let action = gridDividerItem.action,
+              NSApp.sendAction(action, to: gridDividerItem.target, from: gridDividerItem)
+        else {
+            return failures + ["right-clicking a regular grid divider did not offer column equalization"]
+        }
+        if abs(chrome.gridAreas[0].frame.width - chrome.gridAreas[1].frame.width) > 0.5 {
+            failures.append("equalizing a regular grid divider did not restore equal column widths")
+        }
+
+        for size in [WorkspaceGridSize(columns: 2, rows: 1), .init(columns: 1, rows: 2), .init(columns: 2, rows: 2)] {
+            controller.session.setGrid(size)
+            let cells = controller.session.cells
+            let pane = size.cellCount - 1
+            guard let balanced = controller.session.targetFrames?(), balanced.count == size.cellCount else {
+                return failures + ["missing regular grid targets"]
+            }
+            if size.columns > 1 { _ = chrome.stage.resizePaneBoundary(at: 0, edge: .right, by: 80) }
+            if size.rows > 1 { _ = chrome.stage.resizePaneBoundary(at: 0, edge: .bottom, by: 50) }
+            controller.syncIfVisible()
+            guard controller.session.targetFrames?() != balanced,
+                  let item = menu(for: pane)?.item(withTitle: equalizeTitle), item.isEnabled,
+                  let action = item.action, NSApp.sendAction(action, to: item.target, from: item)
+            else { return failures + ["an uneven \(size) could not be equalized from its displayed tab's menu"] }
+
+            if controller.session.targetFrames?() != balanced || !cells.enumerated().allSatisfy({ index, id in
+                guard let id, let window = ids.firstIndex(of: id) else { return false }
+                return model.windows[window].frame == balanced[index]
+            }) {
+                failures.append("tab-menu equalization did not restore the panes and managed window frames in \(size)")
+            }
+            if controller.session.customLayout != nil || controller.session.cells != cells
+                || menu(for: pane)?.item(withTitle: equalizeTitle)?.isEnabled != false {
+                failures.append("equalizing \(size) changed the preset or assignments, or left the action enabled")
+            }
         }
         return failures
     }
@@ -1853,6 +2060,74 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    /// A split that is undone because a window doesn't fit its pane must not keep pane pins: a pinned single pane
+    /// leaves no pane to switch tabs into, and every hidden tab then looked like the switch target.
+    static func runConstraintCollapseChecks() -> [String] {
+        var failures: [String] = []
+        let model = Model(windowCount: 3)
+        let controller = WorkspaceController(name: "Constraint collapse \(UUID())", access: access(for: model))
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        guard let chrome = controller.window.contentView as? WorkspaceChromeView else {
+            return ["constraint-collapse fixture could not find its chrome"]
+        }
+        controller.window.setFrame(NSRect(x: 200, y: 200, width: 900, height: 600), display: true)
+        controller.window.orderFrontRegardless()
+        controller.session.add(model.windows.map {
+            WindowCandidate(element: $0.element, application: .current, title: "Collapse probe")
+        })
+        let session = controller.session
+        let ids = session.windows.map(\.id)
+        func highlightedTabs() -> [NSView] {
+            chrome.layoutSubtreeIfNeeded()
+            return chrome.tabs.arrangedSubviews.filter { $0.layer?.borderWidth == 2 }
+        }
+
+        session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        session.setPanePinned(true, at: 0)
+        session.setPanePinned(true, at: 1)
+        if !highlightedTabs().isEmpty {
+            failures.append("hidden tabs looked like the switch target while every pane was pinned")
+        }
+        session.setPanePinned(false, at: 1)
+        guard let wide = session.cells[1].flatMap({ id in ids.firstIndex(of: id) }) else {
+            return failures + ["constraint-collapse fixture did not show a second pane"]
+        }
+        model.windows[wide].minimumSize.width = controller.window.frame.width + 200
+        model.windows[wide].frame.size.width = model.windows[wide].minimumSize.width
+        session.realign()
+        if session.isSplit {
+            return failures + ["a window wider than the workspace did not undo the split"]
+        }
+        if !session.pinnedCells.isEmpty || session.tabSwitchCell != 0 {
+            failures.append(
+                "undoing the split kept pane pins: pinned \(session.pinnedCells), "
+                    + "switch cell \(String(describing: session.tabSwitchCell))")
+        }
+        if highlightedTabs().count != 1 {
+            failures.append("undoing the split highlighted \(highlightedTabs().count) tabs as the switch target")
+        }
+        guard let hidden = ids.first(where: { session.cellIndex(for: $0) == nil }) else {
+            return failures + ["constraint-collapse fixture had no hidden tab"]
+        }
+        session.select(hidden)
+        if session.selectedID != hidden {
+            failures.append("selecting a tab after the split was undone did not show it")
+        }
+
+        let (removal, _) = fixture(registering: [0, 1])
+        removal.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        removal.setPanePinned(true, at: 0)
+        if let other = removal.cells[1], removal.remove(other),
+           !removal.pinnedCells.isEmpty || removal.tabSwitchCell != 0
+        {
+            failures.append("removing down to one tab kept its pane pinned")
+        }
+        return failures
+    }
+
     static func runEnhancedUIFrameChecks() -> [String] {
         let helper: ActivationHelperProcess
         switch ActivationHelperProcess.launch(resizable: true) {
@@ -1968,6 +2243,60 @@ enum WindowSessionSmoke {
             guard session.selectedID == oldTab else { return ["old window focus still suppressed after launch"] }
             return []
         } catch { return ["new window in running app: \(error.localizedDescription)"] }
+    }
+
+    /// Reads Finder's real Dock menu, and chooses its new-window item through a start page. The Dock briefly shows
+    /// the menu, and the Finder window that opens is closed again.
+    static func runDockMenuCheck() async -> [String] {
+        guard WindowAccess.isTrusted,
+              let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first,
+              let url = finder.bundleURL
+        else { return ["the Dock menu check needs Accessibility permission and a running Finder"] }
+        if !WindowAccess.hasDockItem(for: url) { return ["Finder had no Dock item"] }
+        if WindowAccess.hasDockItem(for: URL(fileURLWithPath: "/Fixture.app")) {
+            return ["a missing app had a Dock item"]
+        }
+        if WindowAccess.runningApplication(at: url)?.processIdentifier != finder.processIdentifier {
+            return ["Finder's URL didn't resolve to the running Finder"]
+        }
+        func children(_ element: AXUIElement) -> [AXUIElement] {
+            (try? WindowAccess.value(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        }
+        func dockShowsMenu() -> Bool {
+            guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
+            else { return false }
+            return children(AXUIElementCreateApplication(dock.processIdentifier)).flatMap(children).flatMap(children)
+                .contains { (try? WindowAccess.value($0, kAXRoleAttribute) as? String) == kAXMenuRole }
+        }
+        let items: [DockMenuItem]
+        do {
+            guard let read = try WindowAccess.dockMenu(for: url), !read.isEmpty else {
+                return ["Finder's Dock menu was missing or empty"]
+            }
+            items = read
+        } catch { return ["couldn't read Finder's Dock menu: \(error.localizedDescription)"] }
+        var failures: [String] = []
+        if dockShowsMenu() { failures.append("the Dock menu stayed open after it was read") }
+        if !items.contains(where: { !$0.submenu.isEmpty }) {
+            failures.append("Finder's Dock menu had no Options submenu: \(items.map(\.title))")
+        }
+        guard let index = items.indices.first(where: {
+            items[$0].performsAction && items[$0].isEnabled && !items[$0].isChecked
+                && items[$0].title.contains("Finder")
+        }), let path = DockMenuPath(indices: [index], in: items), !items.isDockCommand(path)
+        else { return failures + ["Finder's Dock menu had no item that opens a window: \(items.map(\.title))"] }
+        let session = WindowSession(access: WindowAccessClient())
+        session.newTab()
+        guard let page = session.selectedID else { return failures + ["no start page"] }
+        do {
+            let windows = try await session.chooseDockMenuItem(path, in: items, of: url, from: page)
+            for window in windows { try? WindowAccess.close(window.element) }
+            if windows.count != 1 || windows.first?.application.processIdentifier != finder.processIdentifier {
+                failures.append("choosing \(path) returned \(windows.map(\.label)) instead of a new Finder window")
+            }
+        } catch { failures.append("choosing from Finder's Dock menu: \(error.localizedDescription)") }
+        if dockShowsMenu() { failures.append("the Dock menu stayed open after an item was chosen") }
+        return failures
     }
 
     /// Child process for `runFrontWindowOnlyActivationChecks`: an inactive app with three windows.
@@ -3028,6 +3357,10 @@ enum WindowSessionSmoke {
 
         let tabCount = first.session.windows.count
         let toggle = tabMenu(first, 0)?.item(withTitle: toggleTitle)
+        let groupingItems = (first.window.contentView as? WorkspaceChromeView)?.autoGroupMenuItems?(0)
+        if groupingItems?.map(\.title) != [toggleTitle, L("別のアプリを選ぶ…")] {
+            failures.append("a managed tab did not offer just app-wide collection and the app chooser")
+        }
         if toggle?.state != .on || toggle?.isEnabled != true {
             failures.append("the tab menu did not show its app as collected")
         }
@@ -3180,10 +3513,15 @@ enum WindowSessionSmoke {
         pump(0.2)
         if !autoDeleted { failures.append("an empty workspace was not deleted after its last rule was removed") }
 
-        let legacy = Data(#"[{"name":"Legacy","windows":[]}]"#.utf8)
+        let legacy = Data("""
+        [{"name":"Legacy","autoGroupTitleRules":[{"bundleID":"filtered","titleContains":"Project"}],
+          "windows":[{"bundleID":"filtered","title":"Project","frame":[[10,20],[500,400]],
+                      "shortcutNumber":7,"isTabPinned":true}]}]
+        """.utf8)
+        let restored = try? JSONDecoder().decode([SavedWorkspace].self, from: legacy).first
         let saved = SavedWorkspace(name: "Rules", windows: [], autoGroupBundleIDs: ["a", "b"])
-        if (try? JSONDecoder().decode([SavedWorkspace].self, from: legacy))?.first.map({ $0.autoGroupBundleIDs == nil })
-            != true
+        if restored?.windows.first?.title != "Project" || restored?.windows.first?.isTabPinned != true
+            || restored?.autoGroupBundleIDs != nil
             || (try? JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(saved)))?
             .autoGroupBundleIDs != ["a", "b"]
         {
@@ -3606,6 +3944,307 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    /// A busy app can apply one of WindowDock's earlier frame requests after a later one, or keep reporting the frame it
+    /// had before a request; that frame is not the user's resize, so it must not pull the workspace back while it is
+    /// resized or maximized from its tab bar.
+    static func runManagedWindowLateFrameChecks() -> [String] {
+        let model = Model(windowCount: 1)
+        let controller = WorkspaceController(name: "Late frame \(UUID())", access: access(for: model))
+        controller.managedWindowMoveAction = .follow
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        guard let screen = NSScreen.main else { return ["late-frame fixture could not find a screen"] }
+        let visible = screen.visibleFrame
+        // At the screen's top-left, resizing and maximizing keep the pane's left and top edges where they are.
+        let start = NSRect(x: visible.minX, y: visible.maxY - 600, width: 900, height: 600)
+        controller.window.setFrame(start, display: true)
+        controller.window.orderFrontRegardless()
+        controller.session.add(
+            WindowCandidate(element: model.windows[0].element, application: .current, title: "Late frame"))
+        func settle(_ seconds: TimeInterval) {
+            RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+        }
+        settle(0.5)
+        guard let id = controller.session.windows.first?.id, let narrow = controller.session.alignedFrame(for: id)
+        else { return ["late-frame fixture did not align its window"] }
+        var failures: [String] = []
+        // The window was aligned a while before the user changes the workspace.
+        let idle = 3.2
+
+        // Dragging the workspace's right edge, as at its tab bar's end.
+        settle(idle)
+        let wider = NSRect(x: start.minX, y: start.minY, width: start.width + 120, height: start.height)
+        controller.window.setWorkspaceFrame(wider)
+        model.windows[0].frame = narrow
+        controller.windowsChangedOutsideWorkspace(model.windows[0].element, mouseButtonDown: true)
+        if controller.window.frame != wider {
+            failures.append(
+                "a late frame request pulled the workspace back while its edge was dragged: \(controller.window.frame)")
+        }
+        settle(1)
+        if controller.window.frame != wider
+            || controller.session.alignedFrame(for: id).map({ model.windows[0].frame != $0 }) != false
+        {
+            failures.append(
+                "a late frame request during a workspace resize was followed instead of refitted: "
+                    + "workspace \(controller.window.frame), window \(model.windows[0].frame)")
+        }
+
+        // Dragging the tab bar's top edge down; the busy app has applied the new size but not yet the new position.
+        guard let beforeTopResize = controller.session.alignedFrame(for: id) else {
+            return failures + ["late-frame fixture lost its aligned window"]
+        }
+        settle(idle)
+        let lower = NSRect(x: wider.minX, y: wider.minY, width: wider.width, height: wider.height - 80)
+        controller.window.setWorkspaceFrame(lower)
+        guard let afterTopResize = controller.session.alignedFrame(for: id), afterTopResize != beforeTopResize else {
+            return failures + ["late-frame fixture did not align its window after a top-edge resize"]
+        }
+        model.windows[0].frame = CGRect(origin: beforeTopResize.origin, size: afterTopResize.size)
+        controller.windowsChangedOutsideWorkspace(model.windows[0].element, mouseButtonDown: true)
+        if controller.window.frame != lower {
+            failures.append(
+                "a partly applied frame request pulled the workspace back while its top edge was dragged: "
+                    + "\(controller.window.frame)")
+        }
+        settle(1)
+        if controller.window.frame != lower
+            || controller.session.alignedFrame(for: id).map({ model.windows[0].frame != $0 }) != false
+        {
+            failures.append(
+                "a partly applied frame request during a top-edge resize was followed instead of refitted: "
+                    + "workspace \(controller.window.frame), window \(model.windows[0].frame)")
+        }
+
+        guard let beforeZoom = controller.session.alignedFrame(for: id) else {
+            return failures + ["late-frame fixture lost its aligned window"]
+        }
+        settle(idle)
+        controller.window.toggleMaximize()
+        model.windows[0].frame = beforeZoom
+        controller.windowsChangedOutsideWorkspace(model.windows[0].element, mouseButtonDown: false)
+        settle(1)
+        if !WindowGeometry.fits(controller.window.frame, requested: visible, tolerance: 1) {
+            failures.append(
+                "a late frame request after maximizing the workspace restored its size: \(controller.window.frame)")
+        }
+        if controller.session.alignedFrame(for: id).map({ model.windows[0].frame != $0 }) != false {
+            failures.append("a late frame request after maximizing left the window out of its pane")
+        }
+        return failures
+    }
+
+    /// Runs steps one at a time from the run loop, including while AppKit tracks the mouse.
+    @MainActor
+    private final class RunLoopSteps: NSObject {
+        private var pending: [() -> Void]
+        private var timer: Timer?
+
+        init(_ steps: [() -> Void]) {
+            pending = steps
+            super.init()
+            let timer = Timer(
+                timeInterval: 0.05, target: self, selector: #selector(step), userInfo: nil, repeats: true)
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        }
+
+        @objc private func step() {
+            guard !pending.isEmpty else { return cancel() }
+            pending.removeFirst()()
+        }
+
+        func cancel() {
+            timer?.invalidate()
+            pending.removeAll()
+        }
+    }
+
+    /// Resizing or maximizing the workspace from its tab bar realigns its windows. A busy app's frames meanwhile and
+    /// shortly afterwards, including requests whose Accessibility call timed out, are not the user's and must not pull
+    /// the workspace back. With the tab bar hidden, its revealed bar still resizes the workspace at the workspace's edges.
+    static func runOwnWorkspaceResizeFollowChecks() -> [String] {
+        let model = Model(windowCount: 1)
+        let controller = WorkspaceController(name: "Own resize \(UUID())", access: access(for: model))
+        controller.managedWindowMoveAction = .follow
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        guard let screen = NSScreen.main, let primary = NSScreen.screens.first,
+              let chrome = controller.window.contentView as? WorkspaceChromeView
+        else { return ["own-resize fixture could not find a screen or its workspace view"] }
+        let visible = screen.visibleFrame
+        let start = NSRect(x: visible.minX, y: visible.maxY - 600, width: 900, height: 600)
+        controller.window.setFrame(start, display: true)
+        controller.window.orderFrontRegardless()
+        controller.session.add(
+            WindowCandidate(element: model.windows[0].element, application: .current, title: "Own resize"))
+        func settle(_ seconds: TimeInterval) {
+            RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+        }
+        settle(0.5)
+        guard let id = controller.session.windows.first?.id, controller.session.alignedFrame(for: id) != nil
+        else { return ["own-resize fixture did not align its window"] }
+        func windowFitsPane() -> Bool {
+            controller.session.alignedFrame(for: id).map { model.windows[0].frame == $0 } == true
+        }
+        func press(_ point: NSPoint, in window: NSWindow, clickCount: Int = 1) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: .leftMouseDown, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: clickCount, pressure: 1)
+        }
+        /// Mouse events at an offset from a screen point; they stay in this application's queue.
+        func mouseEvents(from screenPoint: NSPoint, _ moves: [(CGEventType, CGVector)]) -> [NSEvent] {
+            moves.compactMap { type, offset in
+                CGEvent(
+                    mouseEventSource: nil, mouseType: type,
+                    mouseCursorPosition: CGPoint(
+                        x: screenPoint.x + offset.dx, y: primary.frame.maxY - (screenPoint.y + offset.dy)),
+                    mouseButton: .left)
+                    .flatMap { NSEvent(cgEvent: $0) }
+            }
+        }
+        var failures: [String] = []
+        // The window was aligned a while before the user changes the workspace.
+        let idle = 3.2
+
+        // Dragging the workspace's right edge; meanwhile the busy app shows a size between two of WindowDock's requests.
+        settle(idle)
+        let edgePoint = NSPoint(x: start.width - 2, y: start.height / 2)
+        let edgeEvents = mouseEvents(
+            from: controller.window.convertPoint(toScreen: edgePoint),
+            [(.leftMouseDragged, CGVector(dx: 40, dy: 0)), (.leftMouseDragged, CGVector(dx: 80, dy: 0)),
+             (.leftMouseDragged, CGVector(dx: 120, dy: 0)), (.leftMouseUp, CGVector(dx: 120, dy: 0))])
+        guard edgeEvents.count == 4, let edgeDown = press(edgePoint, in: controller.window) else {
+            return ["own-resize fixture could not create mouse events"]
+        }
+        let steps = RunLoopSteps([
+            { NSApp.postEvent(edgeEvents[0], atStart: false) },
+            { NSApp.postEvent(edgeEvents[1], atStart: false) },
+            {
+                if let aligned = controller.session.alignedFrame(for: id) {
+                    model.windows[0].frame = CGRect(
+                        origin: aligned.origin, size: CGSize(width: aligned.width - 20, height: aligned.height))
+                }
+                controller.windowsChangedOutsideWorkspace(model.windows[0].element, mouseButtonDown: true)
+            },
+            { NSApp.postEvent(edgeEvents[2], atStart: false) },
+            { NSApp.postEvent(edgeEvents[3], atStart: false) },
+        ])
+        chrome.trackFrameChange(with: edgeDown)
+        steps.cancel()
+        settle(1)
+        let wider = NSRect(x: start.minX, y: start.minY, width: start.width + 120, height: start.height)
+        if controller.window.frame != wider || !windowFitsPane() {
+            failures.append(
+                "a busy app's frame while the workspace's edge was dragged pulled the workspace back: "
+                    + "workspace \(controller.window.frame), expected \(wider), window \(model.windows[0].frame)")
+        }
+
+        // The app applies a request whose Accessibility call timed out, after WindowDock's next request.
+        controller.window.setWorkspaceFrame(wider)
+        settle(idle)
+        var timedOut: CGRect?
+        model.onSetFrame = { _, frame in
+            guard timedOut == nil else { return }
+            timedOut = frame
+            throw WindowAccessError(operation: kAXSizeAttribute, code: .cannotComplete)
+        }
+        controller.window.setWorkspaceFrame(
+            NSRect(x: wider.minX, y: wider.minY, width: wider.width - 60, height: wider.height))
+        model.onSetFrame = nil
+        let narrower = NSRect(x: wider.minX, y: wider.minY, width: wider.width - 120, height: wider.height)
+        controller.window.setWorkspaceFrame(narrower)
+        // Later than the workspace's own change settles, but soon after the request.
+        settle(1.8)
+        if let timedOut {
+            model.windows[0].frame = timedOut
+            controller.windowsChangedOutsideWorkspace(model.windows[0].element, mouseButtonDown: false)
+        } else {
+            failures.append("own-resize fixture did not time out a frame request")
+        }
+        settle(1)
+        if controller.window.frame != narrower || !windowFitsPane() {
+            failures.append(
+                "an app applying a timed-out frame request late changed the workspace: "
+                    + "workspace \(controller.window.frame), expected \(narrower), window \(model.windows[0].frame)")
+        }
+
+        // Double-clicking the tab bar maximizes the workspace; the busy app shows a frame from before it settled.
+        controller.window.setWorkspaceFrame(narrower)
+        settle(idle)
+        guard let beforeZoom = controller.session.alignedFrame(for: id),
+              let zoomDown = press(
+                  NSPoint(x: narrower.width / 2, y: narrower.height - 16), in: controller.window, clickCount: 2)
+        else { return failures + ["own-resize fixture lost its aligned window"] }
+        chrome.trackFrameChange(with: zoomDown)
+        model.windows[0].frame = CGRect(
+            origin: beforeZoom.origin, size: CGSize(width: beforeZoom.width - 60, height: beforeZoom.height - 40))
+        controller.windowsChangedOutsideWorkspace(model.windows[0].element, mouseButtonDown: false)
+        settle(1)
+        if !WindowGeometry.fits(controller.window.frame, requested: visible, tolerance: 1) || !windowFitsPane() {
+            failures.append(
+                "a busy app's frame after maximizing from the tab bar restored the workspace: "
+                    + "workspace \(controller.window.frame), window \(model.windows[0].frame)")
+        }
+
+        // The revealed auto-hidden tab bar covers the workspace's top and right edges; they still resize it.
+        let lowered = NSRect(x: visible.minX + 40, y: visible.maxY - 700, width: 900, height: 600)
+        controller.window.setWorkspaceFrame(lowered)
+        controller.setAutoHideTabs(true)
+        chrome.setAutoHiddenToolbarVisible(true)
+        settle(0.3)
+        guard let panel = chrome.autoHiddenToolbarPanel, let content = panel.contentView else {
+            return failures + ["own-resize fixture did not reveal its auto-hidden tab bar"]
+        }
+        func isFreeSpace(_ point: NSPoint) -> Bool {
+            guard var view = content.hitTest(point) else { return false }
+            while true {
+                if view is NSControl || view is NSScrollView { return false }
+                guard let parent = view.superview else { return true }
+                view = parent
+            }
+        }
+        let bandPoints: [(String, NSPoint?, CGVector, NSRect)] = [
+            (
+                "right", stride(from: content.bounds.midY, to: content.bounds.minY, by: -2)
+                    .map { NSPoint(x: content.bounds.maxX - 2, y: $0) }.first(where: isFreeSpace),
+                CGVector(dx: 50, dy: 0),
+                NSRect(x: lowered.minX, y: lowered.minY, width: lowered.width + 50, height: lowered.height)),
+            (
+                "top", stride(from: content.bounds.midX, to: content.bounds.maxX - 40, by: 4)
+                    .map { NSPoint(x: $0, y: content.bounds.maxY - 2) }.first(where: isFreeSpace),
+                CGVector(dx: 0, dy: 30),
+                NSRect(x: lowered.minX, y: lowered.minY, width: lowered.width, height: lowered.height + 30)),
+        ]
+        for (edge, point, offset, expected) in bandPoints {
+            controller.window.setWorkspaceFrame(lowered)
+            chrome.updateToolbarPanelFrame()
+            guard let point, let down = press(point, in: panel) else {
+                failures.append("the auto-hidden tab bar had no free space at the workspace's \(edge) edge")
+                continue
+            }
+            let moves = mouseEvents(
+                from: panel.convertPoint(toScreen: point), [(.leftMouseDragged, offset), (.leftMouseUp, offset)])
+            guard moves.count == 2 else { return failures + ["own-resize fixture could not create mouse events"] }
+            moves.forEach { NSApp.postEvent($0, atStart: false) }
+            panel.sendEvent(down)
+            while NSApp.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp], until: Date(), inMode: .default, dequeue: true) != nil {}
+            if controller.window.frame != expected {
+                failures.append(
+                    "dragging the auto-hidden tab bar at the workspace's \(edge) edge did not resize it: "
+                        + "\(lowered) -> \(controller.window.frame), expected \(expected)")
+            }
+        }
+        controller.setAutoHideTabs(false)
+        return failures
+    }
+
     /// Resizing a window's edge changes the workspace or its divider while the mouse is still down.
     static func runManagedWindowLiveResizeChecks() -> [String] {
         let model = Model(windowCount: 2)
@@ -3841,6 +4480,84 @@ enum WindowSessionSmoke {
         if !reveals(0) || !reveals(1) {
             failures.append("the dragged window's pane stayed opaque after the drag")
         }
+        return failures
+    }
+
+    /// A press on the auto-hidden tab bar in front of a pane's window reaches WindowDock, not the window behind it.
+    static func runToolbarPressFollowChecks() -> [String] {
+        let model = Model(windowCount: 1)
+        let controller = WorkspaceController(name: "Toolbar press \(UUID())", access: access(for: model))
+        controller.managedWindowMoveAction = .follow
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        guard let chrome = controller.window.contentView as? WorkspaceChromeView else {
+            return ["toolbar-press fixture has no workspace view"]
+        }
+        let start = NSRect(x: 160, y: 160, width: 900, height: 600)
+        controller.window.setFrame(start, display: true)
+        controller.window.orderFrontRegardless()
+        controller.session.add(
+            WindowCandidate(element: model.windows[0].element, application: .current, title: "Toolbar press"))
+        controller.setAutoHideTabs(true)
+        chrome.setAutoHiddenToolbarVisible(true)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        guard let panel = chrome.autoHiddenToolbarPanel, panel.isVisible, chrome.gridContentAreas.count == 1,
+              let id = controller.session.cells[0], controller.session.alignedFrame(for: id) != nil
+        else { return ["toolbar-press fixture did not reveal its auto-hidden tab bar over an aligned window"] }
+        func revealsPane() -> Bool {
+            let area = chrome.gridContentAreas[0]
+            let pane = chrome.convert(area.bounds, from: area)
+            return chrome.visibleContentRects.contains { $0.intersects(pane) }
+        }
+        let processID = ProcessInfo.processInfo.processIdentifier
+        let windowID = CGWindowID(1)
+        func windowSample() -> WindowServerWindow {
+            WindowServerWindow(id: windowID, processID: processID, frame: model.windows[0].frame)
+        }
+        func workspaceSample() -> WindowServerWindow {
+            WindowServerWindow(
+                id: CGWindowID(controller.window.windowNumber), processID: processID, frame: controller.window.frame)
+        }
+        var press = ManagedWindowPress()
+        // The pane's window is the first one beneath the bar once WindowDock's own windows are skipped.
+        press.windowReceivingClick = { _, excluded in
+            excluded.contains(CGWindowID(panel.windowNumber)) ? windowID : nil
+        }
+        press.windows = { [windowSample()] }
+        var failures: [String] = []
+
+        press.begin(
+            at: NSPoint(x: panel.frame.midX, y: panel.frame.midY), reachedWindowDock: true, controllers: [controller])
+        if controller.isTrackingManagedWindowDrag {
+            failures.append("pressing the auto-hidden tab bar started following the window behind it")
+        }
+        // While the button is down, the WindowServer lists the pane's window in front of the workspace.
+        controller.updateManagedWindowDrag(using: [windowSample(), workspaceSample()], mouseButtonDown: true)
+        if !revealsPane() {
+            failures.append("pressing the auto-hidden tab bar grayed out the pane beneath it")
+        }
+        // The bar's column menu splits the workspace; its menu tracking takes the release, so the next press finishes.
+        controller.session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        controller.windowsChangedOutsideWorkspace(model.windows[0].element, mouseButtonDown: false)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        controller.finishManagedWindowDrag()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        if controller.window.frame != start || controller.session.cells.count != 2 || !revealsPane() {
+            failures.append(
+                "splitting from the auto-hidden tab bar was taken for a resize of the window behind it: "
+                    + "workspace \(start) -> \(controller.window.frame), panes \(controller.session.cells.count)")
+        }
+
+        controller.session.setGrid(.single)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        press.begin(at: NSPoint(x: start.midX, y: start.midY), reachedWindowDock: false, controllers: [controller])
+        if !controller.isTrackingManagedWindowDrag {
+            failures.append("pressing a pane's window did not start following it")
+        }
+        controller.finishManagedWindowDrag()
+        controller.setAutoHideTabs(false)
         return failures
     }
 
@@ -4224,6 +4941,66 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    /// A window closed outside WindowDock stays registered until pruning confirms it. Meanwhile, syncing must not
+    /// toggle the notice so that each sync queues more syncs, which kept moving the other windows, e.g. Chrome's while
+    /// it played a video, and kept the busy app from confirming the close.
+    static func runClosedWindowSyncChecks() -> [String] {
+        let model = Model(windowCount: 2)
+        let controller = WorkspaceController(name: "Closed window \(UUID())", access: access(for: model))
+        defer {
+            controller.quitting = true
+            controller.window.orderOut(nil)
+        }
+        controller.window.setFrame(NSRect(x: 160, y: 160, width: 900, height: 600), display: false)
+        controller.window.orderFrontRegardless()
+        for index in 0 ..< 2 {
+            controller.session.add(
+                WindowCandidate(element: model.windows[index].element, application: .current, title: "Closed \(index)"))
+        }
+        func settle(_ seconds: TimeInterval) {
+            RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+        }
+        func shownErrors() -> [String] {
+            var texts: [String] = []
+            var views: [NSView] = controller.window.contentView.map { [$0] } ?? []
+            while let view = views.popLast() {
+                guard !view.isHidden else { continue }
+                if let field = view as? NSTextField, field.stringValue.contains("-25202") {
+                    texts.append(field.stringValue)
+                }
+                views += view.subviews
+            }
+            return texts
+        }
+        // The closed window is another tab, behind the one shown.
+        controller.session.select(controller.session.windows[0].id)
+        settle(0.5)
+        var failures: [String] = []
+        model.closedWindows.insert(1)
+        model.closedFrameReads = 0
+        model.operations.removeAll()
+        // The app's notification for the closing window starts an automatic return.
+        controller.windowsChangedOutsideWorkspace()
+        settle(1)
+        let moves = model.operations.filter { $0 == .resize(0) || $0 == .move(0) }.count
+        if model.closedFrameReads > 2 || moves > 2 {
+            failures.append(
+                "a closed window kept the workspace resyncing (\(model.closedFrameReads) reads, \(moves) moves)")
+        }
+        if !shownErrors().isEmpty {
+            failures.append("a closed window showed an Accessibility error before it was pruned")
+        }
+        controller.session.pruneClosedWindows()
+        controller.session.pruneClosedWindows()
+        settle(0.3)
+        if controller.session.windows.map(\.candidate.element).contains(where: {
+            CFEqual($0, model.windows[1].element)
+        }) {
+            failures.append("pruning did not remove the closed window")
+        }
+        return failures
+    }
+
     private static func runCloseOnReleaseChecks() -> [String] {
         var failures: [String] = []
         let (session, model) = fixture()
@@ -4396,8 +5173,169 @@ enum WindowSessionSmoke {
         return failures
     }
 
+    static func runPreviousUsedTabChecks() -> [String] {
+        var failures: [String] = []
+        let (session, _) = fixture()
+        let ids = session.tabIDs
+        session.select(ids[0])
+        session.select(ids[1])
+        if !session.canSelectPreviousUsedTab {
+            failures.append("switching tabs did not record the previously selected tab")
+        }
+        session.selectPreviousUsedTab()
+        if session.selectedID != ids[0] {
+            failures.append("selecting the previously used tab did not restore the last selection")
+        }
+        session.selectPreviousUsedTab()
+        if session.selectedID != ids[1] {
+            failures.append("switching to the previous tab did not allow toggling back")
+        }
+
+        let (removed, _) = fixture()
+        let removedIDs = removed.tabIDs
+        removed.select(removedIDs[0])
+        removed.select(removedIDs[1])
+        _ = removed.remove(removedIDs[0])
+        if removed.canSelectPreviousUsedTab {
+            failures.append("a removed tab remained available as the previously used tab")
+        }
+        removed.selectPreviousUsedTab()
+        if removed.selectedID != removedIDs[1] {
+            failures.append("selecting the previous tab changed selection after its target was removed")
+        }
+        return failures
+    }
+
+    static func runTabSearchChecks() -> [String] {
+        var failures: [String] = []
+        let panel = TabSearchPanel(items: [
+            TabSearchItem(title: "Safari — WindowDock Plan", workspaceName: "Development") {},
+            TabSearchItem(title: "Mail — Release Notes", workspaceName: "Personal") {},
+        ])
+        panel.filterResults(for: "safari")
+        if panel.filteredResultCount != 1 {
+            failures.append("tab search did not match the app name")
+        }
+        panel.filterResults(for: "development")
+        if panel.filteredResultCount != 1 {
+            failures.append("tab search did not match the workspace name")
+        }
+        panel.filterResults(for: "no matching window")
+        if panel.filteredResultCount != 0 {
+            failures.append("tab search retained results that did not match")
+        }
+        panel.filterResults(for: "")
+        if panel.filteredResultCount != 2 {
+            failures.append("clearing tab search did not restore all results")
+        }
+
+        let (session, _) = fixture(registering: [0, 1, 2])
+        let ids = session.windows.map(\.id)
+        session.setGrid(WorkspaceGridSize(columns: 2, rows: 1))
+        session.moveWindow(ids[0], toCell: 0)
+        session.moveWindow(ids[1], toCell: 1)
+        guard let group = session.combineVisiblePanes() else {
+            return failures + ["tab search fixture could not create a combined tab"]
+        }
+        let entries = TabSearchItem.entries(for: session, workspaceName: "Grouped") { session.select($0) }
+        let groupTitle = L("まとめたタブ")
+        if entries.count != 4 || entries.filter({ $0.title.hasPrefix(groupTitle) }).count != 1 {
+            failures.append("tab search did not add one result for a combined tab")
+        }
+        let groupPanel = TabSearchPanel(items: entries)
+        groupPanel.filterResults(for: groupTitle)
+        if groupPanel.filteredResultCount != 1 {
+            failures.append("tab search could not match the combined tab result")
+        }
+        session.select(ids[2])
+        entries.first(where: { $0.title.hasPrefix(groupTitle) })?.select()
+        if session.activeGroupID != group {
+            failures.append("selecting a combined tab search result did not restore its panes")
+        }
+        return failures
+    }
+
+    static func runTabWheelChecks() -> [String] {
+        var failures: [String] = []
+        var gesture = TabWheelGesture()
+        if gesture.direction(deltaY: 1, phase: [], momentumPhase: []) != -1
+            || gesture.direction(deltaY: -1, phase: [], momentumPhase: []) != 1
+        {
+            failures.append("mouse-wheel direction did not map to the expected tab cycle")
+        }
+        if gesture.direction(deltaY: 1, phase: .began, momentumPhase: []) != -1
+            || gesture.direction(deltaY: -1, phase: .changed, momentumPhase: []) != nil
+            || gesture.direction(deltaY: -1, phase: .ended, momentumPhase: []) != nil
+            || gesture.direction(deltaY: -1, phase: .began, momentumPhase: []) != 1
+        {
+            failures.append("a trackpad scroll gesture switched more than once or failed to reset")
+        }
+        if gesture.direction(deltaY: 1, phase: [], momentumPhase: .changed) != nil {
+            failures.append("trackpad momentum caused an extra tab switch")
+        }
+        return failures
+    }
+
+    static func runTabPreviewPanelChecks() -> [String] {
+        let space = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: nil, width: 160, height: 90, bitsPerComponent: 8, bytesPerRow: 0,
+            space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+            let image = context.makeImage()
+        else { return ["tab preview fixture could not create an image"] }
+        let preview = WorkspaceChromeView(frame: .zero)
+        preview.showTabPreview(image)
+        let visible = preview.isTabPreviewVisible
+        let matchesImageSize = preview.tabPreviewFrame?.size == NSSize(width: image.width, height: image.height)
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+        let contained = screen.map { $0.contains(preview.tabPreviewFrame ?? .zero) } ?? false
+        preview.hideTabPreview()
+        let hidden = !preview.isTabPreviewVisible
+        return visible && matchesImageSize && contained && hidden
+            ? [] : [
+                "tab preview did not show the image without a gray margin, fit on screen, and hide "
+                    + "(visible: \(visible), size: \(String(describing: preview.tabPreviewFrame?.size)), "
+                    + "contained: \(contained), hidden: \(hidden))"
+            ]
+    }
+
+    static func runTabHoverSwitchPolicyChecks() -> [String] {
+        var failures: [String] = []
+        var policy = TabHoverSwitchPolicy()
+        let first = UUID()
+        let second = UUID()
+        policy.mouseEntered(first)
+        if policy.shouldSwitch(id: first, enabled: false, selectedID: second, availableTabIDs: [first, second])
+            || policy.shouldSwitch(id: first, enabled: true, selectedID: first, availableTabIDs: [first, second])
+            || !policy.shouldSwitch(id: first, enabled: true, selectedID: second, availableTabIDs: [first, second])
+        {
+            failures.append("hover switch policy did not respect the setting and selected tab")
+        }
+        if policy.mouseExited(second) || !policy.shouldSwitch(
+            id: first, enabled: true, selectedID: second, availableTabIDs: [first, second])
+        {
+            failures.append("leaving a different tab cancelled the current hover")
+        }
+        if !policy.mouseExited(first) || policy.shouldSwitch(
+            id: first, enabled: true, selectedID: second, availableTabIDs: [first, second])
+        {
+            failures.append("leaving the hovered tab did not cancel its pending switch")
+        }
+        policy.mouseEntered(first)
+        if policy.shouldSwitch(id: first, enabled: true, selectedID: second, availableTabIDs: [second]) {
+            failures.append("hover switch selected a tab that is no longer available")
+        }
+        return failures
+    }
+
     static func runChecks() -> [String] {
         var failures: [String] = []
+        failures += runPreviousUsedTabChecks()
+        failures += runTabSearchChecks()
+        failures += runTabWheelChecks()
+        failures += runTabPreviewPanelChecks()
+        failures += runTabHoverSwitchPolicyChecks()
         failures += runNewTabChecks()
         failures += runNestedPaneChecks()
         failures += runPanePinChecks()
@@ -4691,13 +5629,34 @@ enum WindowSessionSmoke {
 
     private static func checkInput() -> [String] {
         var failures: [String] = []
-        func key(_ flags: NSEvent.ModifierFlags = .control, code: UInt16 = 48) -> NSEvent {
+        func key(
+            _ flags: NSEvent.ModifierFlags = .control, code: UInt16 = 48, characters: String = "\t") -> NSEvent {
             NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
-                windowNumber: 0, context: nil, characters: "\t",
-                charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: code)!
+                windowNumber: 0, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!
         }
         var context = WorkspaceShortcutContext()
+        let (numbered, _) = fixture(registering: [0, 1, 2])
+        let numberedTargets = numbered.numberedTabTargets
+        if let currentTab = numbered.selectedID,
+           numberedTargets.count == numbered.tabEntries.count - 1,
+           !numberedTargets.contains(currentTab) {
+            numbered.select(numberedTargets[0])
+            let selectedTargets = numbered.numberedTabTargets
+            let selectedTargetsValid = numbered.selectedID.map {
+                !selectedTargets.contains($0) && selectedTargets.count == numbered.tabEntries.count - 1
+            } ?? false
+            if !selectedTargetsValid {
+                failures.append("numbered shortcut targets did not update after switching tabs")
+            }
+        } else {
+            failures.append("numbered shortcuts did not exclude the currently selected tab")
+        }
+        let (singleTab, _) = fixture(registering: [0])
+        if !singleTab.numberedTabTargets.isEmpty {
+            failures.append("a workspace with only the current tab exposed a numbered shortcut target")
+        }
         if context.direction(for: key(), ownPID: 1, frontPID: 2, visiblePIDs: [2], enabled: false) != nil {
             failures.append("disabled Control Tab switching still intercepted the shortcut")
         }
@@ -4744,6 +5703,49 @@ enum WindowSessionSmoke {
         {
             failures.append("workspace and tab switching shortcuts overlapped or fired from an unrelated app")
         }
+        if WorkspaceShortcutContext.numberedTab(
+            for: key([.control, .shift], code: 18, characters: "1"), ownPID: 1, frontPID: 2, visiblePIDs: [2]) != 1
+            || WorkspaceShortcutContext.numberedTab(
+                for: key([.control, .shift], code: 25, characters: "9"), ownPID: 1, frontPID: 2,
+                visiblePIDs: [2]) != 9
+            || WorkspaceShortcutContext.numberedTab(
+                for: key([.command, .shift], code: 18, characters: "1"), ownPID: 1, frontPID: 2,
+                visiblePIDs: [2]) != nil
+            || WorkspaceShortcutContext.numberedTab(
+                for: key([.control, .option], code: 18, characters: "1"), ownPID: 1, frontPID: 2,
+                visiblePIDs: [2]) != nil
+            || WorkspaceShortcutContext.numberedTab(
+                for: key([.control, .shift], code: 18, characters: "1"), ownPID: 1, frontPID: 9,
+                visiblePIDs: [2]) != nil
+        {
+            failures.append("Control Shift number mapping accepted a conflicting modifier or unrelated app")
+        }
+        if WorkspaceShortcutContext.paneDirection(
+            for: key([.command, .control, .option, .shift], code: 123), ownPID: 1, frontPID: 2,
+            visiblePIDs: [2]) != -1
+            || WorkspaceShortcutContext.paneDirection(
+                for: key([.command, .control, .option, .shift], code: 124), ownPID: 1, frontPID: 1,
+                visiblePIDs: []) != 1
+            || WorkspaceShortcutContext.paneDirection(
+                for: key([.command, .control, .option], code: 123), ownPID: 1, frontPID: 2,
+                visiblePIDs: [2]) != nil
+            || WorkspaceShortcutContext.paneDirection(
+                for: key([.command, .control, .option, .shift], code: 123), ownPID: 1, frontPID: 9,
+                visiblePIDs: [2]) != nil
+        {
+            failures.append("pane shortcuts did not require the exact chord from a workspace window")
+        }
+        if !WorkspaceShortcutContext.previouslyUsedTab(
+            for: key([.control, .shift], code: 29, characters: ")"), ownPID: 1, frontPID: 2, visiblePIDs: [2])
+            || WorkspaceShortcutContext.previouslyUsedTab(
+                for: key([.control, .shift], code: 18, characters: "!"), ownPID: 1, frontPID: 2, visiblePIDs: [2])
+            || WorkspaceShortcutContext.previouslyUsedTab(
+                for: key([.command, .shift], code: 29, characters: ")"), ownPID: 1, frontPID: 2, visiblePIDs: [2])
+            || WorkspaceShortcutContext.previouslyUsedTab(
+                for: key([.control, .shift], code: 29, characters: ")"), ownPID: 1, frontPID: 9, visiblePIDs: [2])
+        {
+            failures.append("Control Shift 0 did not match only the previously-used-tab shortcut")
+        }
 
         let (session, model) = fixture(registering: [])
         let candidate = WindowCandidate(element: model.windows[0].element, application: .current, title: "Dragged")
@@ -4753,6 +5755,65 @@ enum WindowSessionSmoke {
         session.add(candidate, originalFrame: original)
         if session.windows.count != 1 || !session.remove(session.windows[0].id) || model.windows[0].frame != original {
             failures.append("drag registration duplicated a tab or restored the post-drag rather than pre-drag frame")
+        }
+        let (sorting, _) = fixture(registering: [0, 1, 2])
+        let sortEntries = sorting.tabEntries
+        let sortKeys = [sortEntries[0]: "B", sortEntries[1]: "A", sortEntries[2]: "A"]
+        sorting.sortTabEntries { sortKeys[$0]! }
+        if sorting.tabEntries != [sortEntries[1], sortEntries[2], sortEntries[0]] {
+            failures.append("tab sorting did not order by key while keeping ties in their existing order")
+        }
+        let (pinning, _) = fixture(registering: [0, 1, 2])
+        let pinEntries = pinning.tabEntries
+        pinning.setTabPinned(true, for: pinEntries[1])
+        if pinning.tabEntries.first != pinEntries[1] || !pinning.isTabPinned(pinEntries[1]) {
+            failures.append("pinning a tab did not move it to the front of the tab bar")
+        }
+        let pinSortKeys = [pinEntries[0]: "A", pinEntries[1]: "Z", pinEntries[2]: "B"]
+        pinning.sortTabEntries { pinSortKeys[$0]! }
+        if pinning.tabEntries != [pinEntries[1], pinEntries[0], pinEntries[2]] {
+            failures.append("sorting tabs did not keep pinned tabs ahead of unpinned tabs")
+        }
+        pinning.setTabPinned(false, for: pinEntries[1])
+        if pinning.isTabPinned(pinEntries[1]) {
+            failures.append("unpinning a tab did not clear its pinned state")
+        }
+        let (frontPinning, frontPinningModel) = fixture()
+        let frontEntry = frontPinning.tabEntries[0]
+        var changesBeforePin = frontPinningModel.changeCount
+        frontPinning.setTabPinned(true, for: frontEntry)
+        if frontPinningModel.changeCount == changesBeforePin {
+            failures.append("pinning the first tab did not notify the UI when its order stayed unchanged")
+        }
+        changesBeforePin = frontPinningModel.changeCount
+        frontPinning.setTabPinned(false, for: frontEntry)
+        if frontPinningModel.changeCount == changesBeforePin {
+            failures.append("unpinning the first tab did not notify the UI when its order stayed unchanged")
+        }
+        let (paneCycling, _) = fixture(registering: [0, 1])
+        paneCycling.setSplit(true, layout: .sideBySide)
+        paneCycling.moveWindow(paneCycling.tabEntries[1], toCell: 1)
+        paneCycling.activateCell(0)
+        let firstPaneID = paneCycling.selectedID
+        let nextPaneID = paneCycling.activateAdjacentPane(1)
+        let nextPaneCell = paneCycling.activeCell
+        let previousPaneID = paneCycling.activateAdjacentPane(-1)
+        if nextPaneID == nil || nextPaneCell != 1 || previousPaneID != firstPaneID
+            || paneCycling.activeCell != 0
+        {
+            failures.append("adjacent-pane shortcuts did not cycle through occupied panes in either direction")
+        }
+        let (singlePane, _) = fixture(registering: [0])
+        if singlePane.activateAdjacentPane(1) != nil {
+            failures.append("pane switching was handled in a single-pane workspace")
+        }
+        let transferModel = Model()
+        let (transferSource, _) = fixture(registering: [0], sharedModel: transferModel)
+        let (destination, _) = fixture(registering: [3], sharedModel: transferModel)
+        let transferID = transferSource.windows[0].id
+        transferSource.setTabPinned(true, for: transferID)
+        if !transferSource.transferWindow(transferID, to: destination) || !destination.isTabPinned(transferID) {
+            failures.append("transferring a pinned tab did not preserve its pin in the destination")
         }
         return failures
     }

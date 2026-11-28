@@ -83,6 +83,51 @@ private final class FrameChangeProbe: WorkspaceBackgroundView {
     }
 }
 
+/// Runs a check inside the next top-level menu's tracking loop and then closes the menu.
+@MainActor
+private final class MenuTrackingProbe: NSObject {
+    private var during: ((NSMenu) -> Void)?
+    private var menu: NSMenu?
+    private var fallback: NSMenu?
+
+    /// Returns whether the menu opened and the check ran while it was tracking.
+    func run(fallback: NSMenu?, open: () -> Void, during: @escaping (NSMenu) -> Void) -> Bool {
+        self.during = during
+        self.fallback = fallback
+        menu = nil
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(began(_:)), name: NSMenu.didBeginTrackingNotification, object: nil)
+        defer { NotificationCenter.default.removeObserver(self) }
+        // Never leave a menu open waiting for a person if tracking was not reported.
+        let guardTimer = Timer(
+            timeInterval: 3, target: self, selector: #selector(cancelFallback), userInfo: nil, repeats: false)
+        RunLoop.main.add(guardTimer, forMode: .common)
+        defer { guardTimer.invalidate() }
+        open()
+        let ran = self.during == nil
+        self.during = nil
+        return ran
+    }
+
+    @objc private func began(_ note: Notification) {
+        guard menu == nil, let menu = note.object as? NSMenu, menu.supermenu == nil else { return }
+        self.menu = menu
+        let timer = Timer(timeInterval: 0.05, target: self, selector: #selector(inspect), userInfo: nil, repeats: false)
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func inspect() {
+        guard let menu, let during else { return }
+        self.during = nil
+        during(menu)
+        menu.cancelTracking()
+    }
+
+    @objc private func cancelFallback() {
+        (menu ?? fallback)?.cancelTracking()
+    }
+}
+
 @main
 enum TabLayoutSmoke {
     /// Standalone smoke: leave the pointer still while each fixture places a control underneath it.
@@ -140,7 +185,8 @@ enum TabLayoutSmoke {
 
     /// Standalone smoke: like the hover-help check, moves each glowing item under the still pointer in turn.
     @MainActor
-    private static func checkHoverGlow(_ root: some View, size: NSSize, items names: [String]) -> [String] {
+    private static func checkHoverGlow(_ root: some View, size: NSSize, items names: [String],
+                                       disabled: Set<String> = []) -> [String] {
         let host = NSHostingView(rootView: root.frame(width: size.width, height: size.height)
             .environment(\.accessibilityEnabled, true))
         let window = UnconstrainedWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: .borderless,
@@ -180,12 +226,14 @@ enum TabLayoutSmoke {
         // Each item is a button whose label carries the glow. SwiftUI doesn't list a ScrollView's content as
         // accessibility children, but hit-testing reaches it.
         func itemFrames() -> [NSRect] {
+            host.layoutSubtreeIfNeeded()
             var found: [String: NSRect] = [:]
-            for y in stride(from: 4.0, to: size.height, by: 20) {
-                for x in stride(from: 4.0, to: size.width, by: 20) {
+            for y in stride(from: 4.0, to: size.height, by: 12) {
+                for x in stride(from: 4.0, to: size.width, by: 12) {
                     let point = window.convertPoint(toScreen: NSPoint(x: x, y: y))
                     let node = host.accessibilityHitTest(point) as AnyObject?
-                    guard node?.accessibilityRole?() == .button, let label = node?.accessibilityLabel?(),
+                    guard node?.accessibilityRole?() == .button,
+                          let label = node?.accessibilityLabel?() ?? node?.accessibilityTitle?(),
                           let name = names.first(where: label.contains), let frame = node?.accessibilityFrame?()
                     else { continue }
                     found[name] = window.convertFromScreen(frame)
@@ -206,7 +254,7 @@ enum TabLayoutSmoke {
         func glowing() -> [Bool] { zip(frames, resting).map { distance(edgeColor($0), $1) > 0.3 } }
         var failures: [String] = []
         for (index, name) in names.enumerated() {
-            let expected = frames.indices.map { $0 == index }
+            let expected = frames.indices.map { $0 == index && !disabled.contains(name) }
             var hovered: [Bool] = []
             var left: [Bool] = []
             // Retry if the pointer was moved during the check.
@@ -232,7 +280,9 @@ enum TabLayoutSmoke {
                 window.setFrameOrigin(away)
                 if (hovered == expected && !left.contains(true)) || NSEvent.mouseLocation == mouse { break }
             }
-            if hovered != expected { failures.append("hovering \(name) made \(hovered) of \(names) glow") }
+            if hovered != expected {
+                failures.append("hovering \(name) made \(hovered) of \(names) glow (frame \(frames[index]))")
+            }
             if left.contains(true) {
                 failures.append("\(left) of \(names) kept glowing after the pointer left \(name)")
             }
@@ -242,20 +292,61 @@ enum TabLayoutSmoke {
     }
 
     /// The installed apps wrap into columns, scroll vertically with the page, and a plain click still opens one app.
-    /// Selected apps open together, or are registered to add their new windows automatically.
+    /// Selected apps open together, or are registered to add their new windows automatically. A right-click or
+    /// Control-click shows a Dock-like menu at once without reading the Dock's; its Show Dock Menu item shows the
+    /// app's own Dock menu.
     @MainActor
     private static func checkLauncherGrid() async -> [String] {
+        /// Records what the page asks of Accessibility off the main thread.
+        final class Recorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var values: [String] = []
+            func record(_ value: String) {
+                lock.lock()
+                values.append(value)
+                lock.unlock()
+            }
+
+            var recorded: [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return values
+            }
+        }
         let apps = (1 ... 13).map {
             LauncherApplication(url: URL(fileURLWithPath: "/Fixture\($0).app"), name: "Fixture \($0)", lastUsed: nil)
         }
         var launched: [URL] = []
         var chosen: [[String]] = []
         var registered: [[URL]] = []
+        var dockChoices: [(path: DockMenuPath, url: URL)] = []
+        let offMain = Recorder()
         let existing = WindowCandidate(element: AXUIElementCreateApplication(930_000), application: .current,
                                        title: "Existing window")
+        let runningWindow = WindowCandidate(element: AXUIElementCreateApplication(930_001), application: .current,
+                                            title: "Window A")
+        let dockItems: [DockMenuItem] = [
+            DockMenuItem(title: "Window A", isChecked: true), .separator,
+            DockMenuItem(title: "New Window"), DockMenuItem(title: "Profiles", performsAction: false),
+            DockMenuItem(title: "Profile 1"), .separator,
+            DockMenuItem(title: "Options", performsAction: false,
+                         submenu: [DockMenuItem(title: "Keep in Dock"), DockMenuItem(title: "Show in Finder")]),
+            .separator, DockMenuItem(title: "Quit"), DockMenuItem(title: "Force Quit", isAlternate: true),
+        ]
         var access = WindowAccessClient()
         access.isTrusted = { true }
         access.scan = { WindowScan(windows: [existing]) }
+        // Fixture 1 runs with one window and is in the Dock; the other fixtures are neither.
+        access.runningApplication = { $0 == apps[0].url ? .current : nil }
+        access.applicationWindows = { _ in [runningWindow] }
+        access.hasDockItem = { $0 == apps[0].url }
+        access.dockMenu = {
+            offMain.record("read Dock menu")
+            return $0 == apps[0].url ? dockItems : nil
+        }
+        access.focus = { element, _ in
+            offMain.record(CFEqual(element, runningWindow.element) ? "focus Window A" : "focus another window")
+        }
         let autoGroup = AutoGroupPageModel()
         autoGroup.isAvailable = true
         autoGroup.register = {
@@ -273,6 +364,11 @@ enum TabLayoutSmoke {
             choose: {
                 chosen.append($0.map(\.title).sorted())
                 return true
+            },
+            chooseDockMenuItem: { path, _, url in
+                dockChoices.append((path, url))
+                return [WindowCandidate(element: AXUIElementCreateApplication(910_900), application: .current,
+                                        title: "Dock window")]
             }, applications: { apps }, autoGroup: autoGroup)
         let size = NSSize(width: 420, height: 360)
         let host = NSHostingView(rootView: page.frame(width: size.width, height: size.height)
@@ -331,16 +427,20 @@ enum TabLayoutSmoke {
             return button.node.isAccessibilityEnabled?() == true && button.node.accessibilityPerformPress?() == true
         }
         func commandClick(_ label: String) async -> Bool {
+            await click(label, down: .leftMouseDown, up: .leftMouseUp, modifiers: .command)
+        }
+        func click(_ label: String, down: NSEvent.EventType, up: NSEvent.EventType,
+                   modifiers: NSEvent.ModifierFlags) async -> Bool {
             guard let frame = await reveal(label)?.frame else { return false }
-            for type in [NSEvent.EventType.leftMouseUp, .leftMouseDown] {
+            for type in [up, down] {
                 guard let event = NSEvent.mouseEvent(
-                    with: type, location: NSPoint(x: frame.midX, y: frame.midY), modifierFlags: .command,
+                    with: type, location: NSPoint(x: frame.midX, y: frame.midY), modifierFlags: modifiers,
                     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
                     eventNumber: 1, clickCount: 1, pressure: 1) else { return false }
                 NSApp.postEvent(event, atStart: true)
             }
-            while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp], until: .distantPast,
-                                              inMode: .default, dequeue: true) {
+            while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp],
+                                              until: .distantPast, inMode: .default, dequeue: true) {
                 NSApp.sendEvent(event)
             }
             return true
@@ -422,7 +522,117 @@ enum TabLayoutSmoke {
             failures.append("after one of the selected apps failed to open, the new tab showed existing "
                 + "\(keptExisting), opened \(showedOpened), opened selected \(selectedOpened)")
         }
-        return failures
+
+        /// Right-clicks and Control-clicks apps, and chooses an item from the menu each shows.
+        func checkDockMenus() async -> [String] {
+            // Menu tracking notifications and its timers arrive on the main thread.
+            final class Tracking: @unchecked Sendable {
+                var menus: [NSMenu] = []
+                var pick: (NSMenu) -> NSMenuItem? = { _ in nil }
+            }
+            let tracking = Tracking()
+            let observer = NotificationCenter.default.addObserver(
+                forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { note in
+                    guard let menu = note.object as? NSMenu, menu.supermenu == nil else { return }
+                    tracking.menus.append(menu)
+                    // The menu tracks in a nested run loop, so choose from it with a timer that runs there.
+                    let timer = Timer(timeInterval: 0.05, repeats: false) { _ in
+                        if let item = tracking.pick(menu), let owner = item.menu {
+                            owner.performActionForItem(at: owner.index(of: item))
+                        }
+                        menu.cancelTracking()
+                    }
+                    RunLoop.main.add(timer, forMode: .common)
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+            func describe(_ menu: NSMenu) -> [String] {
+                menu.items.map { item in
+                    if item.isSeparatorItem { return "-" }
+                    var inert = !item.isEnabled
+                    if #available(macOS 14, *) { inert = inert || item.isSectionHeader }
+                    return item.title + (inert ? " (inert)" : "") + (item.state == .on ? " ✓" : "")
+                        + (item.isAlternate && item.keyEquivalentModifierMask == .option ? " (⌥)" : "")
+                        + (item.submenu.map { " ▸ " + describe($0).joined(separator: ", ") } ?? "")
+                }
+            }
+
+            var failures: [String] = []
+            launched.removeAll()
+            chosen.removeAll()
+            // The test process stands in for Fixture 1, so never choose Hide, Quit or Force Quit.
+            tracking.pick = { $0.items.first { $0.title == "Window A" } }
+            guard await click("Fixture 1", down: .rightMouseDown, up: .rightMouseUp, modifiers: []),
+                  await waitFor({ tracking.menus.count == 1 && offMain.recorded.contains("focus Window A") })
+            else {
+                return ["right-clicking a running app didn't show its windows or focus the chosen one: "
+                    + "menus \(tracking.menus.map(describe)), recorded \(offMain.recorded)"]
+            }
+            let standard = ["Window A", "-", L("新規ウィンドウ"), L("Finderに表示"), L("Dock のメニューを表示"), "-",
+                            L("非表示"), L("終了"), L("強制終了") + " (⌥)"]
+            if describe(tracking.menus[0]) != standard {
+                failures.append("a running app's menu was \(describe(tracking.menus[0])), not \(standard)")
+            }
+            for _ in 0 ..< 5 { await settle() }
+            if offMain.recorded != ["focus Window A"] || !chosen.isEmpty || !launched.isEmpty {
+                failures.append("the right-click menu read the Dock menu or opened a window: "
+                    + "recorded \(offMain.recorded), added \(chosen), launched \(launched)")
+            }
+
+            tracking.pick = { menu in
+                menu.items.first { $0.title == L("Dock のメニューを表示") } ?? menu.items.first { $0.title == "Profile 1" }
+            }
+            guard await click("Fixture 1", down: .leftMouseDown, up: .leftMouseUp, modifiers: .control),
+                  await waitFor({ tracking.menus.count == 3 && chosen == [["Dock window"]] })
+            else {
+                return failures + ["Show Dock Menu after a Control-click didn't show the Dock menu or add the chosen "
+                    + "item's window: menus \(tracking.menus.map(describe)), chose \(dockChoices), added \(chosen)"]
+            }
+            let mirrored = ["Window A ✓", "-", "New Window", "Profiles (inert)", "Profile 1", "-",
+                            "Options ▸ Keep in Dock, Show in Finder", "-", "Quit", "Force Quit (⌥)"]
+            if describe(tracking.menus[2]) != mirrored {
+                failures.append("the Dock menu was mirrored as \(describe(tracking.menus[2])), not \(mirrored)")
+            }
+            if dockChoices.map(\.path) != [DockMenuPath(indices: [4], in: dockItems)]
+                || dockChoices.map(\.url) != [apps[0].url] {
+                failures.append("Show Dock Menu chose \(dockChoices) instead of Fixture 1's Profile 1")
+            }
+
+            dockChoices.removeAll()
+            tracking.pick = { menu in
+                menu.items.first { $0.title == L("Dock のメニューを表示") }
+                    ?? menu.items.first { $0.title == "Options" }?.submenu?.items.last
+            }
+            guard await click("Fixture 1", down: .rightMouseDown, up: .rightMouseUp, modifiers: []),
+                  await waitFor({ tracking.menus.count == 5 && !dockChoices.isEmpty })
+            else { return failures + ["choosing from the Dock menu's submenu did nothing: \(dockChoices)"] }
+            if dockChoices.map(\.path) != [DockMenuPath(indices: [6, 1], in: dockItems)] {
+                failures.append("choosing from the Dock menu's submenu chose \(dockChoices)")
+            }
+            for _ in 0 ..< 5 { await settle() }
+            if !launched.isEmpty { failures.append("a Control-click or Dock menu choice opened the app: \(launched)") }
+            if offMain.recorded.filter({ $0 == "read Dock menu" }).count != 2 {
+                failures.append("the Dock menu was read \(offMain.recorded) instead of once per Show Dock Menu")
+            }
+
+            tracking.pick = { $0.items.first }
+            guard await click("Fixture 2", down: .rightMouseDown, up: .rightMouseUp, modifiers: []),
+                  await waitFor({ tracking.menus.count == 6 && launched == [apps[1].url] })
+            else {
+                return failures + ["right-clicking an app that isn't running didn't offer to open it: "
+                    + "menus \(tracking.menus.map(describe)), launched \(launched)"]
+            }
+            if describe(tracking.menus[5]) != [L("開く"), L("Finderに表示")] {
+                failures.append("an app that isn't running or in the Dock showed \(describe(tracking.menus[5]))")
+            }
+
+            launched.removeAll()
+            guard await click("Fixture 3", down: .leftMouseDown, up: .leftMouseUp, modifiers: []),
+                  await waitFor({ launched == [apps[2].url] })
+            else { return failures + ["a plain click no longer opened the app: \(launched)"] }
+            if tracking.menus.count != 6 { failures.append("a plain click showed a menu") }
+            return failures
+        }
+        return failures + (await checkDockMenus())
     }
 
     @MainActor
@@ -445,9 +655,47 @@ enum TabLayoutSmoke {
             WindowCandidate(element: AXUIElementCreateApplication(pid_t(910_100 + $0)), application: .current,
                             title: "Glow \($0)")
         }
-        return checkHoverGlow(page, size: NSSize(width: 560, height: 380), items: ["Finder", "TextEdit"])
-            + checkHoverGlow(WindowChoiceGrid(windows: windows, previews: nil) { _ in false },
-                             size: NSSize(width: 560, height: 260), items: ["Glow 0", "Glow 1"])
+        let restore = L("%d件を復元", 0)
+        return checkToolbarHover()
+            + checkHoverGlow(page, size: NSSize(width: 560, height: 380),
+                             items: ["Finder", "TextEdit", L("一覧を更新"), L("アプリを複数選択")])
+            + checkHoverGlow(WindowChoiceGrid(windows: windows, previews: nil, restoring: []) { _ in false },
+                             size: NSSize(width: 560, height: 260), items: ["Glow 0", "Glow 1", restore],
+                             disabled: [restore])
+    }
+
+    @MainActor
+    private static func checkToolbarHover() -> [String] {
+        let frame = NSRect(x: 0, y: 0, width: 780, height: 150)
+        let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let chrome = WorkspaceChromeView(frame: frame)
+        window.contentView = chrome
+        chrome.setWorkspaceName("Hover workspace")
+        chrome.layoutSubtreeIfNeeded()
+        defer { window.close() }
+        func pixels(_ button: NSButton) -> Data? {
+            guard let bitmap = button.bitmapImageRepForCachingDisplay(in: button.bounds) else { return nil }
+            button.cacheDisplay(in: button.bounds, to: bitmap)
+            return bitmap.representation(using: .png, properties: [:])
+        }
+        var failures: [String] = []
+        for button in [chrome.addButton, chrome.workspaceButton, chrome.columnSelector, chrome.combineButton] {
+            guard let owner = button.trackingAreas.first(where: {
+                $0.options.contains([.mouseEnteredAndExited, .activeAlways, .inVisibleRect])
+                    && ($0.owner as? NSView)?.superview === button
+            })?.owner as? NSView else { return ["no hover tracking on \(button.title)"] }
+            let event = TabBarTrackingEvent()
+            owner.mouseExited(with: event)
+            guard let initial = pixels(button) else { return ["could not render \(button.title)"] }
+            owner.mouseEntered(with: event)
+            if (pixels(button) != initial) != button.isEnabled {
+                failures.append("hover did not respect enabled state on \(button.title)")
+            }
+            owner.mouseExited(with: event)
+            if pixels(button) != initial { failures.append("leaving \(button.title) did not restore its appearance") }
+        }
+        return failures
     }
 
     @MainActor
@@ -666,9 +914,22 @@ enum TabLayoutSmoke {
             }
         }
         items[1] = WorkspaceTabItem(id: items[1].id, title: "Renamed notes", icon: icon, selected: false)
+        items[0].shortcutNumber = 1
+        items[2].shortcutNumber = 9
         chrome.updateTabs(items)
         if !tabs[1].select.title.isEmpty || tabs[1].select.accessibilityLabel() != "Renamed notes" {
             failures.append("updating an icon-only tab showed its title or kept its old name")
+        }
+        if tabs[0].select.shortcutNumberBadge?.number != 1
+            || tabs[2].select.shortcutNumberBadge?.number != 9
+            || (tabs[0].select.cell as? WorkspaceTabButtonCell)?.trailingInset == 0
+        {
+            failures.append("Control+Shift shortcut numbers were not shown on their tabs")
+        }
+        items[0].shortcutNumber = nil
+        chrome.updateTabs(items)
+        if tabs[0].select.shortcutNumberBadge?.isHidden != true {
+            failures.append("shortcut number stayed visible after the modifier hint was dismissed")
         }
         chrome.setTabBarPosition(.left)
         layout()
@@ -682,6 +943,159 @@ enum TabLayoutSmoke {
         if tabs[0].select.title != items[0].title || tabs[2].select.image != nil
             || abs(tabs[0].view.frame.width - titledWidth) > 1 {
             failures.append("turning icon-only tabs off did not restore titles and widths")
+        }
+        return failures
+    }
+
+    /// The compact tab bar trims the tabs and hides the workspace name; its other controls wait behind a handle at
+    /// the end of the bar and cover the tabs only while the handle or they are hovered.
+    @MainActor
+    private static func checkCompactTabBar() -> [String] {
+        let host = WorkspaceWindow(contentRect: NSRect(x: 100, y: 100, width: 930, height: 600),
+                                   styleMask: .borderless, backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        let chrome = WorkspaceChromeView(frame: .zero)
+        host.contentView = chrome
+        chrome.setWorkspaceName("Workspace")
+        host.orderBack(nil)
+        defer {
+            chrome.compactTabBar = false
+            chrome.setAutoHideTabBar(false)
+            host.close()
+        }
+        func layout() {
+            chrome.layoutSubtreeIfNeeded()
+            chrome.tabs.window?.contentView?.layoutSubtreeIfNeeded()
+        }
+        func center(_ view: NSView) -> NSPoint {
+            let frame = view.window!.convertToScreen(view.convert(view.bounds, to: nil))
+            return NSPoint(x: frame.midX, y: frame.midY)
+        }
+        let items = (0 ..< 12).map {
+            WorkspaceTabItem(id: UUID(), title: "Document \($0) with a long title", selected: $0 == 0)
+        }
+        let tabs = chrome.setTabs(items)
+        layout()
+        let regularTab = tabs[0].view.frame
+        let regularPadding = regularTab.width - tabs[0].select.frame.width
+        let regularViewport = chrome.tabs.visibleRect.width
+        var failures: [String] = []
+
+        chrome.compactTabBar = true
+        layout()
+        let tucked: [NSView] = [
+            chrome.workspaceButton, chrome.workspaceMenuButton, chrome.combineButton, chrome.columnSelector,
+            chrome.rowSelector, chrome.permissionButton,
+        ]
+        if tucked.contains(where: { !$0.isHiddenOrHasHiddenAncestor }) {
+            failures.append("compact tab bar still showed the workspace name or the controls after the tabs")
+        }
+        if chrome.addButton.isHiddenOrHasHiddenAncestor { failures.append("compact tab bar hid the + button") }
+        let compactTab = tabs[0].view.frame
+        let compactPadding = compactTab.width - tabs[0].select.frame.width
+        if compactTab.height >= regularTab.height || compactPadding >= regularPadding {
+            failures.append(
+                "compact tabs kept their size: height \(compactTab.height) (was \(regularTab.height)), padding \(compactPadding) (was \(regularPadding))")
+        }
+        if chrome.tabs.visibleRect.width <= regularViewport + 100 {
+            failures.append(
+                "compact tab bar did not give the tabs the name's and controls' room: \(chrome.tabs.visibleRect.width) (was \(regularViewport))")
+        }
+        guard let handle = chrome.compactControlsHandleScreenFrame else {
+            return failures + ["compact tab bar had no handle for its controls"]
+        }
+        if handle.maxX < host.frame.maxX - 8 {
+            failures.append("compact tab bar handle was not at the end of the bar: \(handle) in \(host.frame)")
+        }
+        let tabFrames = tabs.map(\.view.frame)
+        chrome.updateCompactControlsHover(at: NSPoint(x: handle.midX, y: handle.midY))
+        layout()
+        if !chrome.compactControlsRevealed || chrome.columnSelector.isHiddenOrHasHiddenAncestor
+            || chrome.workspaceMenuButton.isHiddenOrHasHiddenAncestor {
+            failures.append("hovering the compact tab bar handle did not show its controls")
+        }
+        if let tray = chrome.compactControlsScreenFrame {
+            if tray.maxX > handle.minX || !host.frame.contains(tray) {
+                failures.append("compact tab bar controls were not beside the handle: \(tray), handle \(handle)")
+            }
+        } else {
+            failures.append("compact tab bar controls had no frame after hovering the handle")
+        }
+        if tabs.map(\.view.frame) != tabFrames {
+            failures.append("showing the compact tab bar controls moved the tabs")
+        }
+        let selectorPoint = chrome.convert(
+            chrome.convert(chrome.columnSelector.bounds, from: chrome.columnSelector), to: chrome.superview)
+        if let hit = chrome.hitTest(NSPoint(x: selectorPoint.midX, y: selectorPoint.midY)),
+           hit === chrome.columnSelector || hit.isDescendant(of: chrome.columnSelector) {
+        } else {
+            failures.append("the shown compact tab bar controls did not receive clicks above the tabs")
+        }
+        let start = Date()
+        chrome.updateCompactControlsHover(
+            at: center(chrome.columnSelector),
+            now: start.addingTimeInterval(WorkspaceChromeView.compactControlsHideDelay * 2))
+        let away = NSPoint(x: host.frame.minX + 20, y: host.frame.minY + 20)
+        chrome.updateCompactControlsHover(at: away, now: start)
+        if !chrome.compactControlsRevealed {
+            failures.append("compact tab bar controls hid while the pointer was on them or right after it left")
+        }
+        chrome.updateCompactControlsHover(
+            at: away, now: start.addingTimeInterval(WorkspaceChromeView.compactControlsHideDelay + 0.05))
+        if chrome.compactControlsRevealed || !chrome.columnSelector.isHiddenOrHasHiddenAncestor {
+            failures.append("compact tab bar controls stayed after the pointer left them")
+        }
+
+        chrome.setAutoHideTabBar(true)
+        chrome.setAutoHiddenToolbarVisible(true)
+        layout()
+        if let panel = chrome.autoHiddenToolbarPanel, let panelHandle = chrome.compactControlsHandleScreenFrame {
+            if !panel.frame.insetBy(dx: -1, dy: -1).contains(panelHandle) {
+                failures.append("auto-hidden compact tab bar put its handle outside the bar")
+            }
+            chrome.updateCompactControlsHover(at: NSPoint(x: panelHandle.midX, y: panelHandle.midY))
+            if !chrome.compactControlsRevealed {
+                failures.append("hovering the auto-hidden compact tab bar handle did not show its controls")
+            }
+            chrome.setAutoHiddenToolbarVisible(false)
+            if chrome.compactControlsRevealed {
+                failures.append("hiding the auto-hidden compact tab bar left its controls shown")
+            }
+        } else {
+            failures.append("auto-hidden compact tab bar had no handle")
+        }
+        chrome.setAutoHideTabBar(false)
+
+        chrome.setTabBarPosition(.left)
+        layout()
+        if let verticalHandle = chrome.compactControlsHandleScreenFrame {
+            chrome.updateCompactControlsHover(at: NSPoint(x: verticalHandle.midX, y: verticalHandle.midY))
+            layout()
+            if let tray = chrome.compactControlsScreenFrame, tray.minY >= verticalHandle.maxY,
+               host.frame.contains(tray) {
+            } else {
+                failures.append("vertical compact tab bar did not show its controls above the handle")
+            }
+            chrome.updateCompactControlsHover(at: away, now: Date().addingTimeInterval(-1))
+            chrome.updateCompactControlsHover(at: away)
+        } else {
+            failures.append("vertical compact tab bar had no handle")
+        }
+        chrome.setTabBarPosition(.top)
+
+        chrome.compactTabBar = false
+        layout()
+        if tucked.dropFirst(2)
+            .contains(where: { $0.isHiddenOrHasHiddenAncestor || $0.superview !== chrome.addButton.superview })
+            || chrome.workspaceButton.isHiddenOrHasHiddenAncestor || chrome.workspaceMenuButton.window != nil
+            || chrome.compactControlsHandleScreenFrame != nil {
+            failures.append("turning the compact tab bar off did not put the name and controls back in the bar")
+        }
+        if abs(tabs[0].view.frame.height - regularTab.height) > 0.5
+            || abs(tabs[0].view.frame.width - tabs[0].select.frame.width - regularPadding) > 0.5
+            || abs(chrome.tabs.visibleRect.width - regularViewport) > 1 {
+            failures.append(
+                "turning the compact tab bar off did not restore the tabs: \(tabs[0].view.frame), viewport \(chrome.tabs.visibleRect.width) (was \(regularTab), \(regularViewport))")
         }
         return failures
     }
@@ -895,7 +1309,8 @@ enum TabLayoutSmoke {
                 let failures = await checkLauncherGrid()
                 for failure in failures { fputs("FAIL: \(failure)\n", stderr) }
                 if failures.isEmpty {
-                    print("PASS: installed apps grid, launching one or several apps, and registering automatic adds")
+                    print("PASS: installed apps grid, launching one or several apps, registering automatic adds, "
+                        + "and Dock menus")
                 }
                 exit(failures.isEmpty ? 0 : 1)
             }
@@ -922,7 +1337,7 @@ enum TabLayoutSmoke {
         host.contentView = chrome
         chrome.workspaceButton.title = "Workspace"
         var failures = checkTabStripFeedback() + checkCloseSlotsAndWrapping() + checkIconOnlyTabs()
-            + checkAutoHiddenTabAppearance()
+            + checkCompactTabBar() + checkAutoHiddenTabAppearance()
 
         func settle() {
             for _ in 0 ..< 4 {
@@ -1084,6 +1499,60 @@ enum TabLayoutSmoke {
             }
         }
         chrome.closesWindowsOnRelease = false
+        chrome.clearTabs()
+        settle()
+        let pinID = UUID()
+        chrome.setTabs([
+            WorkspaceTabItem(
+                id: pinID, title: "Pin target", toolTip: nil, icon: nil, selected: false,
+                canPinTab: true),
+        ])
+        let pinButton = (chrome.tabs.arrangedSubviews[0] as! WorkspaceTabGroup).arrangedSubviews.first as! NSButton
+        pinButton.tag = 0
+        var pinRequest: (UUID, Bool)?
+        chrome.onSetTabPinned = { pinRequest = ($0, $1) }
+        let pinMenu = pinButton.menu(for: rightClick)
+        if let pin = pinMenu?.item(withTitle: L("タブを固定")), let action = pin.action {
+            NSApp.sendAction(action, to: pin.target, from: pin)
+        }
+        if pinRequest?.0 != pinID || pinRequest?.1 != true {
+            failures.append("tab context menu did not request pinning the selected tab")
+        }
+        if pinMenu?.items
+            .contains(where: { $0.submenu?.item(withTitle: "Control+Shift+Option+Command+3") != nil }) == true {
+            failures.append("a pinnable tab still offered per-tab number assignments")
+        }
+        chrome.setTabs([
+            WorkspaceTabItem(
+                id: UUID(), title: "Pane pin", toolTip: nil, icon: nil, selected: false, pinned: true),
+            WorkspaceTabItem(
+                id: UUID(), title: "Tab pin", toolTip: nil, icon: nil, selected: false, tabPinned: true),
+        ])
+        func pinIndicator(_ index: Int) -> NSImageView? {
+            (chrome.tabs.arrangedSubviews[index] as? WorkspaceTabGroup)?.subviews.compactMap { $0 as? NSImageView }
+                .first
+        }
+        let panePinIndicator = pinIndicator(0)
+        let tabPinIndicator = pinIndicator(1)
+        settle()
+        let paneTab = chrome.tabs.arrangedSubviews[0] as? WorkspaceTabGroup
+        let pinnedTab = chrome.tabs.arrangedSubviews[1] as? WorkspaceTabGroup
+        let pinnedSelect = pinnedTab?.arrangedSubviews.first as? NSButton
+        let pinnedClose = pinnedTab?.arrangedSubviews.dropFirst().first
+        if panePinIndicator?.isHidden != false
+            || panePinIndicator?.accessibilityLabel() != L("固定中")
+            || panePinIndicator?.contentTintColor?.isEqual(NSColor.controlAccentColor) != true
+            || tabPinIndicator?.isHidden != true
+            || pinnedClose?.isHidden != true
+            || pinnedSelect?.title != ""
+            || pinnedSelect?.image == nil
+            || (pinnedTab?.frame.width ?? .greatestFiniteMagnitude) >= (paneTab?.frame.width ?? 0)
+            || pinnedTab?.isTabPinned != true
+        {
+            failures.append("tab pin did not use a compact icon-only style distinct from pane pins")
+        }
+        chrome.clearTabs()
+        settle()
         let regularStageTop = chrome.stage.frame.maxY
         chrome.setAutoHideTabBar(true)
         settle()
@@ -1103,6 +1572,55 @@ enum TabLayoutSmoke {
         {
             failures.append(
                 "auto-hidden toolbar panel did not cover the workspace's top edge: \(String(describing: chrome.autoHiddenToolbarPanel?.frame)) host=\(host.frame)")
+        }
+        // Like the embedded tab bar, dragging empty space in the auto-hidden bar moves the workspace.
+        if let panel = chrome.autoHiddenToolbarPanel, let content = panel.contentView,
+           let screen = NSScreen.screens.first
+        {
+            let emptyPoint = stride(from: content.bounds.minX + 2, to: content.bounds.maxX, by: 4)
+                .map { NSPoint(x: $0, y: content.bounds.midY) }
+                .first { point in
+                    guard let hit = content.hitTest(point), hit !== content,
+                          !String(describing: type(of: hit)).contains("DragSpace")
+                    else { return false }
+                    var view: NSView? = hit
+                    while let current = view, current !== content {
+                        if current is NSControl { return false }
+                        view = current.superview
+                    }
+                    return true
+                }
+            let hostFrame = host.frame
+            if let emptyPoint,
+               let down = NSEvent.mouseEvent(
+                   with: .leftMouseDown, location: emptyPoint, modifierFlags: [],
+                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
+                   context: nil, eventNumber: 30, clickCount: 1, pressure: 1)
+            {
+                let start = panel.convertPoint(toScreen: emptyPoint)
+                let queued = [CGEventType.leftMouseDragged, .leftMouseUp].compactMap { type in
+                    CGEvent(
+                        mouseEventSource: nil, mouseType: type,
+                        mouseCursorPosition: CGPoint(x: start.x + 60, y: screen.frame.maxY - (start.y - 40)),
+                        mouseButton: .left)
+                        .flatMap { NSEvent(cgEvent: $0) }
+                }
+                queued.forEach { NSApp.postEvent($0, atStart: false) }
+                panel.sendEvent(down)
+                while NSApp.nextEvent(
+                    matching: [.leftMouseDragged, .leftMouseUp],
+                    until: Date(),
+                    inMode: .default,
+                    dequeue: true) != nil {}
+                if host.frame != hostFrame.offsetBy(dx: 60, dy: -40) {
+                    failures.append(
+                        "dragging empty space in the auto-hidden tab bar did not move the workspace: \(host.frame) from \(hostFrame)")
+                }
+                host.setFrame(hostFrame, display: false)
+                chrome.updateToolbarPanelFrame()
+            } else {
+                failures.append("could not find empty space in the auto-hidden tab bar to drag")
+            }
         }
         chrome.setAutoHideTabBar(false)
         settle()
@@ -1711,6 +2229,100 @@ enum TabLayoutSmoke {
         if autoHideController.isAutoHiddenToolbarVisible {
             failures.append("auto-hidden toolbar remained visible after leaving it")
         }
+        if let autoHideChrome = autoHideController.window.contentView as? WorkspaceChromeView {
+            let probe = MenuTrackingProbe()
+            func checkMenuKeepsToolbar(_ label: String, fallback: NSMenu?, open: () -> Void) {
+                let start = ProcessInfo.processInfo.systemUptime
+                autoHideController.updateAutoHiddenTabBar(at: revealPoint, now: start)
+                autoHideController.updateAutoHiddenTabBar(at: revealPoint, now: start + 0.1)
+                guard autoHideController.isAutoHiddenToolbarVisible else {
+                    failures.append("\(label): could not reveal the auto-hidden toolbar")
+                    return
+                }
+                var visibleWhileOpen = false
+                // Input from the person at the Mac can close a menu before the check runs; try once more.
+                let tracked = (0 ..< 2).contains { _ in
+                    probe.run(fallback: fallback, open: open) { menu in
+                        // AppKit reports a submenu opening and closing while the pointer passes over its item.
+                        for submenu in menu.items.compactMap(\.submenu) {
+                            submenu.delegate?.menuWillOpen?(submenu)
+                            submenu.delegate?.menuDidClose?(submenu)
+                        }
+                        let now = ProcessInfo.processInfo.systemUptime
+                        autoHideController.updateAutoHiddenTabBar(at: outsidePoint, now: now + 0.4)
+                        autoHideController.updateAutoHiddenTabBar(at: outsidePoint, now: now + 1.3)
+                        visibleWhileOpen = autoHideController.isAutoHiddenToolbarVisible
+                    }
+                }
+                if !tracked {
+                    failures.append("\(label): the menu did not open")
+                } else if !visibleWhileOpen {
+                    failures.append("\(label): the auto-hidden toolbar hid while its menu was still open")
+                }
+                let closed = ProcessInfo.processInfo.systemUptime
+                autoHideController.updateAutoHiddenTabBar(at: outsidePoint, now: closed + 0.4)
+                autoHideController.updateAutoHiddenTabBar(at: outsidePoint, now: closed + 1.3)
+                if autoHideController.isAutoHiddenToolbarVisible {
+                    failures.append("\(label): the auto-hidden toolbar stayed after its menu closed")
+                    autoHideChrome.hideAutoHiddenToolbar()
+                }
+            }
+            let workspaceMenu = autoHideChrome.workspaceMenu?()
+            checkMenuKeepsToolbar("workspace menu with a pane submenu", fallback: workspaceMenu) {
+                workspaceMenu?.popUp(
+                    positioning: nil, at: NSPoint(x: 0, y: autoHideChrome.workspaceButton.bounds.height),
+                    in: autoHideChrome.workspaceButton)
+            }
+            checkMenuKeepsToolbar("column selector", fallback: autoHideChrome.columnSelector.menu) {
+                autoHideChrome.columnSelector.performClick(nil)
+            }
+        } else {
+            failures.append("auto-hide smoke workspace has no tab bar")
+        }
+        if let screen = autoHideController.window.screen {
+            let frontController = WorkspaceController(name: "Menu bar front smoke")
+            defer {
+                frontController.quitting = true
+                frontController.window.orderOut(nil)
+            }
+            frontController.window.orderFrontRegardless()
+            let activation = WorkspaceActivation(controllers: { [frontController, autoHideController] })
+            let menuBarPoint = NSPoint(x: screen.frame.midX, y: screen.frame.maxY - 1)
+            activation.orderedWindows = { [frontController.window, autoHideController.window] }
+            if activation.menuBarRevealTarget(at: menuBarPoint, screens: [screen]) != nil {
+                failures.append("the menu bar revealed a workspace behind the front workspace on its display")
+            }
+            activation.orderedWindows = { [autoHideController.window, frontController.window] }
+            if activation.menuBarRevealTarget(at: menuBarPoint, screens: [screen]) !== autoHideController {
+                failures.append("the menu bar did not target the front auto-hidden workspace on its display")
+            }
+            let belowMenuBar = NSPoint(x: screen.frame.midX, y: screen.visibleFrame.maxY - 20)
+            if activation.menuBarRevealTarget(at: belowMenuBar, screens: [screen]) != nil {
+                failures.append("a point below the menu bar targeted a workspace")
+            }
+            let menuStart = ProcessInfo.processInfo.systemUptime
+            autoHideController.updateAutoHiddenTabBar(at: menuBarPoint, now: menuStart)
+            autoHideController.updateAutoHiddenTabBar(at: menuBarPoint, now: menuStart + 0.1)
+            if autoHideController.isAutoHiddenToolbarVisible {
+                failures.append("the menu bar revealed the auto-hidden toolbar while the option was off")
+            }
+            autoHideController.updateAutoHiddenTabBar(at: menuBarPoint, hoveringMenuBar: true, now: menuStart + 0.2)
+            autoHideController.updateAutoHiddenTabBar(at: menuBarPoint, hoveringMenuBar: true, now: menuStart + 0.3)
+            if !autoHideController.isAutoHiddenToolbarVisible {
+                failures.append("hovering the menu bar did not reveal the auto-hidden toolbar")
+            }
+            autoHideController.updateAutoHiddenTabBar(at: belowMenuBar, now: menuStart + 0.5)
+            autoHideController.updateAutoHiddenTabBar(at: belowMenuBar, now: menuStart + 1.4)
+            if autoHideController.isAutoHiddenToolbarVisible {
+                failures.append("the toolbar revealed from the menu bar stayed visible after the pointer left")
+            }
+            autoHideController.setAutoHideTabs(false)
+            if activation.menuBarRevealTarget(at: menuBarPoint, screens: [screen]) != nil {
+                failures.append("the menu bar targeted a workspace whose tab bar is not hidden")
+            }
+        } else {
+            failures.append("auto-hide smoke workspace has no screen")
+        }
         autoHideController.window.orderOut(nil)
         failures += positionChecks()
         if failures.isEmpty {
@@ -1907,6 +2519,18 @@ enum TabLayoutSmoke {
             controller.window.orderOut(nil)
         } catch {
             failures.append("tab bar position persistence failed: \(error)")
+        }
+        chrome.clearTabs()
+        let sortableIDs = (0 ..< 3).map { _ in UUID() }
+        for id in sortableIDs {
+            chrome.appendTab(id: id, title: "Sortable", selected: false)
+        }
+        var reordered: [Int]?
+        chrome.onReorderTabs = { reordered = $0 }
+        if !chrome.reorderTab(sortableIDs[0], by: 1) || reordered != [1, 0, 2]
+            || chrome.reorderTab(sortableIDs[0], by: -1)
+        {
+            failures.append("wheel reordering did not request one adjacent tab move or respect an edge")
         }
         return failures
     }

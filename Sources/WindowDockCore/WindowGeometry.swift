@@ -21,10 +21,40 @@ public enum WindowGeometry {
             && abs(actual.width - requested.width) <= tolerance && abs(actual.height - requested.height) <= tolerance
     }
 
+    /// Whether an AppKit-coordinate point is on a screen's menu bar. While the menu bar is hidden, it reserves no
+    /// space, so only the top edge that reveals it counts.
+    public static func menuBarContains(_ point: CGPoint, screenFrame: CGRect, visibleFrame: CGRect) -> Bool {
+        let height = max(screenFrame.maxY - visibleFrame.maxY, 2)
+        return point.x >= screenFrame.minX && point.x < screenFrame.maxX
+            && point.y > screenFrame.maxY - height && point.y <= screenFrame.maxY
+    }
+
     public static func confirmedCoverage(for frame: CGRect, renderedFrames: [CGRect]) -> CGRect? {
         renderedFrames.map { frame.intersection($0) }
             .filter { !$0.isNull && !$0.isEmpty }
             .max { $0.width * $0.height < $1.width * $1.height }
+    }
+
+    /// Where a saved workspace frame reopens: on the screen it overlaps most, or the first one when its display is
+    /// gone, kept at least `minimumSize` and moved and shrunk to lie within that screen's visible frame.
+    public static func restoredFrame(_ saved: CGRect, visibleFrames: [CGRect], minimumSize: CGSize) -> CGRect? {
+        guard saved.width > 0, saved.height > 0,
+              [saved.minX, saved.minY, saved.width, saved.height].allSatisfy(\.isFinite)
+        else { return nil }
+        func overlap(_ visible: CGRect) -> CGFloat {
+            let shared = saved.intersection(visible)
+            return shared.isNull ? 0 : shared.width * shared.height
+        }
+        guard let best = visibleFrames.max(by: { overlap($0) < overlap($1) }) else { return nil }
+        let visible = overlap(best) > 0 ? best : visibleFrames[0]
+        let width = min(max(saved.width, minimumSize.width), visible.width)
+        let height = min(max(saved.height, minimumSize.height), visible.height)
+        return CGRect(
+            x: min(max(saved.minX, visible.minX), visible.maxX - width),
+            y: min(max(saved.minY, visible.minY), visible.maxY - height),
+            width: width,
+            height: height
+        )
     }
 
     /// Frames are ordered front-to-back among eligible workspaces, not all application windows.

@@ -9,6 +9,50 @@ final class WorkspaceWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
+    private static var mousePassThroughMonitors: [Any] = []
+
+    /// The window server treats a titled, resizable window as solid even where it is transparent, so it would take
+    /// scrolling, hovering and clicks from the pane windows shown through its apertures.
+    private var blocksTransparentMouseEvents: Bool { styleMask.isSuperset(of: [.titled, .resizable]) }
+
+    /// Lets mouse events reach the pane window beneath an aperture while the pointer is over it. The state never
+    /// changes while a button is down, so a drag keeps going to the window it started in.
+    func updateMousePassThrough(at screenPoint: NSPoint = NSEvent.mouseLocation) {
+        guard blocksTransparentMouseEvents, NSEvent.pressedMouseButtons == 0 else { return }
+        Self.monitorMousePassThrough()
+        let passes = (contentView as? WorkspaceBackgroundView)?.passesMouseEvents(at: screenPoint) == true
+        guard ignoresMouseEvents != passes else { return }
+        ignoresMouseEvents = passes
+        // The window server receives the change with the next Core Animation commit.
+        CATransaction.flush()
+    }
+
+    /// Pointer events go to whichever window is under the pointer, including other applications' windows while a
+    /// workspace ignores the mouse, so follow them all to notice the pointer entering or leaving an aperture.
+    private static func monitorMousePassThrough() {
+        guard mousePassThroughMonitors.isEmpty else { return }
+        let events: NSEvent.EventTypeMask = [
+            .mouseMoved, .mouseEntered, .mouseExited, .scrollWheel, .leftMouseUp, .rightMouseUp, .otherMouseUp,
+        ]
+        let update = {
+            MainActor.assumeIsolated {
+                let point = NSEvent.mouseLocation
+                for case let window as WorkspaceWindow in NSApp.windows {
+                    window.updateMousePassThrough(at: point)
+                }
+            }
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { _ in update() }) {
+            mousePassThroughMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: events, handler: { event in
+            update()
+            return event
+        }) {
+            mousePassThroughMonitors.append(local)
+        }
+    }
+
     override func sendEvent(_ event: NSEvent) {
         if !isMovable, event.type == .leftMouseDown,
            let workspace = contentView as? WorkspaceBackgroundView
@@ -93,7 +137,10 @@ final class WorkspaceWindow: NSWindow {
 }
 
 class WorkspaceBackgroundView: NSView {
-    var onFrameInteractionEnd: (() -> Void)?
+    /// Called when the user starts moving, resizing or maximizing the workspace with the mouse.
+    var onFrameInteractionBegin: (() -> Void)?
+    /// Called on release; false for a click on the auto-hidden tab bar that left the workspace where it was.
+    var onFrameInteractionEnd: ((_ handsFocusBack: Bool) -> Void)?
     weak var contentArea: NSView?
     weak var secondaryContentArea: NSView?
     var gridContentAreas: [NSView] = [] { didSet { needsDisplay = true } }
@@ -172,18 +219,21 @@ class WorkspaceBackgroundView: NSView {
     }
 
     func trackFrameChangeFromToolbar(with event: NSEvent) {
-        guard window is WorkspaceWindow,
+        guard let window = window as? WorkspaceWindow,
               let eventWindow = event.window
         else { return }
         let startMouse = eventWindow.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
-        trackFrameChange(with: event, edges: [], startMouse: startMouse)
+        // The revealed auto-hidden bar covers the workspace's edges there; they resize it as they do uncovered.
+        let edges = resizeEdges(at: convert(window.convertPoint(fromScreen: startMouse), from: nil))
+        trackFrameChange(with: event, edges: edges, startMouse: startMouse)
     }
 
     private func trackFrameChange(with event: NSEvent, edges: WorkspaceResizeEdges, startMouse: NSPoint) {
         guard let window = window as? WorkspaceWindow else { return }
+        onFrameInteractionBegin?()
         if edges.isEmpty, event.clickCount == 2 {
             window.toggleMaximize()
-            onFrameInteractionEnd?()
+            onFrameInteractionEnd?(true)
             return
         }
         let startFrame = window.frame
@@ -211,7 +261,7 @@ class WorkspaceBackgroundView: NSView {
             }
             window.setWorkspaceFrame(frame)
             if next.type == .leftMouseUp {
-                onFrameInteractionEnd?()
+                onFrameInteractionEnd?(event.window === window || window.frame != startFrame)
                 break
             }
         }
@@ -231,12 +281,31 @@ class WorkspaceBackgroundView: NSView {
         WorkspaceResize.edges(at: point, in: bounds)
     }
 
+    /// Whether the point shows a pane window through an aperture, away from the resize edges.
+    func passesMouseEvents(at screenPoint: NSPoint) -> Bool {
+        guard let window, window.isVisible, window.frame.contains(screenPoint) else { return false }
+        let point = convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        return resizeEdges(at: point).isEmpty && visibleContentRects.contains { $0.contains(point) }
+    }
+
+    // Reports pointer moves while the application is inactive, so entering an aperture lets the mouse through.
+    private lazy var pointerTracking = NSTrackingArea(
+        rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self,
+        userInfo: nil
+    )
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if !trackingAreas.contains(pointerTracking) { addTrackingArea(pointerTracking) }
+    }
+
     func refreshCoverage() {
         needsDisplay = true
         displayIfNeeded()
         CATransaction.flush()
         // The window server derives click-through from the window's opaque shape; refresh it whenever the apertures change.
         window?.invalidateShadow()
+        (window as? WorkspaceWindow)?.updateMousePassThrough()
     }
 
     func prepareForFrameChange(to frame: NSRect) {

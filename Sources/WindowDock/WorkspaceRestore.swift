@@ -18,19 +18,22 @@ enum WorkspaceRestore {
                     // A window can be claimed elsewhere while the user reviews the later workspaces.
                     let available = windows.filter { !controller.session.isClaimedElsewhere($0) }
                     // Match before adding: adding moves the windows away from their saved frames.
-                    let matches = saved.paneGroups == nil ? [:] : SavedLayout.matches(saved.windows, among: available)
+                    let matches = SavedLayout.matches(saved.windows, among: available)
                     if !available.isEmpty { controller.session.add(available) }
+                    controller.restoreTabPins(saved, windows: available, matches: matches)
                     controller.restorePaneGroups(saved, windows: available, matches: matches)
+                    controller.restoreSelectedWindow(saved, windows: available, matches: matches)
                 }
                 open.first?.controller.present()
                 return
             }
             let controller = makeWorkspace(saved.name)
+            controller.restoreFrame(saved)
             if let hidden = saved.autoHideTabs { controller.setAutoHideTabs(hidden) }
             // Restore the rules first so saving the workspace while later pages are open keeps them.
             controller.autoGroupBundleIDs = saved.autoGroupBundleIDs ?? []
             guard !saved.windows.isEmpty else {
-                // A workspace that only collects apps has no windows to ask about.
+                // A workspace with only collection rules has no windows to ask about.
                 chosen.append((controller, saved, []))
                 return next(remaining.dropFirst())
             }
