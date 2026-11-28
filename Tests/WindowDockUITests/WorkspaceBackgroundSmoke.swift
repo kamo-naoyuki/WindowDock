@@ -166,7 +166,7 @@ enum WorkspaceBackgroundSmoke {
                         + WindowSessionSmoke.runTabSelectionFeedbackChecks()
                         + WindowSessionSmoke.runNestedPaneUIChecks() + WindowSessionSmoke.runNestedPaneLimitChecks()
                         + WindowSessionSmoke.runNestedPaneMinimumChecks() + checkGridLayout() + checkTabMoveRouting()
-                        + checkPaneApertureEvents()
+                        + checkPaneApertureEvents() + checkApertureShadow()
             } else if dropOnly {
                 failures = WindowSessionSmoke.runExternalWindowDropChecks() + checkNativeWindowDrops()
             } else if shortcutOnly {
@@ -187,7 +187,7 @@ enum WorkspaceBackgroundSmoke {
                         .runChecks() + checkWindowPicker() + checkThumbnailSelection() + runChecks() +
                         checkCompactLayout()
                         + checkGridLayout() + checkTabMoveRouting() + checkNativeWindowDrops()
-                        + checkPaneApertureEvents()
+                        + checkPaneApertureEvents() + checkApertureShadow()
                         + checkAudioIndicatorLayout() + WindowSessionSmoke.runAudioIndicatorChecks()
                         + checkAudioPlaybackDetection()
             }
@@ -792,6 +792,85 @@ enum WorkspaceBackgroundSmoke {
             hit(edge, expected: host, label: "resize edge over an aperture")
         }
         return failures
+    }
+
+    /// A pane window behind the workspace shows through its aperture unshaded: the workspace's window shadow would
+    /// otherwise fall inside the aperture and gray the pane's edges.
+    private static func checkApertureShadow() -> [String] {
+        let host = WorkspaceWindow(
+            contentRect: NSRect(x: 160, y: 140, width: 1000, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        host.isOpaque = false
+        host.backgroundColor = .clear
+        host.titlebarAppearsTransparent = true
+        host.titleVisibility = .hidden
+        host.isMovable = false
+        host.level = .floating
+        let chrome = WorkspaceChromeView(frame: .zero)
+        host.contentView = chrome
+        let target = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
+        target.isReleasedWhenClosed = false
+        target.level = .floating
+        target.backgroundColor = .white
+        defer {
+            host.close()
+            target.close()
+        }
+        chrome.setGrid(.single, activeCell: 0)
+        chrome.layoutSubtreeIfNeeded()
+        chrome.showManagedWindows(true)
+        let area = chrome.gridAreas[0]
+        let pane = host.convertToScreen(area.convert(area.bounds, to: nil))
+        target.setFrame(pane, display: true)
+        chrome.presentFrames([0: target.frame])
+        // The pane window sits below the workspace, as a pane that is not selected does.
+        target.orderFrontRegardless()
+        host.orderFrontRegardless()
+        chrome.displayIfNeeded()
+        host.displayIfNeeded()
+        CATransaction.flush()
+        let deadline = Date().addingTimeInterval(1)
+        repeat {
+            if let event = NSApp.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+        } while Date() < deadline
+        let screenHeight = NSScreen.screens[0].frame.height
+        let capture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("windowdock-aperture-shadow-\(getpid()).png")
+        defer { try? FileManager.default.removeItem(at: capture) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = [
+            "-x", "-R",
+            "\(Int(pane.minX)),\(Int(screenHeight - pane.maxY)),\(Int(pane.width)),\(Int(pane.height))",
+            capture.path,
+        ]
+        guard (try? process.run()) != nil else { return ["aperture shadow: screencapture did not start"] }
+        process.waitUntilExit()
+        guard let data = try? Data(contentsOf: capture), let bitmap = NSBitmapImageRep(data: data) else {
+            return ["aperture shadow: no screen capture (Screen Recording permission?)"]
+        }
+        let scale = CGFloat(bitmap.pixelsWide) / pane.width
+        func brightness(_ x: CGFloat, _ y: CGFloat) -> CGFloat {
+            guard let color = bitmap.colorAt(x: Int(x * scale), y: Int(y * scale))?.usingColorSpace(.sRGB) else {
+                return 0
+            }
+            return min(color.redComponent, color.greenComponent, color.blueComponent)
+        }
+        // Points just inside the aperture's edges, top-left origin, away from the corners.
+        let inset: CGFloat = 6
+        let samples = [
+            ("top", pane.width / 2, inset), ("bottom", pane.width / 2, pane.height - inset),
+            ("left", inset, pane.height / 2), ("right", pane.width - inset, pane.height / 2),
+        ]
+        return samples.compactMap { label, x, y in
+            let value = brightness(x, y)
+            return value < 0.97 ? "aperture shadow: \(label) edge of a pane behind the workspace is \(value), not white"
+                : nil
+        }
     }
 
     @MainActor

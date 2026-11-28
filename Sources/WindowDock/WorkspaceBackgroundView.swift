@@ -9,6 +9,15 @@ final class WorkspaceWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
+    override init(
+        contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType,
+        defer flag: Bool
+    ) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        // The window server shades along the inside of the apertures too, graying the pane windows shown through them.
+        hasShadow = false
+    }
+
     private static var mousePassThroughMonitors: [Any] = []
 
     /// The window server treats a titled, resizable window as solid even where it is transparent, so it would take
